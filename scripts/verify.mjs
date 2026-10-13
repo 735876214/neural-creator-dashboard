@@ -80,13 +80,13 @@ try {
 }
 
 console.log('当前数据');
-const index = readFileSync(join(ROOT, 'src/data/index.js'), 'utf8');
-const source = (index.match(/from '\.\/([^']+)'/) || [])[1];
-if (!source || !existsSync(join(ROOT, 'src/data', source))) fail(`src/data/index.js 指向的文件不存在：${source}`);
-else {
+// src/data/index.js 的结构是「有 my-data.local.js 就用它，否则用 sample.js」，这里复核实际生效的那一份。
+const hasLocal = existsSync(join(ROOT, 'src/data/my-data.local.js'));
+const source = hasLocal ? 'my-data.local.js' : 'sample.js';
+{
   const errs = check(await import(pathToFileURL(join(ROOT, 'src/data', source)).href), source);
   if (errs.length) errs.forEach(e => fail(`${source}：${e}`));
-  else ok(`src/data/${source} 结构正确`);
+  else ok(`src/data/${source} 结构正确${hasLocal ? '（本机导入数据，不入库）' : '（虚构示例，未发现本机数据）'}`);
 }
 
 // 3. 核心动效：星核、五簇星团与活着的星穹背景是这个看板的核心，不能被删掉或改成静态

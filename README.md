@@ -80,13 +80,13 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 - 作品数据写在 frontmatter 里，中英文字段都认（`观看/views`、`收藏/saves`、`点赞/likes`、`发布时间/date`、`类型/media`……），支持「1.2万」「12.4%」这类写法。
 - 正文的 `[[双链]]` 自动连线；同一个话题标签出现在两条以上内容里，会成为「概念」节点。
 - 格式参考 `examples/vault/`，可以先 `npm run import -- --vault examples/vault` 试试。
-- 导入结果写到 `src/data/my-data.js`（已在 `.gitignore`，不会被提交）；`npm run import -- --reset` 切回示例数据；`npm run import -- --help` 查看全部选项。
+- 导入结果写到 `src/data/my-data.local.js`（已在 `.gitignore`，不会被提交，看板会自动优先读它；代码里不动任何被跟踪的文件）；`npm run import -- --reset` 删掉本机数据、切回示例；`npm run import -- --help` 查看全部选项。
 - 导入脚本只读你的笔记、不联网。
 
 ### 方式二：手动改数据
 
 1. **`src/config.js`**：品牌名、图谱中心的名字、头像（放进 `public/`）、页脚文字、本地存储的键名前缀。
-2. **`src/data/sample.js`**（或你自己的 `my-data.js`）：所有内容数据，字段如下。
+2. **`src/data/sample.js`**（或你自己的 `src/data/my-data.local.js`）：所有内容数据，字段如下。
 
 | 导出 | 内容 | 关键字段 |
 |---|---|---|
@@ -146,7 +146,7 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 npm run build
 ```
 
-公开部署前请运行 `npm run import -- --reset`，确认使用虚构示例。`.gitignore` 只阻止源码提交，不能阻止个人数据被打包进网页；导入私人笔记后的构建产物不可直接公开。
+公开部署前请运行 `npm run import -- --reset`（会删掉 `src/data/my-data.local.js`），并确认没有留下本机的 `src/config.local.js`。构建产物里打包的是构建当时生效的那份数据与配置：`.gitignore` 只阻止源码提交，不能阻止个人数据被打包进网页，导入私人笔记后的构建产物不可直接公开。
 
 `dist/` 是纯静态文件，可以放到任何静态托管（GitHub Pages、Vercel、Netlify、Cloudflare Pages 等）。构建使用相对路径，部署在子路径下也能正常加载。
 

@@ -13,7 +13,7 @@
 | `npm install` | 安装依赖（需要 Node.js 20.19+ 或 22.12+） |
 | `npm run dev` | 开发服务器，默认 http://127.0.0.1:5173/ |
 | `npm run build` | 构建静态文件到 `dist/` |
-| `npm run import -- --vault <笔记文件夹>` | 把 Markdown / Obsidian 笔记导入成 `src/data/my-data.js` 并切换过去；`--help` 查看选项，`--reset` 切回示例 |
+| `npm run import -- --vault <笔记文件夹>` | 把 Markdown / Obsidian 笔记导入成 `src/data/my-data.local.js`（在 `.gitignore` 里，不入库）；`--help` 查看选项，`--reset` 删除本机数据、切回示例 |
 | `npm run verify` | 校验 skill 格式、导入脚本和当前数据结构 |
 
 ## 结构
@@ -21,7 +21,7 @@
 - `index.html`：页面入口，加载 `src/neural/main.jsx`。
 - `src/neural/theme.js`、`neural.css` 顶部的 CSS 变量：配色（只有一套银灰配色）。
 - `src/config.js`：品牌、头像、页脚、localStorage 前缀。
-- `src/data/index.js`：数据入口，只有一行 `export * from './sample.js'` 或 `'./my-data.js'`。
+- `src/data/index.js`：数据入口。本机存在 `src/data/my-data.local.js` 时优先用它，否则用 `./sample.js`；改数据不用动这个文件。
 - `src/data/sample.js`：虚构示例数据，也是数据字段的权威说明。
 - `src/neural/graph.js`：图谱推导（目录归属、双链、选题来源、话题、概念提及、双向共振）、布局和本地检索。
 - `src/neural/Home.jsx`：光球、水母、触须场景与三层交互；`Analysis.jsx` 分析栏；`pages.jsx` 三个内页。
@@ -44,7 +44,7 @@
 - **发光的光球和五只水母是核心动效，不能删除、隐藏或改成静态图片。** 光球视频 `public/media/orb.mp4`、水母视频 `public/media/jellyfish.mp4`，逐帧动画在 `src/neural/Home.jsx` 的 `step()`。`npm run verify` 会检查它们还在。
 - 动画循环必须保持「先排下一帧、再在 try 里执行本帧」的写法，时间差 `dt` 不能为负：否则某一帧出错就会让光球和水母停在隐形状态（刷新后消失）。
 - 光球和水母的视频由 `paintVideo()` 逐帧画到 `<canvas class="vid">` 上显示，`<video class="vsrc">` 透明地留在原位负责播放。不要改回直接显示 `<video>`：有些内置 / 嵌入式浏览器解码正常却不合成视频画面，光球和水母会变成空白。
-- `src/data/my-data.js` 含用户个人笔记，已在 `.gitignore`；不要提交、不要写进示例或文档。
+- `src/data/my-data.local.js` 含用户个人笔记，已在 `.gitignore`；不要提交、不要写进示例或文档。
 - `src/data/sample.js` 与 `examples/vault/` 只能放虚构内容。
 - 不要加入联网请求、统计脚本或 AI 调用。
 - 保持「减少动态效果」支持（`prefers-reduced-motion`）和中英双语文案。

@@ -5,7 +5,12 @@ dist/
 .vite/
 
 # 导入的个人笔记数据，不要提交
+# my-data.local.js 是本机导入的真实数据；my-data.js 是 0.3.0 及更早版本用过的文件名，一并忽略
+src/data/my-data.local.js
 src/data/my-data.js
+
+# 本机个性化配置（品牌名、空间名等），不要提交
+src/config.local.js
 
 .env
 .env.*

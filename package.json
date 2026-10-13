@@ -1,7 +1,7 @@
 {
   "name": "neural-creator-dashboard",
-  "version": "0.3.0",
-  "description": "A neural-network style creator dashboard: an orb, swimming jellyfish modules and bidirectional links for your notes and works.",
+  "version": "0.3.1",
+  "description": "A neural-network style creator dashboard: a star core and five constellation clusters linking your notes and works.",
   "private": true,
   "type": "module",
   "license": "PolyForm-Noncommercial-1.0.0",

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// 把一个 Markdown 笔记文件夹（例如 Obsidian 仓库）转换成看板数据 src/data/my-data.js，并让看板改读它。
+// 把一个 Markdown 笔记文件夹（例如 Obsidian 仓库）转换成看板数据 src/data/my-data.local.js，看板会自动改读它。
 // 只用 Node 自带模块，不联网，不修改你的笔记。
+//
+// 生成的文件写在 .gitignore 里，不会被提交、也不会进发布包；代码里不动任何被跟踪的文件。
 //
 // 用法：
 //   node scripts/import-notes.mjs --vault <笔记文件夹> [选项]
-//   node scripts/import-notes.mjs --reset            # 切回示例数据
+//   node scripts/import-notes.mjs --reset            # 删掉本机数据，切回示例数据
 //
 // 选项：
 //   --works <文件夹>     作品所在文件夹（相对 vault，可多次传）；不传时按文件夹名自动识别
@@ -17,14 +19,13 @@
 //   --max-works <数字>   最多导入多少篇作品（默认 30，按日期取最新）
 //   --max-notes <数字>   最多导入多少篇方法笔记（默认 40）
 //   --out <文件>         输出到指定文件，且不切换看板数据（用于测试）
-import {readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync} from 'node:fs';
+import {readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync, rmSync} from 'node:fs';
 import {join, relative, resolve, dirname, basename, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DATA = join(ROOT, 'src/data');
-const INDEX = join(DATA, 'index.js');
-const indexFor = file => `// 看板读取的数据入口。默认使用虚构示例；运行 \`npm run import -- --vault <笔记文件夹>\` 后会切换到 my-data.js。\nexport * from './${file}';\n`;
+const LOCAL = join(DATA, 'my-data.local.js');
 
 // —— 参数 ——
 const args = process.argv.slice(2);
@@ -44,7 +45,7 @@ for (let i = 0; i < args.length; i++) {
   else { console.error(`未知参数：${a}（用 --help 查看用法）`); process.exit(1); }
 }
 if (opt.help) { console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 20).map(l => l.replace(/^\/\/ ?/, '')).join('\n')); process.exit(0); }
-if (opt.reset) { writeFileSync(INDEX, indexFor('sample.js')); console.log('已切回示例数据（src/data/sample.js）。'); process.exit(0); }
+if (opt.reset) { rmSync(LOCAL, {force: true}); console.log('已删除 src/data/my-data.local.js，看板回到虚构示例数据（src/data/sample.js）。'); process.exit(0); }
 if (!opt.vault || !existsSync(opt.vault) || !statSync(opt.vault).isDirectory()) { console.error('请用 --vault 指定一个存在的笔记文件夹。'); process.exit(1); }
 const VAULT = resolve(opt.vault);
 const maxWorks = opt.maxWorks || 30, maxNotes = opt.maxNotes || 40;
@@ -209,12 +210,11 @@ export const seedDrafts = ${J(drafts)};
 
 export const concepts = ${J(concepts)};
 `;
-const target = opt.out ? resolve(opt.out) : join(DATA, 'my-data.js');
+const target = opt.out ? resolve(opt.out) : LOCAL;
 mkdirSync(dirname(target), {recursive: true});
 writeFileSync(target, out);
-if (!opt.out) writeFileSync(INDEX, indexFor('my-data.js'));
 
 console.log(`导入完成：作品 ${works.length}、方法笔记 ${notes.length}、选题 ${ideas.length}、草稿 ${drafts.length}、概念词 ${concepts.length}`);
-console.log(`输出：${relative(process.cwd(), target) || target}${opt.out ? '' : '（看板已切换到这份数据）'}`);
+console.log(`输出：${relative(process.cwd(), target) || target}${opt.out ? '' : '（看板下次启动会优先读这份数据）'}`);
 if (!concepts.length) console.log('提示：没有生成概念词（需要同一个话题标签出现在至少两条笔记里），可以手动编辑输出文件末尾的 concepts。');
 if (bucket.works.length > maxWorks) console.log(`提示：作品共 ${bucket.works.length} 篇，只取了最新的 ${maxWorks} 篇（--max-works 可调整）。`);
