@@ -1,15 +1,15 @@
 ---
 name: neural-creator-dashboard
-description: 把用户的 Markdown / Obsidian 笔记和作品数据做成「创作神经网络看板」网页——中心光球、五只发光水母模块、点开后触须伞状展开、右侧分析栏，银灰配色，纯前端本地运行。Use when the user wants a neural-network style creator or knowledge dashboard, wants to visualize Obsidian notes, works metrics and bidirectional links, or mentions neural-creator-dashboard.
+description: 把用户的 Markdown / Obsidian 笔记和作品数据做成「创作神经网络看板」网页——中心一颗发光的星核、五片由真实星座骨架绘制的模块星团、点开后星座线展开到每一篇内容、右侧分析栏，深空蓝紫底配金色星座线，全部画面由代码逐帧自绘、无图片视频素材，纯前端本地运行。Use when the user wants a neural-network style creator or knowledge dashboard, wants to visualize Obsidian notes, works metrics and bidirectional links, or mentions neural-creator-dashboard.
 license: PolyForm-Noncommercial-1.0.0
 metadata:
   repository: https://github.com/36427042/neural-creator-dashboard
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # 创作神经网络看板 · Neural Creator Dashboard
 
-帮用户得到一个属于自己的「创作神经网络看板」：首页是一颗光球和五只代表模块（作品库、概念网络、方法库、选题池、创作台）的发光水母；点开水母，触须伞状展开到每一篇内容；点开一篇，右侧弹出它的数据、出链 / 反链 / 双向共振和二度关联。看板是 React + Vite 纯前端项目，不联网、不调用 AI。
+帮用户得到一个属于自己的「创作神经网络看板」：首页正中是一颗发光的星核，周围是五个代表模块（作品库、概念网络、方法库、选题池、创作台）的星团——每个星团都是一片用真实星座骨架绘制的星座（处女座、双鱼座、天蝎座、射手座、水瓶座）；点开星团，星座线展开到该模块的每一篇内容；点开一篇，右侧弹出它的数据、出链 / 反链 / 双向共振和二度关联。看板是 React + Vite 纯前端项目，不联网、不调用 AI。
 
 ## 使用许可
 
@@ -40,7 +40,7 @@ npm install
 npm run dev
 ```
 
-打开终端里显示的地址（默认 http://127.0.0.1:5173/ ）。确认首页出现光球和五只水母后，再进行下一步。仓库里的示例数据全部是虚构的。
+打开终端里显示的地址（默认 http://127.0.0.1:5173/ ）。确认首页出现星核和五片星座后，再进行下一步。仓库里的示例数据全部是虚构的。
 
 ### 3. 导入用户自己的笔记
 
@@ -62,7 +62,8 @@ npm run import -- --vault "<笔记文件夹>" --account "<账号名>" --follower
 
 - `src/config.js`：品牌名、图谱中心的名字、头像（放进 `public/`）、页脚文字。
 - `src/neural/theme.js` 与 `src/neural/neural.css` 顶部的 CSS 变量：配色。
-- `public/media/`：光球与水母视频，可以换成用户自己的素材（保持文件名，或同步修改 `theme.js` 里的路径）。
+- `src/neural/theme.js`：星核、五片星座、星座线与星穹背景的颜色参数，改这里整套观感一起变。
+- `src/neural/constellations.js`：五个模块各自对应的星座（真实星表的骨架与经典连线），想换星座就换这里的骨架表。星核、星团、星云全部由代码绘制，没有任何可替换的图片或视频素材。
 
 ### 5. 验证
 
@@ -71,7 +72,7 @@ npm run verify
 npm run build
 ```
 
-两条命令都应通过。再在浏览器里确认：首页有光球和五只水母；点「作品库」水母，触须伞状展开；点其中一篇，右侧弹出分析栏；浏览器控制台没有报错。
+两条命令都应通过。再在浏览器里确认：首页有星核和五片星座；点「作品库」星团，星座线展开到每一篇内容；点其中一篇，右侧弹出分析栏；浏览器控制台没有报错。
 
 ### 6. 部署（可选）
 
@@ -79,7 +80,7 @@ npm run build
 
 ## 注意
 
-- 发光的光球和五只水母是这个看板的核心动效，个性化时可以换视频素材或颜色，但不要删除、隐藏或改成静态图片；改完运行 `npm run verify` 确认核心动效检查通过。
+- 星核和五片星座是这个看板的核心动效，个性化时可以改配色或替换星座骨架，但不要删除、隐藏或改成静态图片；全部画面由代码绘制，不要再引入图片或视频素材（`public/` 里只剩头像）。改完运行 `npm run verify` 确认核心动效检查通过。
 - `src/data/my-data.local.js` 含用户的个人笔记，已写进 `.gitignore`。不要提交或公开部署它，除非用户明确要求。
 - 选题、草稿、目标只保存在浏览器 localStorage；换了数据但页面还显示旧的选题和草稿时，改 `src/config.js` 里的 `storagePrefix` 或清空该站点的 localStorage。
 - 不要往项目里加联网请求或 AI 调用；图谱分析是本地规则。
