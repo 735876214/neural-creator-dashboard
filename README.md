@@ -9,8 +9,7 @@
 下载统计来自 GitHub Release 附件的 `download_count`，累计范围为此仓库所有 Release 附件；不包含普通 `Code → Download ZIP`、`git clone`、`npx skills add` 或网盘转发。重复下载与维护者测试下载也可能计入，不等于人数或成功安装数，徽章可能有缓存延迟。当前只提供一个 ZIP 附件，后续统计时应区分不同附件，避免把校验文件下载当成软件安装数。
 
 
-> **使用许可：学习与非商业使用。** 当前授权政策为 [PolyForm Noncommercial 1.0.0](LICENSE)，不授予商业使用权限。商业使用需另行授权。这是源码公开项目，不是允许任意商业使用的开源许可。
-> **历史例外：** 0.1.0 曾以 MIT 发布，旧版已授出的权利不受影响，包括其中未变更的代码。详见 [授权说明](NOTICE.md)。
+> **使用许可：MIT 开源许可，免费使用。** 详见 [LICENSE](LICENSE)。
 
 把你的作品、笔记、选题和草稿，变成一张会呼吸的神经网络：中心是一颗星核，五簇发光的星团代表五个模块，点开星团，金色星座线像伞一样展开到每一篇内容；点开一篇，右侧弹出它的全部数据和双向链接。
 
@@ -165,14 +164,12 @@ npm run build
 3. **看一次效果，提一个具体意见**：比如「星核外围再柔和一点」「星团和右侧栏离太远了」，改了十几轮。
 4. **让 AI 自己打开浏览器检查**，确认效果对了再进入下一轮。
 
-## 来源与许可
+## 许可
 
-- 本项目基于**公开参考项目**改编：原项目 [luoluo-121/neural-creator-dashboard](https://github.com/luoluo-121/neural-creator-dashboard)。原署名与许可条款按 [NOTICE.md](NOTICE.md) 保留，`Required Notice` 原样保留在该文件中。
-- 本项目沿用上游的授权政策：[PolyForm Noncommercial 1.0.0](LICENSE)。允许学习、个人非商业使用及协议列明的其他非商业用途；商业使用需另行授权。
-- 0.1.0 曾以 MIT 发布，原声明保存在 [licenses/MIT-legacy.txt](licenses/MIT-legacy.txt)；本次变更不撤回此前已授出的权利。
+- 本项目采用 **MIT 开源许可**——可以自由使用、修改、分发（包括商业用途），详见 [LICENSE](LICENSE)。
 - 依赖（React、Vite 等）保持各自的许可与声明，本项目不改变它们的授权。
 - 示例数据全部虚构；用户导入的笔记不因导入而改变原有权利归属。
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE) · [授权范围、旧版 MIT 与第三方声明](NOTICE.md)
+[MIT](LICENSE)

@@ -4,7 +4,7 @@
   "description": "A neural-network style creator dashboard: a star core and five constellation clusters linking your notes and works.",
   "private": true,
   "type": "module",
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "license": "MIT",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
