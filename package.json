@@ -1,6 +1,6 @@
 {
   "name": "neural-creator-dashboard",
-  "version": "0.3.1",
+  "version": "0.6.3",
   "description": "A neural-network style creator dashboard: a star core and five constellation clusters linking your notes and works.",
   "private": true,
   "type": "module",

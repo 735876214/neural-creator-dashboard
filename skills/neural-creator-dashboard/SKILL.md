@@ -4,7 +4,7 @@ description: 把用户的 Markdown / Obsidian 笔记和作品数据做成「创�
 license: MIT
 metadata:
   repository: https://github.com/linye-ai/neural-creator-dashboard
-  version: "0.3.1"
+  version: "0.6.3"
 ---
 
 # 创作神经网络看板 · Neural Creator Dashboard
