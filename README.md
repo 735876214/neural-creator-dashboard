@@ -1,8 +1,8 @@
 # Neural Creator Dashboard · 创作神经网络看板
 
-[![Release 发布包下载次数](https://img.shields.io/github/downloads/36427042/neural-creator-dashboard/total?label=Release%20downloads)](https://github.com/36427042/neural-creator-dashboard/releases)
+[![Release 发布包下载次数](https://img.shields.io/github/downloads/linye-ai/neural-creator-dashboard/total?label=Release%20downloads)](https://github.com/linye-ai/neural-creator-dashboard/releases)
 
-**[下载最新版完整源码与 Skill 包 ZIP](https://github.com/36427042/neural-creator-dashboard/releases/latest/download/neural-creator-dashboard.zip)** · [查看版本与附件](https://github.com/36427042/neural-creator-dashboard/releases/latest)
+**[下载最新版完整源码与 Skill 包 ZIP](https://github.com/linye-ai/neural-creator-dashboard/releases/latest/download/neural-creator-dashboard.zip)** · [查看版本与附件](https://github.com/linye-ai/neural-creator-dashboard/releases/latest)
 
 下载后解压，进入 `neural-creator-dashboard` 文件夹，按下方「快速开始」安装依赖并运行。这是源码与 Skill 包，不是免安装的桌面软件。
 
@@ -33,7 +33,7 @@ Turn your works, notes, ideas and drafts into a living neural network — a star
 需要 Node.js 20.19+ 或 22.12+。
 
 ```bash
-git clone https://github.com/36427042/neural-creator-dashboard.git
+git clone https://github.com/linye-ai/neural-creator-dashboard.git
 cd neural-creator-dashboard
 npm install
 npm run dev
@@ -46,7 +46,7 @@ npm run dev
 仓库自带一个通用格式的 skill（`skills/neural-creator-dashboard/SKILL.md`），一条命令装到你电脑上的智能体：
 
 ```bash
-npx skills add 36427042/neural-creator-dashboard
+npx skills add linye-ai/neural-creator-dashboard
 ```
 
 装好后对智能体说：
@@ -66,7 +66,7 @@ npx skills add 36427042/neural-creator-dashboard
 
 不支持 skill 的智能体，直接对它说：
 
-> 克隆 https://github.com/36427042/neural-creator-dashboard ，按仓库里的 AGENTS.md 帮我装好，并导入我的笔记。
+> 克隆 https://github.com/linye-ai/neural-creator-dashboard ，按仓库里的 AGENTS.md 帮我装好，并导入我的笔记。
 
 ## 换成你自己的数据
 

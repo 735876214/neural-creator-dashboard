@@ -3,7 +3,7 @@ name: neural-creator-dashboard
 description: 把用户的 Markdown / Obsidian 笔记和作品数据做成「创作神经网络看板」网页——中心一颗发光的星核、五片由真实星座骨架绘制的模块星团、点开后星座线展开到每一篇内容、右侧分析栏，深空蓝紫底配金色星座线，全部画面由代码逐帧自绘、无图片视频素材，纯前端本地运行。Use when the user wants a neural-network style creator or knowledge dashboard, wants to visualize Obsidian notes, works metrics and bidirectional links, or mentions neural-creator-dashboard.
 license: PolyForm-Noncommercial-1.0.0
 metadata:
-  repository: https://github.com/36427042/neural-creator-dashboard
+  repository: https://github.com/linye-ai/neural-creator-dashboard
   version: "0.3.1"
 ---
 
@@ -27,7 +27,7 @@ metadata:
 把模板克隆到用户指定的位置（不要修改这个 skill 自己的文件夹）：
 
 ```bash
-git clone --depth 1 https://github.com/36427042/neural-creator-dashboard.git neural-dashboard
+git clone --depth 1 https://github.com/linye-ai/neural-creator-dashboard.git neural-dashboard
 cd neural-dashboard
 npm install
 ```
