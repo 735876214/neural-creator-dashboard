@@ -3,7 +3,7 @@ import {KINDS, CONTENT, MODULES, neighbors, latent, askGraph, LINK_KINDS, LINK_E
 import {Icon} from './icons';
 import {profileFor, bandsOf, outerCountOf} from './v41';
 import {isLive, getMeta, getFiles} from '../data/store';
-import {aiAnalyze, aiRelate, aiIdeas} from './sync';
+import {aiAnalyze, aiRelate, aiIdeas, aiModels, pickedModel, setPickedModel} from './sync';
 
 const fmt = (v, d = 0) => v == null || Number.isNaN(v) ? '—' : Number(v).toLocaleString('zh-CN', {minimumFractionDigits: d, maximumFractionDigits: d});
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -124,11 +124,25 @@ function AiPanel({graph, node, onGo, onToast}) {
   </section>;
 }
 
+function ModelPicker({models, value, onChange}) {
+  if (!models.length) return null; // 拉不到列表就隐藏，请求仍用服务端默认模型
+  return <select className="model-picker" value={value || ''} onChange={e => onChange(e.target.value || null)}
+    aria-label="选择 AI 模型" title="本次会话使用的 AI 模型">
+    <option value="">默认模型</option>
+    {models.map(m => <option key={m.id} value={m.id}>{m.name}{m.reasoning ? '（思考型）' : ''}</option>)}
+  </select>;
+}
+
 function AskBox({graph, node, onGo}) {
   const [q, setQ] = useState('');
   const [res, setRes] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [models, setModels] = useState([]);
+  const [model, setModel] = useState(pickedModel());
   const ai = isLive() && getMeta()?.ai?.enabled;
+  // 只在第一次挂 AI 时拉一次模型列表
+  useEffect(() => { if (ai) aiModels().then(setModels); }, [ai]);
+  const choose = id => { setModel(id); setPickedModel(id); };
   const submit = async e => {
     e.preventDefault();
     if (!q.trim() || busy) return;
@@ -162,6 +176,7 @@ function AskBox({graph, node, onGo}) {
       <input value={q} onChange={e => setQ(e.target.value)} placeholder={ai ? '问你的笔记库… Ask your notes (AI)' : '追问这条内容… Ask about this note'} aria-label="提问"/>
       <button aria-label="提交" disabled={busy}>{busy ? '…' : <Icon name="send" size={15}/>}</button>
     </form>
+    {ai && <div className="an-ask-model"><ModelPicker models={models} value={model} onChange={choose}/></div>}
     <div className="an-ask-foot"><span><Icon name="agent" size={13}/>{ai ? 'AI 问答' : '我的图谱'} <em>{ai ? 'AI Q&A' : 'My graph'}</em></span><span><Icon name="spark" size={13}/>{ai ? 'RAG + 引用' : '本地分析'} <em>{ai ? 'with citations' : 'Local analysis'}</em></span></div>
   </div>;
 }

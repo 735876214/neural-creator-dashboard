@@ -23,7 +23,8 @@ import {execFileSync} from 'node:child_process';
 import {readVault, parse} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
-import {aiEnabled, embedEnabled, aiInfo, analyzeNote, generateIdeas, answer, embed} from './ai.mjs';
+import {aiEnabled, embedEnabled, aiInfo, analyzeNote, generateIdeas, answer, embed, listModels, validModel, TASK_MODELS} from './ai.mjs';
+import {refreshNews, forceRefresh, startNewsCron, listNews} from './news.mjs';
 import {randomUUID} from 'node:crypto';
 
 const VAULT = resolve(process.env.VAULT_DIR || '');
@@ -34,7 +35,7 @@ const STATIC_DIR = process.env.STATIC_DIR ? resolve(process.env.STATIC_DIR) : nu
 const API_TOKEN = process.env.API_TOKEN || '';
 const VAULT_GIT = process.env.VAULT_GIT !== '0';
 const MAX_BODY = Number(process.env.MAX_BODY || 2 * 1024 * 1024);
-const KIND_DIR = {idea: '04-选题池', draft: '03-创作台', note: '05-方法库', post: '02-作品库'};
+const KIND_DIR = {idea: '04-选题池', draft: '03-创作台', note: '05-方法库', post: '02-作品库', news: '00-AI热点'};
 
 if (!process.env.VAULT_DIR) {
   console.error('请用 VAULT_DIR 指定笔记库目录，例如：VAULT_DIR=./examples/vault node server/index.mjs');
@@ -297,22 +298,33 @@ async function route(req, res, url) {
   // —— AI：未配 key 时全部 501，前端据此隐藏 AI 区块 ——
   if (p === '/api/ai/info' && req.method === 'GET') return json(res, 200, aiInfo());
 
-  if (p.startsWith('/api/ai/') && !aiEnabled() && p !== '/api/ai/info') return json(res, 501, {error: 'AI 未启用：服务端未配置 AI_API_KEY'});
+  if (p === '/api/ai/models' && req.method === 'GET') return json(res, 200, {models: await listModels(), taskModels: TASK_MODELS});
+
+  // 请求里带的 model 覆盖：白名单校验（只允许网关 /v1/models 里的 id），缺省用任务配置
+  async function pickModel(requested, task) {
+    if (!requested) return TASK_MODELS[task];
+    if (!aiEnabled()) return requested;
+    if (!await validModel(requested)) fail(400, `未知模型：${requested}（GET /api/ai/models 查看可用列表）`);
+    return requested;
+  }
+
+  if (p.startsWith('/api/ai/') && !aiEnabled() && p !== '/api/ai/info' && p !== '/api/ai/models') return json(res, 501, {error: 'AI 未启用：服务端未配置 AI_API_KEY'});
 
   // ① 打标签 + 摘要。body: {paths?: [...], dryRun?: bool}
   // 不传 paths 就处理全部方法笔记；按内容 hash 增量，没变过的跳过。
   if (p === '/api/ai/analyze' && req.method === 'POST') {
-    const {paths, dryRun} = await readBody(req);
+    const {paths, dryRun, model} = await readBody(req);
+    const useModel = await pickModel(model, 'analyze');
     const d = loadData(0);
     const targets = d.notes.filter(n => !paths?.length || paths.includes(n.rel));
     const cached = index.aiCache();
     const need = targets.filter(n => cached.get('note:' + n.id)?.hash !== hashOf(n.body));
-    if (dryRun) return json(res, 200, {total: targets.length, todo: need.length, skip: targets.length - need.length, dryRun: true});
+    if (dryRun) return json(res, 200, {total: targets.length, todo: need.length, skip: targets.length - need.length, dryRun: true, model: useModel});
     if (!need.length) return json(res, 200, {total: targets.length, done: 0, message: '全部笔记都分析过了'});
     const job = runJob('analyze', need.length, async progress => {
       const results = [];
       for (const n of need) {
-        const r = await analyzeNote(n.title, n.body);
+        const r = await analyzeNote(n.title, n.body, {model: useModel});
         index.putAi('note:' + n.id, hashOf(n.body), r.tags, r.summary);
         // 写回笔记的 frontmatter：tags = 已有 ∪ AI 生成（去重，AI 的排后面），summary = AI 生成。
         // 写前读原文拿 mtime 做乐观锁；笔记库是自己的，冲突时跳过并在结果里标注。
@@ -364,20 +376,22 @@ async function route(req, res, url) {
 
   // ③ 从笔记生成选题候选。body: {paths: [...]}（必填，用户在前端勾选笔记）
   if (p === '/api/ai/ideas' && req.method === 'POST') {
-    const {paths} = await readBody(req);
+    const {paths, model} = await readBody(req);
+    const useModel = await pickModel(model, 'ideas');
     if (!paths?.length) fail(400, '请先选择要用哪些笔记（paths）');
     const d = loadData(0);
     const notes = d.notes.filter(n => paths.includes(n.rel));
     if (!notes.length) fail(404, '选中的笔记不存在');
-    const candidates = await generateIdeas(notes);
-    return json(res, 200, {candidates});
+    const candidates = await generateIdeas(notes, {model: useModel});
+    return json(res, 200, {candidates, model: useModel});
   }
 
   // ④ 问答（RAG）：embedding + FTS 混合检索 → 拼上下文 → 回答（非流式，个人规模足够）。
   // body: {question}
   if (p === '/api/ai/ask' && req.method === 'POST') {
-    const {question} = await readBody(req);
+    const {question, model: reqModel} = await readBody(req);
     if (!question?.trim()) fail(400, '问题不能为空');
+    const useModel = await pickModel(reqModel, 'ask');
     const d = loadData(0);
     const hits = new Map();
     // 关键词召回：整句往往不是任何笔记的子串（FTS trigram 是子串匹配），
@@ -407,11 +421,22 @@ async function route(req, res, url) {
       } catch { /* 向量召回失败时靠关键词兜底 */ }
     }
     const contexts = [...hits.values()].slice(0, 8);
-    if (!contexts.length) return json(res, 200, {answer: '笔记库里没有找到相关内容。', refs: []});
-    const text = await answer(question, contexts);
+    if (!contexts.length) return json(res, 200, {answer: '笔记库里没有找到相关内容。', refs: [], model: useModel});
+    const text = await answer(question, contexts, {model: useModel});
     const byId = new Map([...d.works.map(w => ['post:' + w.post.id, w.rel]), ...d.notes.map(n => ['note:' + n.id, n.rel]), ...d.ideas.map(i => ['idea:' + i.id, i.rel]), ...d.drafts.map(x => ['draft:' + x.id, x.rel])]);
     const refs = contexts.map(c => ({id: c.id, title: c.title, path: byId.get(c.id) || null}));
-    return json(res, 200, {answer: text, refs});
+    return json(res, 200, {answer: text, refs, model: useModel});
+  }
+
+  // —— AI 热点（第六星座的数据）——
+  if (p === '/api/news' && req.method === 'GET') {
+    return json(res, 200, {days: listNews(index, Number(url.searchParams.get('limit') || 14))});
+  }
+  if (p === '/api/news/refresh' && req.method === 'POST') {
+    const {force} = await readBody(req).catch(() => ({}));
+    const fn = force ? forceRefresh : refreshNews;
+    const r = await fn(index, VAULT);
+    return json(res, 200, r || {message: '今天的热点日报已生成过'});
   }
 
   if (p.startsWith('/api/ai/jobs/') && req.method === 'GET') {
@@ -486,6 +511,11 @@ const server = createServer(async (req, res) => {
 // 启动时先把索引建好，第一次打开页面就不用等
 try { console.error(`[note-api] 索引 ${reindex()} 条，共 ${index.count()} 条`); }
 catch (e) { console.error('[note-api] 首次索引失败：', e.message); }
+
+// AI 热点日报的定时任务（NEWS_CRON=0 关闭）
+if (process.env.NEWS_CRON !== '0') {
+  startNewsCron(() => refreshNews(index, VAULT));
+}
 
 server.listen(PORT, HOST, () => {
   console.error(`[note-api] http://${HOST}:${PORT}  笔记库：${VAULT}${STATIC_DIR ? `  静态目录：${STATIC_DIR}` : ''}${API_TOKEN ? '  （已开启 token 鉴权）' : ''}`);

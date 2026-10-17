@@ -47,6 +47,10 @@ export function openIndex(file) {
       message TEXT, error TEXT, result TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS news(
+      date TEXT PRIMARY KEY, digest TEXT NOT NULL, topics TEXT NOT NULL,
+      items TEXT NOT NULL, model TEXT, created_at TEXT NOT NULL
+    );
   `);
   return new Index(db);
 }
@@ -125,6 +129,22 @@ class Index {
       out.push({id: r.note_id, hash: r.hash, vec: new Float32Array(r.vec.buffer, r.vec.byteOffset, r.dim)});
     }
     return out;
+  }
+
+  // —— AI 热点日报：date（YYYY-MM-DD）主键，一天一份 ——
+  getNews(date) {
+    const r = this.db.prepare('SELECT * FROM news WHERE date = ?').get(date);
+    if (!r) return null;
+    return {...r, topics: JSON.parse(r.topics), items: JSON.parse(r.items)};
+  }
+  putNews(date, {digest, topics, items, model}) {
+    this.db.prepare(`INSERT INTO news(date, digest, topics, items, model, created_at) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(date) DO UPDATE SET digest=excluded.digest, topics=excluded.topics, items=excluded.items, model=excluded.model, created_at=excluded.created_at`)
+      .run(date, digest, JSON.stringify(topics), JSON.stringify(items), model || null, now());
+  }
+  listNews(limit = 14) {
+    return this.db.prepare('SELECT date, digest, topics, model, created_at FROM news ORDER BY date DESC LIMIT ?').all(limit)
+      .map(r => ({...r, topics: JSON.parse(r.topics)}));
   }
 
   // —— 任务进度：AI 调用是秒级到几十秒级，不能同步阻塞 HTTP ——

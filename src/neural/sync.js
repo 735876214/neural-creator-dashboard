@@ -94,10 +94,29 @@ export async function createEntry(kind, {title, body, fm}) {
 }
 
 // —— AI 封装：返回原始 JSON，调用方负责轮询任务 ——
+
+// 用户在前端选的模型（localStorage 记住；AskBox 与 AI 面板共用）。
+export function pickedModel() {
+  try { return localStorage.getItem('ai-model') || null; } catch { return null; }
+}
+export function setPickedModel(id) {
+  try { id ? localStorage.setItem('ai-model', id) : localStorage.removeItem('ai-model'); } catch {}
+}
+
+// 可用模型列表（服务端从网关 /v1/models 拉的快照）。失败返回空数组，UI 据此隐藏下拉。
+export async function aiModels() {
+  try {
+    const res = await fetch('/api/ai/models');
+    if (!res.ok) return [];
+    const j = await res.json();
+    return j.models || [];
+  } catch { return []; }
+}
+
 export async function aiAnalyze(paths, dryRun = false) {
   const res = await fetch('/api/ai/analyze', {
     method: 'POST', headers: {'content-type': 'application/json'},
-    body: JSON.stringify({paths, dryRun})
+    body: JSON.stringify({paths, dryRun, model: pickedModel()})
   });
   if (!res.ok) throw new Error(`AI analyze：HTTP ${res.status}`);
   return res.json();
@@ -115,7 +134,7 @@ export async function aiRelate(threshold = 0.82) {
 export async function aiIdeas(paths) {
   const res = await fetch('/api/ai/ideas', {
     method: 'POST', headers: {'content-type': 'application/json'},
-    body: JSON.stringify({paths})
+    body: JSON.stringify({paths, model: pickedModel()})
   });
   if (!res.ok) throw new Error(`AI ideas：HTTP ${res.status}`);
   return res.json();

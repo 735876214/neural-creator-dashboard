@@ -17,6 +17,7 @@ export const KINDS = {
   draft: {label: '草稿', en: 'Draft', color: T.kinds.draft},
   concept: {label: '概念', en: 'Concept', color: T.kinds.concept},
   tag: {label: '话题', en: 'Topic', color: T.kinds.tag},
+  news: {label: 'AI 热点', en: 'AI news', color: T.kinds.news},
   ghost: {label: '未创建', en: 'Unresolved', color: T.kinds.ghost}
 };
 export const LINK_KINDS = {
@@ -40,13 +41,14 @@ const FOLDERS = [
   {id: 'f:methods', title: '方法库', path: '05-方法库 methods', angle: 0}
 ];
 
-// 首页围绕光球的五个模块；角度与图谱布局的目录锚点一致，背景网络会朝各自模块蔓延。
+// 首页围绕光球的六个模块；角度与图谱布局的目录锚点一致，背景网络会朝各自模块蔓延。
 export const MODULES = [
   {id: 'works', title: '作品库', en: 'Works', kind: 'post', folder: 'f:works', angle: 180, icon: 'works', page: 'library'},
   {id: 'concepts', title: '概念网络', en: 'Concepts', kind: 'concept', angle: -90, icon: 'concept'},
   {id: 'methods', title: '方法库', en: 'Methods', kind: 'note', folder: 'f:methods', angle: 0, icon: 'methods'},
   {id: 'ideas', title: '选题池', en: 'Ideas', kind: 'idea', folder: 'f:ideas', angle: 35, icon: 'idea', page: 'ideas'},
-  {id: 'drafts', title: '创作台', en: 'Drafts', kind: 'draft', folder: 'f:drafts', angle: 145, icon: 'draft', page: 'drafts'}
+  {id: 'drafts', title: '创作台', en: 'Drafts', kind: 'draft', folder: 'f:drafts', angle: 145, icon: 'draft', page: 'drafts'},
+  {id: 'news', title: 'AI 热点', en: 'AI Radar', kind: 'news', folder: 'f:00-AI热点', angle: -35, icon: 'news'}
 ];
 export const moduleOf = node => MODULES.find(m => m.kind === node?.kind) || null;
 
@@ -78,15 +80,16 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     link('f:works', 'post:' + p.id, 'contain');
   }
 
-  // 方法笔记与子目录。
+  // 方法笔记与子目录；AI 热点日报（kind: 'news'）挂在 00-AI热点 目录节点下。
   for (const n of notesRaw) {
     const parts = n.path.split('/');
-    const sub = parts[1];
+    const isNews = n.kind === 'news';
+    const sub = isNews ? parts[0] : parts[1];
     const subId = 'f:' + sub;
     add({id: subId, kind: 'folder', title: sub.replace(/^\d+-/, '').replace(/\s+[a-z-]+$/i, ''), path: parts.slice(0, 2).join('/'), level: 2});
-    link('f:methods', subId, 'contain');
-    const id = 'note:' + n.id;
-    add({id, kind: 'note', title: n.title, short: cleanTitle(n.title), path: n.path, folder: subId, partition: n.partition || 'knowledge', text: n.title + '\n' + n.body, body: n.body});
+    link(isNews ? 'f:00-AI热点' : 'f:methods', subId, 'contain');
+    const id = (isNews ? 'news:' : 'note:') + n.id;
+    add({id, kind: isNews ? 'news' : 'note', title: n.title, short: cleanTitle(n.title), path: n.path, folder: subId, partition: n.partition || 'knowledge', text: n.title + '\n' + n.body, body: n.body});
     link(subId, id, 'contain');
   }
 

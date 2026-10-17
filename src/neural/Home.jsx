@@ -82,9 +82,10 @@ function targets(L, t) {
     // 上避面包屑（下沿 ~130）、下避底部提示条（上沿 ~H-70），单卡高约 119，上下各留 ≥16 净空
     const colX = ox + 158, cardH = 119, topY = 150, botY = H - 73;
     const gap = clamp((Math.min(cy - topY, botY - cy) - cardH / 2) / 2, 122, 200);
+    const mid = (MODULES.length - 1) / 2;   // 5 模块 = 2（居中一格），6 模块 = 2.5
     MODULES.forEach((m, i) => {
       const sel = m.id === L.mod, k = slotOf(L.mod, m.id);
-      res.cluster[m.id] = {x: colX + (sel ? 16 : 0), y: cy + (k - 2) * gap + swim * 5 * Math.sin(t * .9 + i * 2), s: sel ? 300 : 220, o: sel ? 1 : .6};
+      res.cluster[m.id] = {x: colX + (sel ? 16 : 0), y: cy + (k - mid) * gap + swim * 5 * Math.sin(t * .9 + i * 2), s: sel ? 300 : 220, o: sel ? 1 : .6};
     });
     // 条目以右侧星系仪为基准排在它左边约 90px 处（条目最宽约 270px），星座线拉长、画面左右均衡；
     // 模块层和打开笔记后位置相同，右侧栏滑入时队列不跳动
@@ -97,10 +98,12 @@ function targets(L, t) {
   return res;
 }
 
-// 选中的模块排在列的正中间（第 2 格），其余模块按原顺序分列上下，星座线从中间向上下对称展开。
+// 选中的模块排在列的正中间，其余模块按原顺序分列上下，星座线从中间向上下对称展开。
+// 模块数量可变（5 或 6）：选中位 = (N-1)/2。
 function slotOf(selId, id) {
   const others = MODULES.filter(m => m.id !== selId).map(m => m.id);
-  const order = [others[0], others[1], selId, others[2], others[3]];
+  const mid = Math.floor(others.length / 2);
+  const order = [...others.slice(0, mid), selId, ...others.slice(mid)];
   const k = order.indexOf(id);
   return k < 0 ? MODULES.findIndex(m => m.id === id) : k;
 }

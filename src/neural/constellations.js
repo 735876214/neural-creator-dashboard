@@ -8,7 +8,7 @@
 //   · 星等只影响光晕/星芒大小，不连线 ——「哪颗亮」是真的；
 //   · 连线逐段照抄经典连线（射手座是整幅 25★/29 段），没有自创任何一段。
 //
-// 映射：知识笔记→天蝎 Sco · 概念→双鱼 Psc · 作品→处女 Vir · 选题→射手 Sgr · 草稿→水瓶 Aqr。
+// 映射：知识笔记→天蝎 Sco · 概念→双鱼 Psc · 作品→处女 Vir · 选题→射手 Sgr · 草稿→水瓶 Aqr · AI 热点→仙女 And。
 import {T} from './theme';
 import {rng, hex2rgb} from './Cosmos';
 
@@ -131,6 +131,32 @@ export const SPECS = {
       {ra: 355.4409, dec: -17.8165, mag: 4.82, n: 'A2'}
     ],
     edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7], [7, 8], [8, 9], [2, 10], [3, 11], [5, 12], [8, 13], [8, 14]]
+  },
+  // AI 热点 → 仙女座 Andromeda：连线照抄 d3-celestial constellations.lines.json 的 And 特征
+  //（17 个折点 / 5 段：W 外支 π-β-μ-ν、主线 δ-ε-ζ-η-λ-κ-ι、北支 γ-ξ-ο-θ-51、α 收尾），没有自创一段。
+  // 星等取自恒星命名亮星表（Hipparcos）。
+  news: {
+    zh: '仙女座', en: 'Andromeda', nodes: 10,
+    stars: [
+      {ra: 2.0969, dec: 29.0904, mag: 3.27, n: 'δ Delta'},
+      {ra: 9.832, dec: 30.861, mag: 4.40, n: 'ε Epsilon'},
+      {ra: 9.2202, dec: 33.7193, mag: 4.08, n: 'ζ Zeta'},
+      {ra: 9.6389, dec: 29.3118, mag: 4.42, n: 'η Eta'},
+      {ra: 11.8347, dec: 24.2672, mag: 3.82, n: 'λ Lambda'},
+      {ra: 17.433, dec: 35.6206, mag: 4.14, n: 'κ Kappa'},
+      {ra: 14.3017, dec: 23.4176, mag: 4.62, n: 'ι Iota'},
+      {ra: 30.9748, dec: 42.3297, mag: 2.26, n: 'γ Almach'},
+      {ra: 17.3755, dec: 47.2418, mag: 3.62, n: 'ο Omicron'},
+      {ra: 24.4982, dec: 48.6282, mag: 3.57, n: '51 And'},
+      {ra: 12.4535, dec: 41.0789, mag: 4.87, n: 'ξ Xi'},
+      {ra: -5.609, dec: 46.4582, mag: 2.05, n: 'β Mirach'},
+      {ra: -14.5197, dec: 42.326, mag: 3.87, n: 'μ Mu'},
+      {ra: 0.9943, dec: 29.0552, mag: 2.06, n: 'α Alpheratz'},
+      {ra: 14.1884, dec: 38.4993, mag: 4.34, n: 'π Pi'},
+      {ra: 17.433, dec: 35.6206, mag: 4.14, n: 'κ Kappa 2'},
+      {ra: -3.4915, dec: 46.4203, mag: 4.61, n: 'ν Nu'}
+    ],
+    edges: [[14, 11], [11, 12], [12, 16], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [2, 7], [7, 10], [10, 8], [8, 9], [13, 0], [7, 15]]
   }
 };
 
@@ -142,12 +168,14 @@ export const FIG = {
   works: {s: 130, fx: 150, fy: 88},
   methods: {s: 132, fx: 142, fy: 152},
   ideas: {s: 100, fx: 108, fy: 84},
-  drafts: {s: 118, fx: 118, fy: 84}
+  drafts: {s: 118, fx: 118, fy: 84},
+  news: {s: 112, fx: 130, fy: 120}
 };
 // 模块名（与图例同一套叫法）
 export const MODS = {
   works: ['作品', 'Works'], methods: ['知识笔记', 'Knowledge notes'],
-  ideas: ['选题', 'Idea'], drafts: ['草稿', 'Draft'], concepts: ['概念', 'Concept']
+  ideas: ['选题', 'Idea'], drafts: ['草稿', 'Draft'], concepts: ['概念', 'Concept'],
+  news: ['AI 热点', 'AI Radar']
 };
 // 设计基准：主视图里簇的「标准尺寸」——簇在屏幕上的尺寸为 size 时，图形按 size/288 缩放
 export const BASE = 288;

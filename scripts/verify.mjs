@@ -122,15 +122,15 @@ for (const [label, re] of sky) if (!new RegExp(re.source).test(cosmosSrc) && !ne
 if (/<video/.test(home) || /<video/.test(cosmosSrc)) fail('Home.jsx / Cosmos.jsx 不应再引用视频素材（reskin v0 已改为全代码自绘）');
 else ok('零视频素材：星核、星团、星云全部代码自绘');
 const modules = (graphSrc.match(/export const MODULES = \[([\s\S]*?)\n\];/) || [])[1] || '';
-if ((modules.match(/\{id: '/g) || []).length !== 5) fail('graph.js 的 MODULES 应为 5 个模块（5 个星团）');
-else ok('5 个模块 → 5 个星团');
+if ((modules.match(/\{id: '/g) || []).length !== 6) fail('graph.js 的 MODULES 应为 6 个模块（6 个星团）');
+else ok('6 个模块 → 6 个星团');
 
 // 3b. 五星座（v6.3）：五个模块 = 五个真实星座，图形来自真实星表，逐帧只做贴图 + 主星闪烁
 console.log('五星座（v6.3）');
 const consSrc = readFileSync(join(ROOT, 'src/neural/constellations.js'), 'utf8');
 const figs = [
   ['真实星座骨架表（d3-celestial · J2000 赤经赤纬）', /constellations\.lines\.json/],
-  ['五个模块的星座映射（天蝎/双鱼/处女/射手/水瓶）', /天蝎座[\s\S]*双鱼座[\s\S]*处女座[\s\S]*射手座[\s\S]*水瓶座/],
+  ['六个模块的星座映射（天蝎/双鱼/处女/射手/水瓶/仙女）', /天蝎座[\s\S]*双鱼座[\s\S]*处女座[\s\S]*射手座[\s\S]*水瓶座[\s\S]*仙女座/],
   ['经典连线（逐段照抄，不自创）', /edges: \[\[0, 1\]/],
   ['烘焙：整幅离屏渲染，逐帧只贴图', /export function baked\(/],
   ['命中区按骨架外沿多边形（不是 bbox）', /export function hitOf\(/]

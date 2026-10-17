@@ -12,6 +12,7 @@ export const T = {
     draft: '#a3caff',
     concept: '#eaf0ff',
     tag: '#98a4c6',
+    news: '#ffc3d2',
     ghost: '#5f6c96'
   },
   // 五个星团：色温各有微差（蓝紫 / 青白 / 冷蓝 / 淡金 / 青绿白）
@@ -20,7 +21,8 @@ export const T = {
     concepts: {color: '#e2eaff', warm: '#fff6e2', cool: '#9fb6e8'},
     methods: {color: '#a5dcff', warm: '#e2f4ff', cool: '#7aa8e8'},
     ideas: {color: '#ffd79a', warm: '#fff0cf', cool: '#e8b06a'},
-    drafts: {color: '#9ff0e0', warm: '#dcfff5', cool: '#6cc8c8'}
+    drafts: {color: '#9ff0e0', warm: '#dcfff5', cool: '#6cc8c8'},
+    news: {color: '#ffb0c8', warm: '#ffe2ec', cool: '#e87a9e'}
   },
   // 星座线：全部金色系（去掉白/蓝/绿杂色）。near 是簇内亮线，far 是跨簇暗线，flow 是流动光粒
   line: {core: '#e8c884', glow: '#b98f3c', dim: '#7d6a44', flow: '#fff2cd'},

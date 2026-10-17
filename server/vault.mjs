@@ -71,6 +71,10 @@ export const RULES = [
   ['ideas', /(选题|ideas?$|灵感)/i],
   ['methods', /(方法|methods?$|模板|templates?$|流程|workflow|知识|卡片|notes?$)/i]
 ];
+// AI 热点日报目录：只能作为兜底（放最后），避免「方法库」之类先匹配走。
+// 注：00-AI热点 由 RULES 之上的显式判断处理不了（新闻目录名不含上述词时），
+// 所以这里加一条——但顺序在 methods 之后，普通笔记优先。
+export const RULES_NEWS = ['news', /(AI热点|ai[ _-]?radar|ai[ _-]?news)/i];
 export const norm = p => p.split(/[\\/]/).filter(Boolean).join('/');
 
 // dirs：显式指定的文件夹（{works: [], methods: [], ideas: [], drafts: []}），优先于按文件夹名自动识别。
@@ -85,6 +89,8 @@ export function classify(rel, dirs, allAsNotes = false) {
     if ((d[kind] || []).length) continue;
     if (re.test(names[i])) return {kind, root: i + 1};
   }
+  // AI 热点目录：普通四类都没匹配到时，00-AI热点 下的文件按 news 处理
+  for (let i = 0; i < names.length; i++) if (RULES_NEWS[1].test(names[i])) return {kind: 'news', root: i + 1};
   return allAsNotes ? {kind: 'methods', root: 0} : null;
 }
 
@@ -99,7 +105,8 @@ export function readVault(opts = {}) {
   const dirs = {works: opts.works || [], methods: opts.methods || [], ideas: opts.ideas || [], drafts: opts.drafts || []};
   const maxWorks = opts.maxWorks || 30, maxNotes = opts.maxNotes || 40;
 
-  const bucket = {works: [], methods: [], ideas: [], drafts: []};
+  // news（AI 热点日报）与 methods 同一条通道进图谱，但保留自己的 kind
+  const bucket = {works: [], methods: [], ideas: [], drafts: [], news: []};
   for (const file of walk(vault)) {
     const rel = relative(vault, file), c = classify(rel, dirs, !!opts.allAsNotes);
     if (!c) continue;
@@ -131,7 +138,13 @@ export function readVault(opts = {}) {
   const notes = bucket.methods.slice(0, maxNotes).map((x, i) => {
     const parts = x.rel.split(sep);
     const sub = parts[x.root] && x.root < parts.length - 1 ? parts[x.root] : (parts[x.root - 1] || '笔记');
-    return {id: 'n' + (i + 1), title: x.title, path: `05-方法库 methods/${sub}/${parts[parts.length - 1]}`, body: clean(x.body), tags: tagsOf(x.fm, x.body), rel: norm(x.rel)};
+    return {id: 'n' + (i + 1), title: x.title, path: `05-方法库 methods/${sub}/${parts[parts.length - 1]}`, body: clean(x.body), tags: tagsOf(x.fm, x.body), rel: norm(x.rel), kind: 'note'};
+  });
+
+  // —— AI 热点日报（同一张 notes 表，kind 区分；目录是自己的 00-AI热点/）——
+  bucket.news.slice(0, 60).forEach((x, i) => {
+    const parts = x.rel.split(sep);
+    notes.push({id: 'news' + (i + 1), title: x.title, path: `${parts[0]}/${parts.slice(1).join('/') || x.title}`, body: clean(x.body), tags: tagsOf(x.fm, x.body), rel: norm(x.rel), kind: 'news'});
   });
 
   // —— 选题 ——
