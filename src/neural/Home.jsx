@@ -29,8 +29,9 @@ function moduleSummary(graph, m) {
     concepts: () => [fmt(items.reduce((s, n) => s + n.in, 0)), '提及', 'mentions'],
     methods: () => [graph.links.filter(l => l.kind === 'wiki').length, '双链', 'wikilinks'],
     ideas: () => [items.filter(n => n.idea.status !== '已转草稿').length, '待写', 'to write'],
-    drafts: () => [fmt(items.reduce((s, n) => s + (n.body || '').length, 0)), '字', 'chars']
-  }[m.id]();
+    drafts: () => [fmt(items.reduce((s, n) => s + (n.body || '').length, 0)), '字', 'chars'],
+    news: () => [items.length, '份日报', 'digests']
+  }[m.id]?.() || [items.length, '条', 'items'];
   return {count: items.length, sub};
 }
 

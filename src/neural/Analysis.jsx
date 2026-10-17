@@ -278,6 +278,16 @@ function analyze(graph, node) {
       insights: [...resonance, ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文还没有命中概念词，可以在创作台用 [[ ]] 链接笔记。', 'info']]
     };
   }
+  // news（AI 热点日报）：按内容型节点的通用面板展示
+  if (node.kind === 'news') {
+    return {
+      badge: ['AI 热点', 'AI news'], status: node.path,
+      action: ['阅读日报', 'Read digest', {type: 'read', id: node.id}],
+      metric: connectivity(),
+      tiles: [['outlink', d.out, '出链', 'Outgoing'], ['back', d.back, '反链', 'Backlinks'], ['link', d.both, '双向共振', 'Mutual'], ['file', (node.body || '').length, '字数', 'Chars']],
+      insights: [...resonance, ['关于这份数据', 'About', '每天由 AI 从公开 AI 动态 RSS 汇总生成，存在偏差可能，引用前请核对原文。', 'info']]
+    };
+  }
   // concept：概念按分区各有一份（同名两条），面板里按名字合并报数
   const groups = new Map();
   for (const n of graph.nodes) if (n.kind === 'concept') {
