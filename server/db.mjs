@@ -12,8 +12,11 @@ export const hashOf = text => createHash('sha256').update(String(text)).digest('
 export function openIndex(file) {
   if (file !== ':memory:') mkdirSync(dirname(file), {recursive: true});
   const db = new DatabaseSync(file);
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA synchronous = NORMAL');
+  // WAL 在 Docker Desktop 的 Windows/macOS 挂载卷（gRPC-FUSE/virtiofs）上会报 disk I/O error，
+  // 逐条降级：容器卷挂载时全部用默认值；裸机（本机裸进程 / Linux NAS）用 WAL + NORMAL。
+  for (const [pragma, alt] of [['PRAGMA journal_mode = WAL', 'PRAGMA journal_mode = DELETE'], ['PRAGMA synchronous = NORMAL', null]]) {
+    try { db.exec(pragma); } catch (e) { if (alt) try { db.exec(alt); } catch {} }
+  }
   db.exec('PRAGMA foreign_keys = ON');
   // 全文索引用 trigram 分词器：中文不需要 jieba 之类的原生依赖就能做子串检索。
   // 代价是查询词至少 3 个字符，短词由 search() 退回 LIKE。

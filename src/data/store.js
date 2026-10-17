@@ -6,7 +6,7 @@
 // 图谱、星核、五星座那些代码一行都不用改。
 //
 // 数据来源优先级：
-//   1. note-api 的 /api/data  —— NAS 模式，打开即最新（boot.js 负责取）
+//   1. note-api 的 /api/data  —— 部署模式，打开即最新（boot.js 负责取）
 //   2. src/data/my-data.local.js —— npm run import 生成的本机快照
 //   3. src/data/sample.js     —— 虚构示例
 import * as sample from './sample.js';

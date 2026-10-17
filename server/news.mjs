@@ -58,7 +58,7 @@ export async function digestNews(items, {model} = {}) {
   const out = await chat([
     {role: 'system', content: '你是 AI 行业动态的编辑。只输出被要求的内容。输出 JSON：{"digest":"200字以内的当日 AI 动态综述","topics":[{"name":"主题名","titles":["属于该主题的条目原文标题"]}]}'},
     {role: 'user', content: `把这些 AI 动态整理成日报：写一段综述（突出最重要的一两件事），再把条目归到 3-6 个主题里（每条只归一个主题，标题用原文）：\n\n${list.slice(0, 7000)}`}
-  ], {json: true, model: model || TASK_MODELS.news, temperature: 0.2, maxTokens: 2000});
+  ], {json: true, model: model || TASK_MODELS.news, temperature: 0.2, maxTokens: 6000});
   // 标题 → 原条目的链接；AI 抄标题可能抄得不完全一致，用「包含」匹配兜底
   const byTitle = items.map(it => ({t: it.title, link: it.link}));
   const linkOf = title => {
@@ -139,7 +139,7 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
   const out = await chat([
     {role: 'system', content: '你是创作者的选题策划。只输出被要求的内容。输出 JSON：{"ideas":[{"title":"…","platform":"小红书","priority":"高|中|低","note":"选题理由：为什么现在写、和创作者已有内容的关联、切入角度（80字内）","newsTitles":["依据的热点标题"]}]}'},
     {role: 'user', content: `这是创作者已有的内容方向：\n${myWorks.slice(0, 20).join('\n').slice(0, 5000)}\n\n这是今天的 AI 热点：\n${items.slice(0, 6000)}\n\n从热点里挑 3 个最适合这个创作者写的选题：必须能和 ta 已有内容方向接上，不要纯蹭热点；每个选题注明依据了哪几条热点。`}
-  ], {json: true, model: model || TASK_MODELS.news, temperature: 0.3, maxTokens: 2000});
+  ], {json: true, model: model || TASK_MODELS.news, temperature: 0.3, maxTokens: 6000});
   const {linkOf} = digestNewsLinks(news.items);
   const candidates = (out.ideas || []).slice(0, 5).map(i => ({
     title: String(i.title || '').slice(0, 80),

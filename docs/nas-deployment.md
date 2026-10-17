@@ -1,5 +1,7 @@
 # 在极空间 NAS 上部署：看板 + 笔记库 + AI
 
+> 本机开发不用这份文件：用 `deploy/docker-compose.dev.yml`（只起 note-api 容器）+ `npm run dev`，见 `deploy/` 目录头部注释。
+
 这套部署把你的 Obsidian 笔记库变成看板的数据源：看板在浏览器里打开就是最新内容，可以轻编辑（改动直接写回 `.md` 文件），AI 负责打标签、摘要、语义关联和问答。
 
 ```

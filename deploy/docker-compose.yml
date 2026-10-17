@@ -1,4 +1,4 @@
-# 极空间 NAS 部署：看板 + note-api + Syncthing + Tailscale
+# 部署版：看板 + note-api + Syncthing + Tailscale（本机开发用 docker-compose.dev.yml）
 #
 # 用法：
 #   1. 本机构建前端：npm run build
@@ -8,7 +8,9 @@
 # 首次使用前：复制 .env.example 为 .env 并填写 AI_API_KEY 等。
 services:
   note-api:
-    build: ../server
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
     container_name: neural-note-api
     restart: unless-stopped
     environment:

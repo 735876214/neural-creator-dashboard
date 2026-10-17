@@ -16,7 +16,7 @@ import './neural.css';
 // 选题、草稿与目标保存在当前浏览器（localStorage）；连着 note-api 时由 sync.js 落盘到 vault。
 //
 // 数据优先级（关键，防止旧缓存盖住 NAS 数据）：
-//   NAS 模式（boot.js 已把 /api/data 填进 store）—— 初始值永远用 NAS 数据；
+//   部署模式（boot.js 已把 /api/data 填进 store）—— 初始值永远用后端数据；
 //   localStorage 里的旧 seed 数据（此前用示例数据时存下的）不恢复，只在用户
 //   之后做出改动时按「本次会话的覆盖」缓存。否则浏览器里遗留的示例选题、
 //   示例草稿会永远盖住 NAS 上的真实文件（config.js 注释里提过的坑）。
@@ -104,7 +104,7 @@ function App() {
   const graph = useMemo(() => buildGraph({ideas, drafts: slowDrafts}), [ideas, slowDrafts]);
   const layout = useMemo(() => forceLayout(graph), [graph]);
 
-  // NAS 模式：草稿正文 / 标题改动 1.2s 后落盘到 vault（title 键只在文件里已有该键时才改，
+  // 部署模式：草稿正文 / 标题改动 1.2s 后落盘到 vault（title 键只在文件里已有该键时才改，
   // 文件名跟随标题的策略由服务端负责）。
   const saveTimer = useRef(null);
   const draftRel = useRef(null);
@@ -145,7 +145,7 @@ function App() {
     if (!editing.title.trim()) return;
     setIdeas(ideas.some(i => i.id === editing.id) ? ideas.map(i => i.id === editing.id ? editing : i) : [...ideas, editing]);
     setModal(null); setToast('选题已保存 · Idea saved');
-    // NAS 模式：选题落在 04-选题池/（已有文件就更新，没有就新建）
+    // 部署模式：选题落在 04-选题池/（已有文件就更新，没有就新建）
     if (meta) {
       const rel = files['idea:' + editing.id];
       const fm = {platform: editing.platform, priority: editing.priority, status: editing.status, note: editing.note};
@@ -284,7 +284,7 @@ function renderNewsBody(body) {
   });
 }
 
-// 方法笔记 / 作品的阅读弹窗。NAS 模式下提供「编辑正文」：拉原文 → textarea → 保存落盘。
+// 方法笔记 / 作品的阅读弹窗。部署模式下提供「编辑正文」：拉原文 → textarea → 保存落盘。
 function ReadModal({node, onClose, editable}) {
   const isNote = node.kind === 'note';
   const [editing, setEditing] = useState(false);
@@ -293,7 +293,7 @@ function ReadModal({node, onClose, editable}) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
-  // NAS 模式下拉服务器上的原文（带 mtime 做乐观锁）；本地模式直接用图谱里的 body。
+  // 部署模式下拉服务器上的原文（带 mtime 做乐观锁）；本地模式直接用图谱里的 body。
   useEffect(() => {
     if (!editing || !isNote) return;
     let on = true;

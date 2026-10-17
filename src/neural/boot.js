@@ -4,7 +4,7 @@
 // 之前就填进 store.js —— 那些模块在顶层就同步地把数据推导成图谱了。
 //
 // 取数策略分三种情况，避免静态部署时刷出一条没意义的报错：
-//   * 设了 VITE_API_BASE  —— 明确是 NAS 模式，取不到就提示（本来就应该取到）
+//   * 设了 VITE_API_BASE  —— 明确是部署模式，取不到就提示（本来就应该取到）
 //   * 没设               —— 先安静地试一下同源的 /api/data（开发时的 vite 代理走这条），
 //                          取不到就当纯静态站，直接用 my-data.local.js 或示例数据
 import {setApiData, setError} from '../data/store.js';

@@ -15,7 +15,7 @@ export const seedIdeas = data.seedIdeas;
 export const seedDrafts = data.seedDrafts;
 export const concepts = data.concepts;
 
-// —— 只有 NAS 模式（连着 note-api）才有的一层；纯静态构建时都是空的 ——
+// —— 只有部署模式（连着 note-api）才有的一层；纯静态构建时都是空的 ——
 // files：图谱节点 id → 文件相对路径，写回笔记时用它定位文件
 // figures：节点 id → 这篇笔记引用的附件，用于显示「N 张图」角标
 export const files = getFiles();

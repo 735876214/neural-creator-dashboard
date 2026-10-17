@@ -6,7 +6,7 @@
 
 创作神经网络看板：React 19 + Vite 7 的纯前端页面，把作品、方法笔记、选题、草稿推导成一张神经网络图谱。默认不联网、不调用 AI，用户数据只在本地。
 
-> **`nas` 分支例外**：NAS 部署模式（见 `docs/nas-deployment.md`）在此分支上引入了 note-api 服务（`server/`）与可选的 AI 能力（`server/ai.mjs`，OpenAI 兼容接口）。main 分支保持纯静态。`src/neural/boot.js` 先尝试 `fetch('/api/data')`，取不到就回退本地数据——纯静态构建的行为与 main 分支一致。AI key 只存在于服务端环境变量，绝不进前端 bundle。
+> **部署模式（deploy）**：项目有两种运行类型——部署（后端 note-api 读写 vault，见 `docs/nas-deployment.md` 与 `deploy/`）和开发（本机 `docker-compose.dev.yml` + `npm run dev`）。部署模式引入 note-api 服务（`server/`）与可选的 AI 能力（`server/ai.mjs`，OpenAI 兼容接口）。纯静态行为保留：`src/neural/boot.js` 先尝试 `fetch('/api/data')`，取不到就回退本地数据（示例或 `npm run import` 的快照）。AI key 只存在于服务端环境变量，绝不进前端 bundle。
 
 ## 命令
 
@@ -16,7 +16,7 @@
 | `npm run dev` | 开发服务器，默认 http://127.0.0.1:5173/ |
 | `npm run build` | 构建静态文件到 `dist/` |
 | `npm run import -- --vault <笔记文件夹>` | 把 Markdown / Obsidian 笔记导入成 `src/data/my-data.local.js`（在 `.gitignore` 里，不入库）；`--help` 查看选项，`--reset` 删除本机数据、切回示例 |
-| `npm run api` | 启动 note-api（读写 NAS 上的笔记库 + AI 编排），NAS 模式的后端；环境变量见 `server/index.mjs` 头注释 |
+| `npm run api` | 启动 note-api（读写笔记库 + AI 编排），部署模式的后端；环境变量见 `server/index.mjs` 头注释 |
 | `npm run verify` | 校验 skill 格式、导入脚本、当前数据结构与核心动效（星核、五片星座、零视频素材） |
 
 ## 结构
