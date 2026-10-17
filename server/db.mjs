@@ -49,7 +49,7 @@ export function openIndex(file) {
     );
     CREATE TABLE IF NOT EXISTS news(
       date TEXT PRIMARY KEY, digest TEXT NOT NULL, topics TEXT NOT NULL,
-      items TEXT NOT NULL, model TEXT, created_at TEXT NOT NULL
+      items TEXT NOT NULL, model TEXT, ideas_at TEXT, created_at TEXT NOT NULL
     );
   `);
   return new Index(db);
@@ -137,14 +137,14 @@ class Index {
     if (!r) return null;
     return {...r, topics: JSON.parse(r.topics), items: JSON.parse(r.items)};
   }
-  putNews(date, {digest, topics, items, model}) {
-    this.db.prepare(`INSERT INTO news(date, digest, topics, items, model, created_at) VALUES(?,?,?,?,?,?)
-      ON CONFLICT(date) DO UPDATE SET digest=excluded.digest, topics=excluded.topics, items=excluded.items, model=excluded.model, created_at=excluded.created_at`)
-      .run(date, digest, JSON.stringify(topics), JSON.stringify(items), model || null, now());
+  putNews(date, {digest, topics, items, model, ideasAt}) {
+    this.db.prepare(`INSERT INTO news(date, digest, topics, items, model, ideas_at, created_at) VALUES(?,?,?,?,?,?,?)
+      ON CONFLICT(date) DO UPDATE SET digest=excluded.digest, topics=excluded.topics, items=excluded.items, model=excluded.model, ideas_at=COALESCE(excluded.ideas_at, news.ideas_at), created_at=excluded.created_at`)
+      .run(date, digest, JSON.stringify(topics), JSON.stringify(items), model || null, ideasAt || null, now());
   }
-  listNews(limit = 14) {
-    return this.db.prepare('SELECT date, digest, topics, model, created_at FROM news ORDER BY date DESC LIMIT ?').all(limit)
-      .map(r => ({...r, topics: JSON.parse(r.topics)}));
+  listNews(limit = 14, withItems = false) {
+    return this.db.prepare(`SELECT date, digest, topics, model, ideas_at, created_at${withItems ? ', items' : ''} FROM news ORDER BY date DESC LIMIT ?`).all(limit)
+      .map(r => ({...r, topics: JSON.parse(r.topics), ideasAt: r.ideas_at || null, items: r.items ? JSON.parse(r.items) : undefined}));
   }
 
   // —— 任务进度：AI 调用是秒级到几十秒级，不能同步阻塞 HTTP ——

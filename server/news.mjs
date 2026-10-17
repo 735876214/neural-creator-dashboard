@@ -128,7 +128,7 @@ export function listNews(index, limit = 14) { return index.listNews(limit); }
 // 让它只挑「和我内容方向相关、能落地」的热点，而不是泛泛的热点榜。
 // 返回 {candidates, written}：candidates 是给前端预览的；written 是已直接落盘的（auto 模式）。
 export async function ideasFromNews(index, vaultDir, {model, auto = false, io = {}} = {}) {
-  const news = index.listNews(1)[0];
+  const news = index.listNews(1, true)[0];
   if (!news) throw new Error('还没有热点日报：先 POST /api/news/refresh 生成一份');
   const myWorks = [];
   const data = index.allNotes(true);
@@ -150,12 +150,17 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
     newsLinks: (i.newsTitles || []).map(linkOf).filter(Boolean)
   })).filter(i => i.title);
   if (!auto || !candidates.length) return {candidates, written: []};
-  // auto：直接落盘进 04-选题池（复用 createNote 的固定模板，文件名即标题）
+  // auto：直接落盘进 04-选题池（复用 createNote 的固定模板，文件名即标题）。
+  // 防重：当天已自动落过（news 表记了 ideasAt）就不再落——否则每次手动触发都会攒一堆新题。
   const createNote = io.createNote;
   const written = [];
+  if (news.ideasAt) return {candidates, written, skipped: '今天的选题已自动落盘过'};
   for (const c of candidates) {
     const r = createNote('idea', {title: c.title, body: c.note, fm: {platform: c.platform, priority: c.priority, status: '待写', note: c.note}});
     written.push({...c, path: r.path});
+  }
+  if (written.length) {
+    index.putNews(news.date, {...news, ideasAt: new Date().toISOString()});
   }
   return {candidates, written};
 }

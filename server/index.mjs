@@ -521,9 +521,17 @@ const server = createServer(async (req, res) => {
 try { console.error(`[note-api] 索引 ${reindex()} 条，共 ${index.count()} 条`); }
 catch (e) { console.error('[note-api] 首次索引失败：', e.message); }
 
-// AI 热点日报的定时任务（NEWS_CRON=0 关闭）
+// AI 热点日报的定时任务（NEWS_CRON=0 关闭）。日报生成后自动筛选题落进 04-选题池。
 if (process.env.NEWS_CRON !== '0') {
-  startNewsCron(() => refreshNews(index, VAULT));
+  startNewsCron(async () => {
+    const r = await refreshNews(index, VAULT);
+    if (!r) return; // 今天已生成过，不重复筛选
+    try {
+      const ideas = await ideasFromNews(index, VAULT, {auto: true, io: {createNote}});
+      reindex();
+      console.error(`[news] 已从热点自动筛出 ${ideas.written.length} 个选题进 04-选题池`);
+    } catch (e) { console.error('[news] 自动筛选题失败：', e.message); }
+  });
 }
 
 server.listen(PORT, HOST, () => {
