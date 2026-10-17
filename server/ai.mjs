@@ -10,6 +10,13 @@
 //   EMBED_API_KEY / EMBED_MODEL   embedding 用（bge-m3、text-embedding-v3 等）
 //
 // 护栏：超时、限次重试、并发闸、JSON 输出解析兜底。key 只在服务端，绝不进前端。
+//
+// 协议由 AI_PROTOCOL 选择：
+//   openai    （默认）OpenAI 兼容 /chat/completions —— DeepSeek、通义、Kimi、硅基流动
+//   anthropic Anthropic /v1/messages —— Claude 官方、智谱 / Kimi / MiniMax 的 Anthropic 端点，
+//             以及 CC Switch 这类本地代理（复用 VS Code / Claude Code 已有的账号与额度，
+//             代理本身校验来源时才需要 AI_API_KEY）。
+const PROTOCOL = (process.env.AI_PROTOCOL || 'openai').toLowerCase();
 const CHAT_BASE = (process.env.AI_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
 const CHAT_KEY = process.env.AI_API_KEY || '';
 const CHAT_MODEL = process.env.AI_MODEL || 'deepseek-chat';
@@ -18,10 +25,10 @@ const EMBED_KEY = process.env.EMBED_API_KEY || CHAT_KEY;
 const EMBED_MODEL = process.env.EMBED_MODEL || '';
 const TIMEOUT = Number(process.env.AI_TIMEOUT || 60_000);
 
-export const aiEnabled = () => !!CHAT_KEY;
+export const aiEnabled = () => PROTOCOL === 'anthropic' ? !!CHAT_BASE : !!CHAT_KEY;
 export const embedEnabled = () => !!EMBED_KEY && !!EMBED_MODEL;
 export const aiInfo = () => ({
-  enabled: aiEnabled(), model: CHAT_MODEL,
+  enabled: aiEnabled(), model: CHAT_MODEL, protocol: PROTOCOL,
   embed: embedEnabled() ? {model: EMBED_MODEL, sameBase: EMBED_BASE === CHAT_BASE} : {enabled: false}
 });
 
@@ -68,7 +75,25 @@ async function call(base, key, path, payload) {
 
 // 要严格 JSON 时走 response_format，供应商不支持时靠正则从回复里抠。
 export async function chat(messages, {json = false, temperature = 0.3, maxTokens = 1500} = {}) {
-  if (!aiEnabled()) throw new Error('AI 未启用：请设置 AI_API_KEY');
+  if (!aiEnabled()) throw new Error('AI 未启用：请设置 AI_API_KEY（或 Anthropic 模式下的 AI_BASE_URL）');
+  if (PROTOCOL === 'anthropic') {
+    // Anthropic /v1/messages：system 单独传，消息只收 user/assistant；
+    // 回复可能是 [text, thinking, ...] 块数组，拼接所有 text 块。
+    const sys = messages.filter(m => m.role === 'system').map(m => m.content).join('\n');
+    const rest = messages.filter(m => m.role !== 'system');
+    const payload = {model: CHAT_MODEL, max_tokens: maxTokens, temperature, messages: rest};
+    if (sys) payload.system = sys;
+    const data = await call(CHAT_BASE, CHAT_KEY, '/v1/messages', payload);
+    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    if (!text) throw new Error('AI 返回了空回复（可能全是 thinking 块），换个措辞再试');
+    if (!json) return text;
+    try { return JSON.parse(text); }
+    catch {
+      const m = text.match(/[[{][\s\S]*[\]}]/);
+      if (m) { try { return JSON.parse(m[0]); } catch {} }
+      throw new Error('AI 没有返回合法 JSON：' + text.slice(0, 120));
+    }
+  }
   const payload = {model: CHAT_MODEL, messages, temperature, max_tokens: maxTokens};
   if (json) payload.response_format = {type: 'json_object'};
   const data = await call(CHAT_BASE, CHAT_KEY, '/chat/completions', payload);

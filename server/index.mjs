@@ -20,7 +20,7 @@ import {createServer} from 'node:http';
 import {readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, renameSync} from 'node:fs';
 import {join, resolve, sep, dirname, extname, posix} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {readVault} from './vault.mjs';
+import {readVault, parse} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
 import {aiEnabled, embedEnabled, aiInfo, analyzeNote, generateIdeas, answer, embed} from './ai.mjs';
@@ -177,6 +177,13 @@ function removeNote(rel) {
   return {path: rel};
 }
 
+// 读 frontmatter 里的 tags（AI 写回时合并用）。
+function parseFrontmatter(text) {
+  const {fm} = parse(text);
+  const raw = fm.tags ?? fm.Tags ?? fm.标签 ?? [];
+  return {tags: Array.isArray(raw) ? raw : raw ? String(raw).split(/[,，\s]+/).filter(Boolean) : []};
+}
+
 // —— 索引 ——
 function reindex(data = loadData()) {
   const rows = [];
@@ -307,7 +314,16 @@ async function route(req, res, url) {
       for (const n of need) {
         const r = await analyzeNote(n.title, n.body);
         index.putAi('note:' + n.id, hashOf(n.body), r.tags, r.summary);
-        results.push({id: 'note:' + n.id, path: n.rel, title: n.title, ...r});
+        // 写回笔记的 frontmatter：tags = 已有 ∪ AI 生成（去重，AI 的排后面），summary = AI 生成。
+        // 写前读原文拿 mtime 做乐观锁；笔记库是自己的，冲突时跳过并在结果里标注。
+        let writeErr = null;
+        try {
+          const cur = readFileSync(join(VAULT, n.rel), 'utf8');
+          const curFm = parseFrontmatter(cur);
+          const merged = [...new Set([...(curFm.tags || []), ...r.tags])].slice(0, 12);
+          writeExisting(n.rel, {fm: {tags: merged, summary: r.summary}, mtime: mtimeOf(join(VAULT, n.rel))});
+        } catch (e) { writeErr = e.message; }
+        results.push({id: 'note:' + n.id, path: n.rel, title: n.title, ...r, written: !writeErr, error: writeErr});
         progress();
       }
       return results;
@@ -364,8 +380,18 @@ async function route(req, res, url) {
     if (!question?.trim()) fail(400, '问题不能为空');
     const d = loadData(0);
     const hits = new Map();
-    // 关键词召回
-    for (const h of index.search(question, 8)) hits.set(h.id, {id: h.id, title: h.title, body: index.note(h.id)?.body || h.snip || '', kw: true});
+    // 关键词召回：整句往往不是任何笔记的子串（FTS trigram 是子串匹配），
+    // 按标点和常见停用词切成短语，取较长的片段逐个查，命中多的排前面。
+    const phrases = String(question)
+      .split(/[？?！!。，,、；;：:\s（）()\[\]{}"'「」…·—\-]+/)
+      .flatMap(seg => seg.length > 10 ? [seg.slice(0, 5), seg.slice(5, 10), seg.slice(10)].filter(Boolean) : [seg])
+      .filter(seg => [...seg].length >= 2);
+    const scored = new Map();
+    for (const ph of phrases.length ? phrases : [String(question)]) {
+      for (const h of index.search(ph, 8)) scored.set(h.id, (scored.get(h.id) || 0) + [...ph].length);
+    }
+    for (const [id, w] of [...scored].sort((a, b) => b[1] - a[1]).slice(0, 8))
+      hits.set(id, {id, title: index.note(id)?.title || '', body: index.note(id)?.body || '', kw: true});
     // 向量召回（可用时）
     if (embedEnabled()) {
       try {
