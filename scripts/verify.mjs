@@ -44,11 +44,12 @@ for (const f of ['skills/neural-creator-dashboard/SKILL.md', 'README.md', 'AGENT
 }
 
 // 2. 数据结构
-function check(m, label) {
+// allowEmptyPosts：纯笔记库（还没有作品）是允许的，只有示例数据为空才算错。
+function check(m, label, {allowEmptyPosts = false} = {}) {
   const errs = [];
   for (const k of ['snapshot', 'posts', 'postContent', 'notes', 'seedIdeas', 'seedDrafts', 'concepts']) if (!(k in m)) errs.push(`缺少导出 ${k}`);
   if (errs.length) return errs;
-  if (!m.posts.length) errs.push('posts 为空');
+  if (!m.posts.length) (allowEmptyPosts ? warnings : errs).push(`${label}：posts 为空${allowEmptyPosts ? '（纯笔记库，作品库会是空的）' : ''}`);
   for (const p of m.posts) {
     if (typeof p.id !== 'string' || !p.id) errs.push(`作品缺少 id：${p.title}`);
     if (!/^\d{4}-\d{2}-\d{2}/.test(p.date || '')) errs.push(`作品日期格式不对：${p.title}`);
@@ -84,7 +85,7 @@ console.log('当前数据');
 const hasLocal = existsSync(join(ROOT, 'src/data/my-data.local.js'));
 const source = hasLocal ? 'my-data.local.js' : 'sample.js';
 {
-  const errs = check(await import(pathToFileURL(join(ROOT, 'src/data', source)).href), source);
+  const errs = check(await import(pathToFileURL(join(ROOT, 'src/data', source)).href), source, {allowEmptyPosts: hasLocal});
   if (errs.length) errs.forEach(e => fail(`${source}：${e}`));
   else ok(`src/data/${source} 结构正确${hasLocal ? '（本机导入数据，不入库）' : '（虚构示例，未发现本机数据）'}`);
 }

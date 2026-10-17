@@ -12,6 +12,10 @@ src/data/my-data.js
 # 本机个性化配置（品牌名、空间名等），不要提交
 src/config.local.js
 
+# note-api 的运行时数据：SQLite 索引与 AI 缓存，随时可删可重建，不进版本库
+.note-api/
+notes-vault/
+
 .env
 .env.*
 !.env.example

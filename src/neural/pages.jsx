@@ -26,7 +26,7 @@ export function Library({graph, selected, setSelected, onGo, onAction, onModule}
   const order = [...posts].sort((a, b) => a.date.localeCompare(b.date));
   const node = graph.index.get('post:' + selected) || graph.index.get('post:' + rows[0]?.id);
   const total = posts.reduce((s, p) => s + p.views, 0);
-  const max = Math.max(...posts.map(p => p.views));
+  const max = Math.max(1, ...posts.map(p => p.views));
   const kpis = [['已发布', 'Published', posts.length], ['账号粉丝', 'Followers', snapshot.followers], ['累计观看', 'Total views', total], ['已知涨粉', 'Known follows', posts.reduce((s, p) => s + (p.follows ?? 0), 0)]];
   return <div className="page page-library">
     <PageHead zh="作品库" en="Works" sub="每一篇，都留下回响。" subEn="Every piece leaves an echo — metrics and links side by side."/>
@@ -51,8 +51,10 @@ export function Library({graph, selected, setSelected, onGo, onAction, onModule}
             </span>
           </button>;
         })}</div>
-        {!rows.length && <div className="empty"><Icon name="search" size={30}/><p>没有找到这篇作品 <em>No match</em></p><button className="pill" onClick={() => setQ('')}>清空搜索 <em>Clear</em></button></div>}
-        <p className="source-line"><Icon name="info" size={13}/>{posts.length} 篇作品均为{snapshot.source}；「—」表示未提供 <em>Not provided</em>。</p>
+        {!rows.length && (posts.length
+          ? <div className="empty"><Icon name="search" size={30}/><p>没有找到这篇作品 <em>No match</em></p><button className="pill" onClick={() => setQ('')}>清空搜索 <em>Clear</em></button></div>
+          : <div className="empty"><Icon name="works" size={30}/><p>作品库还是空的 <em>No works yet</em></p><p className="quiet">把作品笔记放进名字包含「作品 / works」的文件夹，或用 <code>--works</code> 指定 <em>Add work notes to a folder named 作品 / works</em></p></div>)}
+        {posts.length > 0 && <p className="source-line"><Icon name="info" size={13}/>{posts.length} 篇作品均为{snapshot.source}；「—」表示未提供 <em>Not provided</em>。</p>}
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES[0]} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
     </div>

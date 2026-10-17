@@ -8,7 +8,11 @@
     <title>Neural Creator Dashboard · 星穹星座</title>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/neural/main.jsx"></script>
+    <!-- 取数期间的占位，样式内联：neural.css 要等 JS 起来才加载。React 挂载时会被替换掉。 -->
+    <div id="root"><div id="boot-wait" style="position:fixed;inset:0;display:grid;place-content:center;gap:10px;text-align:center;background:#04050c;color:#8b90b8;font:14px/1.6 system-ui,-apple-system,'Noto Sans SC',sans-serif">
+      <div style="color:#d6b76e;letter-spacing:.18em;font-size:12px">NEURAL CREATOR DASHBOARD</div>
+      <div>正在读取笔记库…</div><div style="font-size:12px;opacity:.7">Loading notes…</div>
+    </div></div>
+    <script type="module" src="/src/neural/boot.js"></script>
   </body>
 </html>
