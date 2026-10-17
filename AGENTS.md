@@ -4,7 +4,9 @@
 
 ## 项目
 
-创作神经网络看板：React 19 + Vite 7 的纯前端页面，把作品、方法笔记、选题、草稿推导成一张神经网络图谱。不联网、不调用 AI，用户数据只在本地。
+创作神经网络看板：React 19 + Vite 7 的纯前端页面，把作品、方法笔记、选题、草稿推导成一张神经网络图谱。默认不联网、不调用 AI，用户数据只在本地。
+
+> **`nas` 分支例外**：NAS 部署模式（见 `docs/nas-deployment.md`）在此分支上引入了 note-api 服务（`server/`）与可选的 AI 能力（`server/ai.mjs`，OpenAI 兼容接口）。main 分支保持纯静态。`src/neural/boot.js` 先尝试 `fetch('/api/data')`，取不到就回退本地数据——纯静态构建的行为与 main 分支一致。AI key 只存在于服务端环境变量，绝不进前端 bundle。
 
 ## 命令
 
@@ -14,6 +16,7 @@
 | `npm run dev` | 开发服务器，默认 http://127.0.0.1:5173/ |
 | `npm run build` | 构建静态文件到 `dist/` |
 | `npm run import -- --vault <笔记文件夹>` | 把 Markdown / Obsidian 笔记导入成 `src/data/my-data.local.js`（在 `.gitignore` 里，不入库）；`--help` 查看选项，`--reset` 删除本机数据、切回示例 |
+| `npm run api` | 启动 note-api（读写 NAS 上的笔记库 + AI 编排），NAS 模式的后端；环境变量见 `server/index.mjs` 头注释 |
 | `npm run verify` | 校验 skill 格式、导入脚本、当前数据结构与核心动效（星核、五片星座、零视频素材） |
 
 ## 结构
@@ -25,7 +28,7 @@
 - `src/data/sample.js`：虚构示例数据，也是数据字段的权威说明。
 - `src/neural/graph.js`：图谱推导（目录归属、双链、选题来源、话题、概念提及、双向共振）、布局和本地检索。
 - `src/neural/Home.jsx`：星核、五簇星团与三层交互；`Cosmos.jsx` 星穹背景；`StarCore.jsx` / `v41.js` 星核渲染；`constellations.js` 五个星座的真实星表骨架；`ConstellationBand.jsx` 内页星座轨；`NetworkCanvas.jsx` 背景星图；`Analysis.jsx` 分析栏；`pages.jsx` 三个内页。
-- `scripts/import-notes.mjs`：笔记导入；`scripts/verify.mjs`：校验。
+- `scripts/import-notes.mjs`：笔记导入；`scripts/verify.mjs`：校验；`server/`：note-api 服务（vault.mjs 解析、frontmatter.mjs 最小侵入改写、db.mjs SQLite 索引、ai.mjs AI 编排、index.mjs HTTP 服务）。
 - `skills/neural-creator-dashboard/SKILL.md`：通用 Agent Skill，可用 `npx skills add` 安装到各家智能体。
 - `examples/vault/`：虚构的示例笔记库，演示导入格式。
 
