@@ -100,15 +100,27 @@ compose 里带了 tailscale 容器：`.env` 里填 `TS_AUTHKEY`（在 [login.tai
 
 | 变量 | 用途 | 说明 |
 |---|---|---|
-| `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL` | 打标签 + 摘要、选题生成、问答 | 默认 DeepSeek；通义 / Kimi / 硅基流动都兼容 |
-| `EMBED_API_KEY` / `EMBED_BASE_URL` / `EMBED_MODEL` | 语义关联、向量检索 | DeepSeek 没有这个接口，可用硅基流动 `BAAI/bge-m3` |
+| `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL` | 打标签 + 摘要、选题生成、问答、热点日报 | 默认 DeepSeek；通义 / Kimi / 硅基流动 / 自建 OpenAI 兼容网关都行 |
+| `AI_MODEL_ASK` / `AI_MODEL_ANALYZE` / `AI_MODEL_IDEAS` / `AI_MODEL_NEWS` | 各任务的默认模型 | 缺省回落 `AI_MODEL`；前端对话框里也可随时手动切换（记在浏览器） |
+| `EMBED_*` | 语义关联、向量检索 | 两种方案见 `.env.example`：Cloudflare Workers AI（每天免费 10,000 Neurons）或 OpenAI 兼容接口 |
 
 配置后重启 `note-api`，每篇方法笔记的分析栏会出现「AI 分析」区块：
 
 - **打标签 + 摘要**：写回笔记 frontmatter 的 `tags` 和 `summary`（按内容 hash 增量，没改过的笔记不重算、不花 token）；
 - **语义关联**：算 embedding 存索引，相似度超阈值的笔记对在分析栏里互相关联（不写文件，随时可重算）；
 - **生成选题**：把候选写进 `04-选题池/`；
-- **问答**：底部对话框的提问会检索你的笔记再回答，答案带引用、可点跳转。不配 AI 时对话框仍是纯本地规则检索，不联网。
+- **问答**：底部对话框的提问会检索你的笔记再回答，答案带引用、可点跳转。对话框旁的模型下拉可以换模型（拉不到列表时隐藏，走服务端默认）。
+
+> **模型质量提示**：多模型网关上部分模型实测存在响应质量问题（返回无关内容或纯思考无输出）。建议用 glm / deepseek 系；思考型模型在列表里标了「（思考型）」，问答可用但较慢。
+
+## 6.5 AI 热点（第六星座）
+
+首页多出的一簇「AI 热点」每天自动生成一份日报：
+
+- 数据源是现成的公开 RSS（默认 [AIHOT 全部 AI 动态](https://aihot.news/all)，`NEWS_SOURCE` 可换成任何 RSS 2.0 源）；
+- AI 把最近 48 小时的条目汇总成一段综述 + 主题分组，写进 `notes-vault/00-AI热点/YYYY-MM-DD.md`——自动出现在图谱的仙女座（粉色那簇）里，点开就是阅读窗；
+- 每小时整点检查（当天过了 `NEWS_HOUR` 默认 8 点还没生成就补），`POST /api/news/refresh` 手动触发，`{"force": true}` 强制重做当天；
+- `NEWS_CRON=0` 关闭整个定时任务。
 
 ## 7. 日常使用
 
