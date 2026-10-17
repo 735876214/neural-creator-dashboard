@@ -25,9 +25,10 @@ export const LINK_KINDS = {
   source: '选题来源',
   tag: '话题标签',
   mention: '正文提及',
-  resonance: '双向共振'
+  resonance: '双向共振',
+  semantic: '语义相关'
 };
-export const LINK_EN = {contain: 'Contains', wiki: 'Wikilink', source: 'Source', tag: 'Topic', mention: 'Mention', resonance: 'Resonance'};
+export const LINK_EN = {contain: 'Contains', wiki: 'Wikilink', source: 'Source', tag: 'Topic', mention: 'Mention', resonance: 'Resonance', semantic: 'Semantic'};
 export const CONTENT = new Set(['post', 'note', 'idea', 'draft']);
 // 内容分区：方法笔记（note）与「已发布素材」这一侧（作品/选题/草稿）。数据里带 partition 时以数据为准。
 export const PARTITION_OF = n => n?.partition || (n?.kind === 'note' ? 'knowledge' : 'works');

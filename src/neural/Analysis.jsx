@@ -2,6 +2,8 @@ import React, {useEffect, useMemo, useState} from 'react';
 import {KINDS, CONTENT, MODULES, neighbors, latent, askGraph, LINK_KINDS, LINK_EN} from './graph';
 import {Icon} from './icons';
 import {profileFor, bandsOf, outerCountOf} from './v41';
+import {isLive, getMeta, getFiles} from '../data/store';
+import {aiAnalyze, aiRelate, aiIdeas} from './sync';
 
 const fmt = (v, d = 0) => v == null || Number.isNaN(v) ? '—' : Number(v).toLocaleString('zh-CN', {minimumFractionDigits: d, maximumFractionDigits: d});
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -79,20 +81,102 @@ function Insights({items}) {
   </section>;
 }
 
+// AI 区块：只方法笔记显示。打标签 + 摘要写回 frontmatter；语义边刷新后重算。
+function AiPanel({graph, node, onGo, onToast}) {
+  const meta = getMeta();
+  const ai = meta ? meta.ai : null;
+  if (!isLive() || !ai?.enabled) return null;
+  const rel = getFiles()?.['note:' + node.id] || null;
+  const [state, setState] = useState({busy: false, msg: '', tags: null, summary: null, related: null});
+  const run = (fn, okMsg) => async () => {
+    setState(s => ({...s, busy: true, msg: ''}));
+    try { const r = await fn(); setState(s => ({...s, busy: false, ...r, msg: okMsg})); onToast?.(okMsg); }
+    catch (e) { setState(s => ({...s, busy: false, msg: '失败：' + e.message})); }
+  };
+  return <section className="an-section ai-panel">
+    <h3><Icon name="agent" size={14}/>AI 分析 <em>AI insights</em></h3>
+    <div className="chip-row">
+      <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
+        // 打标签 + 摘要，写回 frontmatter（tags / summary 键）
+        const dry = await aiAnalyze([rel], true);
+        if (!dry.todo) return {msg: '这篇已经分析过了'};
+        const job = await aiAnalyze([rel]);
+        const r = await pollJob(job.job.id);
+        const one = r.result?.find(x => x.id === 'note:' + node.id);
+        return one ? {tags: one.tags, summary: one.summary} : {};
+      }, '标签与摘要已写入笔记')}>打标签 + 摘要 <em>Tag &amp; summarize</em></button>
+      {ai.embed?.enabled && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
+        const job = await aiRelate();
+        const r = await pollJob(job.job.id);
+        const mine = (r.result?.edges || []).filter(e => e.a === 'note:' + node.id || e.b === 'note:' + node.id);
+        return {related: mine.map(e => ({id: e.a === 'note:' + node.id ? e.b : e.a, sim: e.sim}))};
+      }, '语义关联已更新')}>语义关联 <em>Semantic links</em></button>}
+      <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
+        const r = await aiIdeas([rel]);
+        return {msg: r.candidates?.length ? '候选选题：' + r.candidates.map(c => c.title).join('；') : '没有生成候选'};
+      }, '选题候选已生成')}>生成选题 <em>Seed ideas</em></button>
+    </div>
+    {state.busy && <p className="quiet">AI 正在处理…</p>}
+    {state.msg && <p className="quiet">{state.msg}</p>}
+    {state.summary && <p className="ai-summary">{state.summary}</p>}
+    {state.tags && <div className="chip-row">{state.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div>}
+    {state.related?.length > 0 && <div className="chip-row">{state.related.map(x => <Chip key={x.id} graph={graph} id={x.id} onGo={onGo} sub={'相似 ' + x.sim}/>)}</div>}
+  </section>;
+}
+
 function AskBox({graph, node, onGo}) {
   const [q, setQ] = useState('');
   const [res, setRes] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const ai = isLive() && getMeta()?.ai?.enabled;
+  const submit = async e => {
+    e.preventDefault();
+    if (!q.trim() || busy) return;
+    setBusy(true);
+    // NAS + 配了 AI：走 RAG（带引用）；否则用本地规则检索（不联网）
+    if (ai) {
+      try {
+        const r = await fetch('/api/ai/ask', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question: q})});
+        const j = await r.json();
+        setRes([{title: 'AI 回答', en: 'AI answer', tone: 'info', text: j.answer || '（空）', refs: j.refs || []}]);
+      } catch (e2) {
+        setRes([{title: 'AI 暂时不可用，本地检索结果', en: 'AI offline, local results', tone: 'warn', text: '', items: [], local: askGraph(graph, q, node.id)}]);
+      }
+    } else {
+      setRes(askGraph(graph, q, node.id).map(c => ({...c, local: true})));
+    }
+    setBusy(false);
+  };
   return <div className="an-ask">
     {res && <div className="an-ask-res">{res.map((c, i) => <div key={i} className={`ask-card mini tone-${c.tone}`}>
-      <h4>{c.title} <em>{c.en}</em></h4><p>{c.text}</p>
+      <h4>{c.title} <em>{c.en}</em>{c.local && <small> · 本地 local</small>}</h4>
+      {c.text && <p>{c.text}</p>}
+      {c.refs?.length > 0 && <div className="chip-row">{c.refs.map(rf => <Chip key={rf.id} graph={graph} id={rf.id} onGo={onGo}/>)}</div>}
       {c.items?.length > 0 && <div className="chip-row">{c.items.slice(0, 6).map(id => <Chip key={id} graph={graph} id={id} onGo={onGo}/>)}</div>}
+      {c.local?.map((lc, k) => <div key={k} className="local-card">
+        <h5>{lc.title} <em>{lc.en}</em></h5><p>{lc.text}</p>
+        {lc.items?.length > 0 && <div className="chip-row">{lc.items.slice(0, 6).map(id => <Chip key={id} graph={graph} id={id} onGo={onGo}/>)}</div>}
+      </div>)}
     </div>)}</div>}
-    <form onSubmit={e => { e.preventDefault(); if (q.trim()) setRes(askGraph(graph, q, node.id)); }}>
-      <input value={q} onChange={e => setQ(e.target.value)} placeholder="追问这条内容… Ask about this note" aria-label="追问这条内容"/>
-      <button aria-label="提交"><Icon name="send" size={15}/></button>
+    <form onSubmit={submit}>
+      <input value={q} onChange={e => setQ(e.target.value)} placeholder={ai ? '问你的笔记库… Ask your notes (AI)' : '追问这条内容… Ask about this note'} aria-label="提问"/>
+      <button aria-label="提交" disabled={busy}>{busy ? '…' : <Icon name="send" size={15}/>}</button>
     </form>
-    <div className="an-ask-foot"><span><Icon name="agent" size={13}/>我的图谱 <em>My graph</em></span><span><Icon name="spark" size={13}/>本地分析 <em>Local analysis</em></span></div>
+    <div className="an-ask-foot"><span><Icon name="agent" size={13}/>{ai ? 'AI 问答' : '我的图谱'} <em>{ai ? 'AI Q&A' : 'My graph'}</em></span><span><Icon name="spark" size={13}/>{ai ? 'RAG + 引用' : '本地分析'} <em>{ai ? 'with citations' : 'Local analysis'}</em></span></div>
   </div>;
+}
+
+function pollJob(id, tries = 120) {
+  const tick = () => fetch('/api/ai/jobs/' + id).then(r => r.json());
+  return (async () => {
+    for (let i = 0; i < tries; i++) {
+      const j = await tick();
+      if (j.status === 'done') return j;
+      if (j.status === 'error') throw new Error(j.error || '任务失败');
+      await new Promise(r => setTimeout(r, 500));
+    }
+    throw new Error('任务超时');
+  })();
 }
 
 const sharedConcepts = (a, b) => (a.shared || []).filter(x => (b.shared || []).includes(x));
@@ -266,6 +350,7 @@ export function Analysis({graph, node, module, onGo, onAction, onClose}) {
       {a.all && <section className="an-section"><h3>全部指标 <em>All metrics</em></h3><div className="an-all">{a.all.map(([zh, en, v]) => <div key={zh}><span>{zh}<em>{en}</em></span><b>{v}</b></div>)}</div></section>}
       <Insights items={a.insights}/>
       {node.tags?.length > 0 && <section className="an-section"><h3>话题标签 <em>Topics</em></h3><div className="chip-row">{node.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div></section>}
+      {node.kind === 'note' && <AiPanel graph={graph} node={node} onGo={onGo}/>}
       <Links graph={graph} node={node} onGo={onGo}/>
     </div>
     <AskBox graph={graph} node={node} onGo={onGo}/>

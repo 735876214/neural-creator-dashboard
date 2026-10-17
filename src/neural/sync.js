@@ -92,3 +92,31 @@ export async function createEntry(kind, {title, body, fm}) {
   if (!res.ok) throw new Error(`创建失败：HTTP ${res.status}`);
   return res.json();
 }
+
+// —— AI 封装：返回原始 JSON，调用方负责轮询任务 ——
+export async function aiAnalyze(paths, dryRun = false) {
+  const res = await fetch('/api/ai/analyze', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({paths, dryRun})
+  });
+  if (!res.ok) throw new Error(`AI analyze：HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function aiRelate(threshold = 0.82) {
+  const res = await fetch('/api/ai/relate', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({threshold})
+  });
+  if (!res.ok) throw new Error(`AI relate：HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function aiIdeas(paths) {
+  const res = await fetch('/api/ai/ideas', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({paths})
+  });
+  if (!res.ok) throw new Error(`AI ideas：HTTP ${res.status}`);
+  return res.json();
+}

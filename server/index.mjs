@@ -22,7 +22,9 @@ import {join, resolve, sep, dirname, extname, posix} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {readVault} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
-import {openIndex, hashOf} from './db.mjs';
+import {openIndex, hashOf, cosine} from './db.mjs';
+import {aiEnabled, embedEnabled, aiInfo, analyzeNote, generateIdeas, answer, embed} from './ai.mjs';
+import {randomUUID} from 'node:crypto';
 
 const VAULT = resolve(process.env.VAULT_DIR || '');
 const DATA_DIR = resolve(process.env.DATA_DIR || '.note-api');
@@ -235,6 +237,8 @@ async function route(req, res, url) {
       concepts: d.concepts,
       files: d.files,
       figures: d.figures,
+      semantic: aiEdgeCache?.edges || [],
+      ai: aiInfo(),
       meta: {vault: VAULT, counts: d.counts, generatedAt: d.generatedAt, indexed: index.count()}
     });
   }
@@ -283,8 +287,138 @@ async function route(req, res, url) {
 
   if (p === '/api/index' && req.method === 'POST') return json(res, 200, {changed: reindex(), indexed: index.count()});
 
+  // —— AI：未配 key 时全部 501，前端据此隐藏 AI 区块 ——
+  if (p === '/api/ai/info' && req.method === 'GET') return json(res, 200, aiInfo());
+
+  if (p.startsWith('/api/ai/') && !aiEnabled() && p !== '/api/ai/info') return json(res, 501, {error: 'AI 未启用：服务端未配置 AI_API_KEY'});
+
+  // ① 打标签 + 摘要。body: {paths?: [...], dryRun?: bool}
+  // 不传 paths 就处理全部方法笔记；按内容 hash 增量，没变过的跳过。
+  if (p === '/api/ai/analyze' && req.method === 'POST') {
+    const {paths, dryRun} = await readBody(req);
+    const d = loadData(0);
+    const targets = d.notes.filter(n => !paths?.length || paths.includes(n.rel));
+    const cached = index.aiCache();
+    const need = targets.filter(n => cached.get('note:' + n.id)?.hash !== hashOf(n.body));
+    if (dryRun) return json(res, 200, {total: targets.length, todo: need.length, skip: targets.length - need.length, dryRun: true});
+    if (!need.length) return json(res, 200, {total: targets.length, done: 0, message: '全部笔记都分析过了'});
+    const job = runJob('analyze', need.length, async progress => {
+      const results = [];
+      for (const n of need) {
+        const r = await analyzeNote(n.title, n.body);
+        index.putAi('note:' + n.id, hashOf(n.body), r.tags, r.summary);
+        results.push({id: 'note:' + n.id, path: n.rel, title: n.title, ...r});
+        progress();
+      }
+      return results;
+    });
+    return json(res, 202, {job});
+  }
+
+  // ② 语义关联：embedding + 余弦，超阈值产出语义边（只存索引，不写文件）。
+  // body: {threshold?: 0.82}
+  if (p === '/api/ai/relate' && req.method === 'POST') {
+    if (!embedEnabled()) return json(res, 501, {error: 'embedding 未启用：请设置 EMBED_API_KEY 与 EMBED_MODEL（DeepSeek 没有 embedding 接口）'});
+    const {threshold = 0.82} = await readBody(req);
+    const d = loadData(0);
+    const items = d.notes;
+    const cached = index.aiCache();
+    const job = runJob('relate', items.length, async progress => {
+      const model = process.env.EMBED_MODEL;
+      const have = new Map(index.embeddings(model).map(e => [e.id, e]));
+      for (const n of items) {
+        const id = 'note:' + n.id, h = hashOf(n.body);
+        if (have.get(id)?.hash !== h) {
+          const [vec] = await embed([n.title + '\n' + n.body.slice(0, 2000)]);
+          index.putEmbedding(id, model, vec, h);
+        }
+        progress();
+      }
+      const vecs = index.embeddings(model);
+      const edges = [];
+      for (let i = 0; i < vecs.length; i++) for (let j = i + 1; j < vecs.length; j++) {
+        const sim = cosine(vecs[i].vec, vecs[j].vec);
+        if (sim >= threshold) edges.push({a: vecs[i].id, b: vecs[j].id, sim: Math.round(sim * 1000) / 1000});
+      }
+      edges.sort((x, y) => y.sim - x.sim);
+      return {edges: edges.slice(0, 200), threshold};
+    }, {cache: true});
+    return json(res, 202, {job});
+  }
+
+  // ③ 从笔记生成选题候选。body: {paths: [...]}（必填，用户在前端勾选笔记）
+  if (p === '/api/ai/ideas' && req.method === 'POST') {
+    const {paths} = await readBody(req);
+    if (!paths?.length) fail(400, '请先选择要用哪些笔记（paths）');
+    const d = loadData(0);
+    const notes = d.notes.filter(n => paths.includes(n.rel));
+    if (!notes.length) fail(404, '选中的笔记不存在');
+    const candidates = await generateIdeas(notes);
+    return json(res, 200, {candidates});
+  }
+
+  // ④ 问答（RAG）：embedding + FTS 混合检索 → 拼上下文 → 回答（非流式，个人规模足够）。
+  // body: {question}
+  if (p === '/api/ai/ask' && req.method === 'POST') {
+    const {question} = await readBody(req);
+    if (!question?.trim()) fail(400, '问题不能为空');
+    const d = loadData(0);
+    const hits = new Map();
+    // 关键词召回
+    for (const h of index.search(question, 8)) hits.set(h.id, {id: h.id, title: h.title, body: index.note(h.id)?.body || h.snip || '', kw: true});
+    // 向量召回（可用时）
+    if (embedEnabled()) {
+      try {
+        const model = process.env.EMBED_MODEL;
+        const [qv] = await embed([question]);
+        const scored = index.embeddings(model)
+          .map(e => ({id: e.id, sim: cosine(qv, e.vec)}))
+          .sort((a, b) => b.sim - a.sim).slice(0, 6).filter(x => x.sim >= 0.5);
+        for (const s of scored) {
+          const n = index.note(s.id);
+          if (n) hits.set(s.id, {id: s.id, title: n.title, body: n.body, vec: true, sim: Math.round(s.sim * 100) / 100});
+        }
+      } catch { /* 向量召回失败时靠关键词兜底 */ }
+    }
+    const contexts = [...hits.values()].slice(0, 8);
+    if (!contexts.length) return json(res, 200, {answer: '笔记库里没有找到相关内容。', refs: []});
+    const text = await answer(question, contexts);
+    const byId = new Map([...d.works.map(w => ['post:' + w.post.id, w.rel]), ...d.notes.map(n => ['note:' + n.id, n.rel]), ...d.ideas.map(i => ['idea:' + i.id, i.rel]), ...d.drafts.map(x => ['draft:' + x.id, x.rel])]);
+    const refs = contexts.map(c => ({id: c.id, title: c.title, path: byId.get(c.id) || null}));
+    return json(res, 200, {answer: text, refs});
+  }
+
+  if (p.startsWith('/api/ai/jobs/') && req.method === 'GET') {
+    const job = index.job(p.slice('/api/ai/jobs/'.length));
+    if (!job) return json(res, 404, {error: '没有这个任务'});
+    return json(res, 200, job);
+  }
+
   return json(res, 404, {error: '没有这个接口', path: p});
 }
+
+// 后台任务：AI 调用秒级到几十秒级，不能阻塞 HTTP。同一时刻只跑一个 AI 任务。
+let runningJob = null;
+function runJob(kind, total, fn, opts = {}) {
+  const id = randomUUID().slice(0, 8);
+  index.createJob(id, kind, total);
+  runningJob = id;
+  (async () => {
+    let done = 0;
+    const progress = () => { done++; index.updateJob(id, {done, message: `${done}/${total}`}); };
+    try {
+      const result = await fn(progress);
+      index.updateJob(id, {status: 'done', done: total, message: '完成', result});
+      if (opts.cache) aiEdgeCache = result; // 语义边缓存在内存，/api/data 时带上
+    } catch (e) {
+      index.updateJob(id, {status: 'error', error: String(e.message || e)});
+    } finally { if (runningJob === id) runningJob = null; }
+  })();
+  return {id, kind, total, status: 'running'};
+}
+
+// 语义边的内存缓存（ai/relate 的产出）：/api/data 响应里的 semantic 字段直接从这里取。
+let aiEdgeCache = null;
 
 // 标题改了就把文件名跟着改：Obsidian 的双链按文件名解析，文件名不跟着动会让链接对不上
 function renameTo(title, rel) {
