@@ -8,7 +8,7 @@
 import {useEffect, useRef, useState} from 'react';
 import {getMeta} from '../data/store.js';
 
-const isLive = () => !!getMeta();
+export const isLive = () => !!getMeta();
 
 export function useSynced(key, fallback) {
   const [v, set] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } });

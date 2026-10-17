@@ -10,12 +10,21 @@ import {Library, Drafts, Ideas} from './pages';
 import {Count} from './Analysis';
 import {Icon} from './icons';
 import {T} from './theme';
-import {saveNote, createEntry} from './sync';
+import {saveNote, createEntry, isLive} from './sync';
 import './neural.css';
 
 // 选题、草稿与目标保存在当前浏览器（localStorage）；连着 note-api 时由 sync.js 落盘到 vault。
+//
+// 数据优先级（关键，防止旧缓存盖住 NAS 数据）：
+//   NAS 模式（boot.js 已把 /api/data 填进 store）—— 初始值永远用 NAS 数据；
+//   localStorage 里的旧 seed 数据（此前用示例数据时存下的）不恢复，只在用户
+//   之后做出改动时按「本次会话的覆盖」缓存。否则浏览器里遗留的示例选题、
+//   示例草稿会永远盖住 NAS 上的真实文件（config.js 注释里提过的坑）。
 function useSaved(key, fallback) {
-  const [v, set] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } });
+  const [v, set] = useState(() => {
+    if (isLive()) return fallback;
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+  });
   useEffect(() => { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }, [key, v]);
   return [v, set];
 }
