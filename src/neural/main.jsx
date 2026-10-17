@@ -1,6 +1,6 @@
 import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {seedIdeas, seedDrafts, snapshot} from '../data';
+import {seedIdeas, seedDrafts, snapshot, meta, files} from '../data';
 import {posts, monthPosts} from './works';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, MODULES} from './graph';
@@ -10,9 +10,10 @@ import {Library, Drafts, Ideas} from './pages';
 import {Count} from './Analysis';
 import {Icon} from './icons';
 import {T} from './theme';
+import {saveNote, createEntry} from './sync';
 import './neural.css';
 
-// 选题、草稿与目标保存在当前浏览器（localStorage）。
+// 选题、草稿与目标保存在当前浏览器（localStorage）；连着 note-api 时由 sync.js 落盘到 vault。
 function useSaved(key, fallback) {
   const [v, set] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } });
   useEffect(() => { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }, [key, v]);
@@ -94,6 +95,28 @@ function App() {
   const graph = useMemo(() => buildGraph({ideas, drafts: slowDrafts}), [ideas, slowDrafts]);
   const layout = useMemo(() => forceLayout(graph), [graph]);
 
+  // NAS 模式：草稿正文 / 标题改动 1.2s 后落盘到 vault（title 键只在文件里已有该键时才改，
+  // 文件名跟随标题的策略由服务端负责）。
+  const saveTimer = useRef(null);
+  const draftRel = useRef(null);
+  useEffect(() => {
+    if (!meta || !active) return;
+    const d = drafts.find(x => x.id === active);
+    if (!d) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      const rel = files['draft:' + d.id] || draftRel.current;
+      if (!rel) return; // 新建草稿的落盘由 createEntry 负责，等下次 /api/data 才有 path
+      draftRel.current = rel;
+      try {
+        const cur = await fetch('/api/note?path=' + encodeURIComponent(rel)).then(r => r.json());
+        const fm = {title: d.title};
+        await saveNote({path: rel, fm, body: d.body, mtime: cur.mtime});
+      } catch { /* 离线或 409：本地已有副本，不打断写作 */ }
+    }, 1200);
+    return () => clearTimeout(saveTimer.current);
+  }, [active, drafts, meta]);
+
   useEffect(() => { history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page); window.scrollTo({top: 0}); }, [page]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2800); return () => clearTimeout(t); }, [toast]);
 
@@ -102,13 +125,27 @@ function App() {
     const id = 'draft-' + Date.now();
     setDrafts(d => [{id, title, body, source}, ...d]);
     setActive(id); setPage('drafts'); setModal(null);
-    setToast('草稿已创建，只保存在此浏览器 · Draft saved locally');
+    // 连着 note-api 时同步落到 vault 的 03-创作台/；失败不阻塞，本地已有副本
+    if (meta) createEntry('draft', {title, body, fm: source != null ? {source: String(source)} : {}})
+      .then(() => setToast('草稿已创建并保存到笔记库 · Saved to vault'))
+      .catch(() => setToast('草稿已创建（离线，稍后同步）· Saved locally'));
+    else setToast('草稿已创建，只保存在此浏览器 · Draft saved locally');
   }
   function editIdea(idea) { setEditing({...idea}); setModal('idea'); }
   function saveIdea() {
     if (!editing.title.trim()) return;
     setIdeas(ideas.some(i => i.id === editing.id) ? ideas.map(i => i.id === editing.id ? editing : i) : [...ideas, editing]);
     setModal(null); setToast('选题已保存 · Idea saved');
+    // NAS 模式：选题落在 04-选题池/（已有文件就更新，没有就新建）
+    if (meta) {
+      const rel = files['idea:' + editing.id];
+      const fm = {platform: editing.platform, priority: editing.priority, status: editing.status, note: editing.note};
+      (rel
+        ? (async () => { const cur = await fetch('/api/note?path=' + encodeURIComponent(rel)).then(r => r.json()); return saveNote({path: rel, fm, mtime: cur.mtime}); })()
+        : createEntry('idea', {title: editing.title, fm})
+      ).then(() => setToast('选题已保存到笔记库 · Saved to vault'))
+        .catch(e => setToast(e?.code === 409 ? '文件已被其他编辑器改动，未覆盖 · Conflict' : '选题已保存（离线）· Saved locally'));
+    }
   }
   function toDraft(idea) {
     const existing = drafts.find(d => d.source === idea.id);
@@ -210,10 +247,68 @@ function App() {
         <p className="quiet">转为草稿只生成本地写作提纲，不模拟 AI 生成结果。</p>
       </div>
     </Modal>}
-    {modal?.read && <Modal title={modal.read.short || modal.read.title} en={KINDS[modal.read.kind].en} onClose={close} wide>
-      <div className="reader"><p className="quiet">{modal.read.path}</p><pre>{modal.read.body}</pre></div>
-    </Modal>}
+    {modal?.read && <ReadModal node={modal.read} onClose={close} editable={!!meta}/>}
   </div>;
+}
+
+// 方法笔记 / 作品的阅读弹窗。NAS 模式下提供「编辑正文」：拉原文 → textarea → 保存落盘。
+function ReadModal({node, onClose, editable}) {
+  const isNote = node.kind === 'note';
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(node.body || '');
+  const [mtime, setMtime] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  // NAS 模式下拉服务器上的原文（带 mtime 做乐观锁）；本地模式直接用图谱里的 body。
+  useEffect(() => {
+    if (!editing || !isNote) return;
+    let on = true;
+    fetch('/api/note?id=' + encodeURIComponent(node.id)).then(r => r.json()).then(j => {
+      if (on) { setText(j.text || node.body || ''); setMtime(j.mtime); }
+    }).catch(() => { if (on) { setText(node.body || ''); setErr('读不到原文，编辑的是看板缓存'); } });
+    return () => { on = false; };
+  }, [editing, isNote, node.id, node.body]);
+
+  async function save() {
+    setBusy(true); setErr('');
+    try {
+      const res = await fetch('/api/note', {
+        method: 'PUT', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({id: node.id, body: text, mtime})
+      });
+      if (res.status === 409) {
+        const j = await res.json().catch(() => ({}));
+        setErr('文件已被 Obsidian 或其他编辑器改动，没有覆盖。请重新打开比对 · Conflict: file changed elsewhere, not overwritten');
+        setMtime(j.mtime); setText(j.content || text);
+        return;
+      }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      onClose();
+    } catch (e) { setErr('保存失败：' + e.message + ' · Save failed'); }
+    finally { setBusy(false); }
+  }
+
+  return <Modal title={node.short || node.title} en={KINDS[node.kind].en} onClose={onClose} wide>
+    {!editing
+      ? <div className="reader">
+          <p className="quiet">{node.path}</p>
+          <pre>{node.body}</pre>
+          {isNote && editable && <div className="form-actions">
+            <button className="pill primary" onClick={() => setEditing(true)}><Icon name="draft" size={14}/>编辑正文 <em>Edit</em></button>
+            <span className="quiet">改动会写回笔记库文件 <em>Writes back to the vault</em></span>
+          </div>}
+        </div>
+      : <div className="reader">
+          <p className="quiet">{node.path} · 保存前会比对修改时间，不会静默覆盖别人的改动 <em>Conflict-safe</em></p>
+          <textarea className="reader-edit" value={text} onChange={e => setText(e.target.value)} rows={16} aria-label="编辑笔记正文" autoFocus/>
+          {err && <p className="quiet" role="alert">{err}</p>}
+          <div className="form-actions">
+            <button className="pill ghost" onClick={() => { setEditing(false); setErr(''); }} disabled={busy}>取消 <em>Cancel</em></button>
+            <button className="pill primary" onClick={save} disabled={busy || mtime == null}>{busy ? '保存中…' : '保存到笔记库'} <em>Save to vault</em></button>
+          </div>
+        </div>}
+  </Modal>;
 }
 
 createRoot(document.getElementById('root')).render(<App/>);
