@@ -121,7 +121,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         {!drafts.length && <p className="empty-line">还没有草稿 <em>No drafts yet</em></p>}
       </aside>
       {draft ? <section className="editor glass">
-        <div className="editor-meta"><span>03-创作台 / 正在写 <em>Writing</em></span><span><Icon name="check" size={13}/>已保存到此浏览器 <em>Saved locally</em></span></div>
+        <div className="editor-meta"><span>03-创作台 / 正在写 <em>Writing</em></span><span><Icon name="check" size={13}/>自动保存到 NAS 笔记库 <em>Auto-saved to NAS vault</em></span></div>
         <input className="editor-title" value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题"/>
         <div className="editor-area">
           <textarea ref={area} value={draft.body} aria-label="草稿正文" placeholder="开始写… 输入 [[ 链接到其他笔记 Type [[ to link a note"

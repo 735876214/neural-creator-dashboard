@@ -127,9 +127,9 @@ function App() {
     setActive(id); setPage('drafts'); setModal(null);
     // 连着 note-api 时同步落到 vault 的 03-创作台/；失败不阻塞，本地已有副本
     if (meta) createEntry('draft', {title, body, fm: source != null ? {source: String(source)} : {}})
-      .then(() => setToast('草稿已创建并保存到笔记库 · Saved to vault'))
-      .catch(() => setToast('草稿已创建（离线，稍后同步）· Saved locally'));
-    else setToast('草稿已创建，只保存在此浏览器 · Draft saved locally');
+      .then(() => setToast('草稿已创建，已写入 NAS 笔记库（03-创作台/）· Saved to vault on NAS'))
+      .catch(() => setToast('草稿已创建，暂时只在此浏览器（连不上 NAS，恢复后同步）· Local only, will sync'));
+    else setToast('草稿已创建，只保存在此浏览器（未连接 NAS）· Saved in this browser only');
   }
   function editIdea(idea) { setEditing({...idea}); setModal('idea'); }
   function saveIdea() {
@@ -143,8 +143,10 @@ function App() {
       (rel
         ? (async () => { const cur = await fetch('/api/note?path=' + encodeURIComponent(rel)).then(r => r.json()); return saveNote({path: rel, fm, mtime: cur.mtime}); })()
         : createEntry('idea', {title: editing.title, fm})
-      ).then(() => setToast('选题已保存到笔记库 · Saved to vault'))
-        .catch(e => setToast(e?.code === 409 ? '文件已被其他编辑器改动，未覆盖 · Conflict' : '选题已保存（离线）· Saved locally'));
+      ).then(() => setToast(`选题已写入 NAS 笔记库（04-选题池/）· Saved to vault on NAS`))
+        .catch(e => setToast(e?.code === 409 ? 'NAS 上的文件已被其他编辑器改动，未覆盖 · Conflict with NAS file' : '选题已保存，暂时只在此浏览器（连不上 NAS）· Local only, will sync'));
+    } else {
+      setToast('选题已保存，只在此浏览器（未连接 NAS）· Saved in this browser only');
     }
   }
   function toDraft(idea) {
@@ -156,9 +158,12 @@ function App() {
   }
   function deleteDraft(id) {
     const d = drafts.find(x => x.id === id);
-    if (!window.confirm(`删除草稿「${d?.title || '未命名草稿'}」？此操作只影响当前浏览器。`)) return;
+    const scope = meta
+      ? '将同时从 NAS 笔记库（03-创作台/）和此浏览器删除。'
+      : '只影响此浏览器（未连接 NAS，笔记库文件不动）。';
+    if (!window.confirm(`删除草稿「${d?.title || '未命名草稿'}」？${scope}`)) return;
     const rest = drafts.filter(x => x.id !== id);
-    setDrafts(rest); setActive(rest[0]?.id); setToast('草稿已删除 · Draft deleted');
+    setDrafts(rest); setActive(rest[0]?.id); setToast(meta ? '草稿已删除（浏览器记录；NAS 文件保留）· Removed locally' : '草稿已删除 · Draft deleted');
   }
   const onAction = useCallback(a => {
     if (a.type === 'page') { if (a.page === 'library') setLibSel(a.id); if (a.page === 'drafts') setActive(a.id); setPage(a.page); }
@@ -221,19 +226,19 @@ function App() {
         </ul>
         <p>作品库：{posts.length} 篇<b>示例作品</b>，账号、标题、日期与指标均为虚构，仅用于展示效果。</p>
         <p>当前：{s.content} 条内容 · {s.links} 条连接 · {s.mutual} 组双向 · {s.ghosts} 个未创建双链。</p>
-        <p className="quiet">图谱分析是本地规则检索，未调用 AI。选题、草稿与目标保存在当前浏览器，不写入 Obsidian、不发布到平台。<em>Local rules only · no AI · nothing is published.</em></p>
+        <p className="quiet">{meta ? '已连接 NAS 笔记库：选题与草稿会写入 NAS 上的 .md 文件；本月目标只保存在此浏览器。' : '未连接 NAS：选题、草稿与目标都只保存在此浏览器。'}<em>{meta ? 'Connected to NAS vault' : 'Local only (no NAS)'}</em></p>
       </div>
     </Modal>}
     {modal === 'goal' && <Modal title="本月发布目标" en="Monthly goal" onClose={close}>
-      <form className="form" onSubmit={e => { e.preventDefault(); const n = Number(goalInput); if (Number.isInteger(n) && n >= 1 && n <= 100) { setGoal(n); setModal(null); setToast('发布目标已更新 · Goal updated'); } }}>
-        <p className="quiet">本月已发布 {monthPosts.length} 篇。目标只保存在当前浏览器。</p>
+      <form className="form" onSubmit={e => { e.preventDefault(); const n = Number(goalInput); if (Number.isInteger(n) && n >= 1 && n <= 100) { setGoal(n); setModal(null); setToast('发布目标已更新（只保存在此浏览器）· Saved in this browser'); } }}>
+        <p className="quiet">本月已发布 {monthPosts.length} 篇。目标只保存在此浏览器，不写入 NAS <em>Browser only, not synced to NAS</em></p>
         <label>目标篇数 <em>Target</em><input autoFocus type="number" min="1" max="100" step="1" required value={goalInput} onChange={e => setGoalInput(e.target.value)}/></label>
         <div className="form-actions"><button type="button" className="pill ghost" onClick={close}>取消 <em>Cancel</em></button><button className="pill primary">保存目标 <em>Save</em></button></div>
       </form>
     </Modal>}
     {modal === 'idea' && editing && <Modal title="选题详情" en="Idea" onClose={close}>
       <div className="form">
-        <p className="quiet">编辑后保存在此浏览器 <em>Saved locally</em></p>
+        <p className="quiet">{meta ? '保存后写入 NAS 笔记库（04-选题池/），Obsidian 端同步可见 <em>Saved to vault on NAS</em>' : '未连接 NAS：保存后只在此浏览器 <em>Saved in this browser only</em>'}</p>
         <label>选题标题 <em>Title</em><input autoFocus value={editing.title} onChange={e => setEditing({...editing, title: e.target.value})}/></label>
         <div className="form-row">
           <label>优先级 <em>Priority</em><select value={editing.priority} onChange={e => setEditing({...editing, priority: e.target.value})}><option>高</option><option>中</option><option>低</option></select></label>
@@ -249,6 +254,25 @@ function App() {
     </Modal>}
     {modal?.read && <ReadModal node={modal.read} onClose={close} editable={!!meta}/>}
   </div>;
+}
+
+// 日报正文渲染：每行独立处理，[标题](链接) 变成可点的标题（链接只在 href 里，不显示 URL），
+// ## 行渲染成小标题，列表行渲染成列表项；外链新窗口打开。只读展示，不解析任意 Markdown。
+function renderNewsBody(body) {
+  const link = (label, url) => <a href={url} target="_blank" rel="noreferrer noopener">{label}</a>;
+  return String(body || '').split('\n').map((line, i) => {
+    const h = line.match(/^##\s+(.+)/);
+    if (h) return <h3 key={i}>{h[1]}</h3>;
+    const li = line.match(/^-\s+(.*)$/);
+    if (li) {
+      const m = li[1].match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      return <p className="rn-item" key={i}>{m ? link(m[1], m[2]) : li[1]}</p>;
+    }
+    const all = line.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (all) return <p key={i}>{link(all[1], all[2])}</p>;
+    if (!line.trim()) return null;
+    return <p key={i}>{line}</p>;
+  });
 }
 
 // 方法笔记 / 作品的阅读弹窗。NAS 模式下提供「编辑正文」：拉原文 → textarea → 保存落盘。
@@ -293,10 +317,13 @@ function ReadModal({node, onClose, editable}) {
     {!editing
       ? <div className="reader">
           <p className="quiet">{node.path}</p>
-          <pre>{node.body}</pre>
-          {isNote && editable && <div className="form-actions">
+          {/* 日报（news）：把 [标题](链接) 渲染成可点的标题，链接本身不显示；其余保持纯文本 */}
+          {node.kind === 'news'
+            ? <div className="reader-news">{renderNewsBody(node.body)}</div>
+            : <pre>{node.body}</pre>}
+          {(isNote || node.kind === 'news') && editable && <div className="form-actions">
             <button className="pill primary" onClick={() => setEditing(true)}><Icon name="draft" size={14}/>编辑正文 <em>Edit</em></button>
-            <span className="quiet">改动会写回笔记库文件 <em>Writes back to the vault</em></span>
+            <span className="quiet">改动会写回 NAS 笔记库文件 <em>Writes back to the vault on NAS</em></span>
           </div>}
         </div>
       : <div className="reader">
@@ -305,7 +332,7 @@ function ReadModal({node, onClose, editable}) {
           {err && <p className="quiet" role="alert">{err}</p>}
           <div className="form-actions">
             <button className="pill ghost" onClick={() => { setEditing(false); setErr(''); }} disabled={busy}>取消 <em>Cancel</em></button>
-            <button className="pill primary" onClick={save} disabled={busy || mtime == null}>{busy ? '保存中…' : '保存到笔记库'} <em>Save to vault</em></button>
+            <button className="pill primary" onClick={save} disabled={busy || mtime == null}>{busy ? '保存中…' : '保存到 NAS 笔记库'} <em>Save to vault on NAS</em></button>
           </div>
         </div>}
   </Modal>;

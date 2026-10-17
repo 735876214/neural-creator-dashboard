@@ -484,6 +484,12 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .model-picker { max-width: 100%; padding: 5px 8px; border: 1px solid var(--rule); border-radius: 8px;
   background: rgba(0,0,0,.3); color: var(--text); font-size: 12px; }
 .an-ask-model { display: flex; justify-content: flex-end; margin-top: 6px; }
+.reader-news h3 { margin: 14px 0 6px; font-size: 14px; color: var(--accent, #e8c884); }
+.reader-news p { margin: 0; line-height: 1.9; }
+.reader-news .rn-item { padding-left: 1em; text-indent: -1em; }
+.reader-news .rn-item::before { content: '· '; opacity: .6; }
+.reader-news a { color: inherit; text-decoration: none; border-bottom: 1px dashed rgba(232, 200, 132, .4); cursor: pointer; }
+.reader-news a:hover { border-bottom-color: currentColor; }
 .toast { position: fixed; left: 50%; bottom: 24px; z-index: 120; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 999px; font-size: 12.5px; animation: fadeUp .3s both; }
 
 /* —— 响应式 —— */
