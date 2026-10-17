@@ -24,7 +24,7 @@ import {readVault, parse} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
 import {aiEnabled, embedEnabled, aiInfo, analyzeNote, generateIdeas, answer, embed, listModels, validModel, TASK_MODELS} from './ai.mjs';
-import {refreshNews, forceRefresh, startNewsCron, listNews} from './news.mjs';
+import {refreshNews, forceRefresh, startNewsCron, listNews, ideasFromNews} from './news.mjs';
 import {randomUUID} from 'node:crypto';
 
 const VAULT = resolve(process.env.VAULT_DIR || '');
@@ -437,6 +437,15 @@ async function route(req, res, url) {
     const fn = force ? forceRefresh : refreshNews;
     const r = await fn(index, VAULT);
     return json(res, 200, r || {message: '今天的热点日报已生成过'});
+  }
+
+  // 从今天的热点里筛选题：auto=true 直接落盘进 04-选题池（射手座），否则只返回候选给前端预览
+  if (p === '/api/news/ideas' && req.method === 'POST') {
+    const {model: reqModel, auto} = await readBody(req).catch(() => ({}));
+    const useModel = await pickModel(reqModel, 'news');
+    const r = await ideasFromNews(index, VAULT, {model: useModel, auto: !!auto, io: {createNote}});
+    reindex();
+    return json(res, 200, r);
   }
 
   if (p.startsWith('/api/ai/jobs/') && req.method === 'GET') {
