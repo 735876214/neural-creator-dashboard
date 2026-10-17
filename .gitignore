@@ -21,3 +21,6 @@ notes-vault/
 !.env.example
 *.pem
 *.key
+
+# 服务端 .trash 留底（端到端测试对示例库跑写路径时产生）
+examples/vault/.trash/
