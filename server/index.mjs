@@ -51,6 +51,9 @@ const SESSION_DAYS = Number.isFinite(SESSION_ENV_DAYS) && SESSION_ENV_DAYS >= 1
   ? Math.min(365, Math.floor(SESSION_ENV_DAYS)) : 30;
 const SESSION_KEY_FILE = join(DATA_DIR, 'session.key');
 const KIND_DIR = {idea: '04-选题池', draft: '03-创作台', note: '05-方法库', post: '02-作品库', news: '00-AI热点', personal: '06-个人知识库'};
+// notes 表条目的图谱节点 id：personal 有自己的前缀（与 files / reindex / 前端图谱一致），
+// news 沿用 note: 前缀（历史语义边依赖它）。relate / ask 必须用这同一套，否则语义边会连到不存在的节点。
+const noteNodeId = n => n.kind === 'personal' ? 'personal:' + n.id : 'note:' + n.id;
 const SNAPSHOTS_DIR = '06-个人知识库/.snapshots';
 
 if (!process.env.VAULT_DIR) {
@@ -657,7 +660,7 @@ async function route(req, res, url) {
       const model = process.env.EMBED_MODEL;
       const have = new Map(index.embeddings(model).map(e => [e.id, e]));
       for (const n of items) {
-        const id = 'note:' + n.id, h = hashOf(n.body);
+        const id = noteNodeId(n), h = hashOf(n.body);
         if (have.get(id)?.hash !== h) {
           const [vec] = await embed([n.title + '\n' + n.body.slice(0, 2000)]);
           index.putEmbedding(id, model, vec, h);
@@ -725,7 +728,7 @@ async function route(req, res, url) {
     const contexts = [...hits.values()].slice(0, 8);
     if (!contexts.length) return json(res, 200, {answer: '笔记库里没有找到相关内容。', refs: [], model: useModel});
     const text = await answer(question, contexts, {model: useModel});
-    const byId = new Map([...d.works.map(w => ['post:' + w.post.id, w.rel]), ...d.notes.map(n => ['note:' + n.id, n.rel]), ...d.ideas.map(i => ['idea:' + i.id, i.rel]), ...d.drafts.map(x => ['draft:' + x.id, x.rel])]);
+    const byId = new Map([...d.works.map(w => ['post:' + w.post.id, w.rel]), ...d.notes.map(n => [noteNodeId(n), n.rel]), ...d.ideas.map(i => ['idea:' + i.id, i.rel]), ...d.drafts.map(x => ['draft:' + x.id, x.rel])]);
     const refs = contexts.map(c => ({id: c.id, title: c.title, path: byId.get(c.id) || null}));
     return json(res, 200, {answer: text, refs, model: useModel});
   }

@@ -36,10 +36,11 @@ services:
   note-api:
     build:
       # REPO_ROOT：仓库根目录（含 server/ 与 package.json）。
-      # 默认 = compose 文件所在目录（放法 A：compose 在仓库根，相对路径 ./ 直接可用）；
-      # compose 在 deploy/ 子目录时在 .env 里设 REPO_ROOT=..
+      # 默认 = compose 文件所在目录；compose 放别处时在 .env 里设 REPO_ROOT=<仓库路径>。
+      # dockerfile 显式指向仓库根的 Dockerfile；部分 NAS 图形界面会忽略该字段、
+      # 直接在上下文根找名为 Dockerfile 的文件 —— 文件就在那里，两种行为都能工作。
       context: ${REPO_ROOT:-.}
-      dockerfile: server/Dockerfile
+      dockerfile: Dockerfile
     container_name: neural-note-api
     restart: unless-stopped
     environment:
