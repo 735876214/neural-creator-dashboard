@@ -25,7 +25,7 @@ import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
 import {aiEnabled, embedEnabled, aiInfo, analyzeNote, generateIdeas, answer, embed, listModels, validModel, TASK_MODELS} from './ai.mjs';
 import {refreshNews, forceRefresh, startNewsCron, listNews, ideasFromNews} from './news.mjs';
-import {randomUUID} from 'node:crypto';
+import {randomBytes, createHmac, timingSafeEqual, randomUUID} from 'node:crypto';
 
 const VAULT = resolve(process.env.VAULT_DIR || '');
 const DATA_DIR = resolve(process.env.DATA_DIR || '.note-api');
@@ -39,6 +39,15 @@ const STATIC_DIR = process.env.STATIC_DIR ? resolve(process.env.STATIC_DIR) : nu
 const API_TOKEN = process.env.API_TOKEN || '';
 const VAULT_GIT = process.env.VAULT_GIT !== '0';
 const MAX_BODY = Number(process.env.MAX_BODY || 2 * 1024 * 1024);
+// 登录：密码来自环境变量，或 compose 里 auth 容器生成的只读文件。
+// 两者都没有 = 不开启登录（本机开发 / 纯静态）。
+const AUTH_FILE = process.env.AUTH_FILE ? resolve(process.env.AUTH_FILE) : '';
+const DASHBOARD_USER = process.env.DASHBOARD_USER || 'admin';
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
+const SESSION_ENV_DAYS = Number(process.env.SESSION_DAYS || 30);
+const SESSION_DAYS = Number.isFinite(SESSION_ENV_DAYS) && SESSION_ENV_DAYS >= 1
+  ? Math.min(365, Math.floor(SESSION_ENV_DAYS)) : 30;
+const SESSION_KEY_FILE = join(DATA_DIR, 'session.key');
 const KIND_DIR = {idea: '04-选题池', draft: '03-创作台', note: '05-方法库', post: '02-作品库', news: '00-AI热点'};
 
 if (!process.env.VAULT_DIR) {
@@ -75,6 +84,97 @@ async function readBody(req) {
   if (!chunks.length) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { fail(400, '请求体不是合法 JSON'); }
+}
+
+// —— 登录与会话 ——
+// 单用户登录。密码要么来自 DASHBOARD_PASSWORD，要么来自 compose 的 auth 容器
+// 写出的只读 auth.json（容器卷，不进笔记库、不进前端 bundle）。
+// 会话是 HMAC 签名的 HttpOnly Cookie；密钥持久化在 DATA_DIR，重启不会把所有人踢下线。
+const SESSION_COOKIE = 'nd_session';
+const SESSION_TTL = SESSION_DAYS * 86400;
+const LOGIN_WINDOW = 5 * 60 * 1000;
+const LOGIN_MAX = 8;
+const loginFailures = new Map();
+
+function currentAuth() {
+  if (DASHBOARD_PASSWORD) return {user: DASHBOARD_USER, password: DASHBOARD_PASSWORD};
+  if (!AUTH_FILE) return null;
+  try {
+    const raw = JSON.parse(readFileSync(AUTH_FILE, 'utf8'));
+    if (!raw?.password) return null;
+    return {user: String(raw.user || DASHBOARD_USER), password: String(raw.password)};
+  } catch { return null; }
+}
+
+function sessionKey() {
+  try {
+    const key = readFileSync(SESSION_KEY_FILE, 'utf8').trim();
+    if (key.length >= 32) return key;
+  } catch {}
+  const key = randomBytes(32).toString('hex');
+  try {
+    mkdirSync(DATA_DIR, {recursive: true});
+    writeFileSync(SESSION_KEY_FILE, key + '\n', {mode: 0o600});
+  } catch {} // 数据目录只读时退回进程内密钥：重启后重新登录，但功能不受影响
+  return key;
+}
+const SESSION_KEY = sessionKey();
+
+const safeEqual = (a, b) => {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && timingSafeEqual(x, y);
+};
+
+function readCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    if (part.slice(0, i).trim() === name) {
+      try { return decodeURIComponent(part.slice(i + 1).trim()); } catch { return ''; }
+    }
+  }
+  return '';
+}
+
+function signSession(payload, auth) {
+  return createHmac('sha256', SESSION_KEY + '\n' + auth.password).update(payload).digest('base64url');
+}
+
+function makeSession(auth) {
+  const payload = Buffer.from(JSON.stringify({
+    u: auth.user,
+    exp: Date.now() + SESSION_TTL * 1000
+  })).toString('base64url');
+  return payload + '.' + signSession(payload, auth);
+}
+
+function verifySession(req, auth) {
+  if (!auth) return null;
+  const raw = readCookie(req, SESSION_COOKIE);
+  const i = raw.lastIndexOf('.');
+  if (i <= 0) return null;
+  const payload = raw.slice(0, i), given = raw.slice(i + 1);
+  const expected = signSession(payload, auth);
+  const a = Buffer.from(given), b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (data.u !== auth.user || !(Number(data.exp) > Date.now())) return null;
+    return data;
+  } catch { return null; }
+}
+
+function cookieHeader(value, req) {
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const secure = proto === 'https' || !!req.socket.encrypted;
+  const age = value ? `Max-Age=${SESSION_TTL}` : 'Max-Age=0';
+  return `${SESSION_COOKIE}=${encodeURIComponent(value || '')}; Path=/; HttpOnly; SameSite=Lax; ${age}${secure ? '; Secure' : ''}`;
+}
+
+function clientIp(req) {
+  const forwarded = String(req.headers['x-real-ip'] || req.headers['x-forwarded-for'] || '')
+    .split(',')[0].trim();
+  return forwarded || req.socket.remoteAddress || 'unknown';
 }
 
 // 把客户端给的相对路径钉死在笔记库内部，只允许 .md。
@@ -184,7 +284,7 @@ function cleanFm(kind, fm) {
   if (typeof fm !== 'object' || Array.isArray(fm)) fail(400, 'fm 必须是对象');
   const out = {};
   if (kind === 'idea') {
-    for (const k of ['platform', 'priority', 'status', 'note']) {
+    for (const k of ['platform', 'priority', 'status', 'note', 'sourceNews']) {
       if (!(k in fm)) continue;
       if (typeof fm[k] !== 'string') fail(400, `选题属性 ${k} 必须是字符串`);
       out[k] = fm[k];
@@ -311,11 +411,17 @@ function serveStatic(req, res, pathname) {
 }
 
 // —— 鉴权 ——
-function authed(req) {
-  if (!API_TOKEN) return true;
+function tokenAuthed(req) {
+  if (!API_TOKEN) return false;
   const h = req.headers.authorization || '';
   const t = h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-api-token'] || '');
   return t === API_TOKEN;
+}
+
+function authed(req) {
+  if (tokenAuthed(req)) return true;
+  const auth = currentAuth();
+  return !auth || !!verifySession(req, auth);
 }
 
 // —— 路由 ——
@@ -324,7 +430,50 @@ async function route(req, res, url) {
 
   if (p === '/api/health') return json(res, 200, {ok: true, vault: VAULT, indexed: index.count()});
 
-  if (!authed(req)) return json(res, 401, {error: '未授权'});
+  // —— 登录：这几个端点在未登录时也必须可用 ——
+  if (p === '/api/session' && req.method === 'GET') {
+    const auth = currentAuth();
+    const session = auth ? verifySession(req, auth) : null;
+    return json(res, 200, {required: !!auth, authenticated: !auth || !!session, user: session?.u || null});
+  }
+
+  if (p === '/api/login' && req.method === 'POST') {
+    const auth = currentAuth();
+    if (!auth) return json(res, 200, {ok: true, required: false});
+    const ip = clientIp(req);
+    const now = Date.now();
+    const rec = loginFailures.get(ip);
+    if (rec && rec.reset > now && rec.n >= LOGIN_MAX) {
+      res.setHeader('retry-after', String(Math.ceil((rec.reset - now) / 1000)));
+      return json(res, 429, {error: '尝试太频繁，请稍后再试'});
+    }
+    const {username, password} = await readBody(req);
+    const ok = safeEqual(username ?? '', auth.user) & safeEqual(password ?? '', auth.password);
+    if (!ok) {
+      const next = rec && rec.reset > now ? {n: rec.n + 1, reset: rec.reset} : {n: 1, reset: now + LOGIN_WINDOW};
+      loginFailures.set(ip, next);
+      return json(res, 401, {error: '用户名或密码不正确', attemptsLeft: Math.max(0, LOGIN_MAX - next.n)});
+    }
+    loginFailures.delete(ip);
+    res.setHeader('set-cookie', cookieHeader(makeSession(auth), req));
+    return json(res, 200, {ok: true, user: auth.user});
+  }
+
+  if (p === '/api/logout' && req.method === 'POST') {
+    res.setHeader('set-cookie', cookieHeader('', req));
+    return json(res, 200, {ok: true});
+  }
+
+  // nginx 的 auth_request 子请求：204 = 放行，401 = 跳登录页
+  if (p === '/api/auth-check') {
+    if (authed(req)) {
+      res.writeHead(204, {'cache-control': 'no-store'});
+      return res.end();
+    }
+    return json(res, 401, {error: '未登录'});
+  }
+
+  if (!authed(req)) return json(res, 401, {error: '未登录'});
 
   if (p === '/api/data' && req.method === 'GET') {
     const d = loadData(url.searchParams.has('fresh') ? 0 : 1500);
@@ -333,7 +482,7 @@ async function route(req, res, url) {
       snapshot: d.snapshot,
       posts: d.works.map(w => w.post),
       postContent: d.works.map(w => w.content),
-      notes: d.notes.map(({tags, rel, ...n}) => n),
+      notes: d.notes.map(({rel, ...n}) => n),
       seedIdeas: d.ideas.map(({rel, ...i}) => i),
       seedDrafts: d.drafts.map(({rel, ...d}) => d),
       concepts: d.concepts,
@@ -341,7 +490,7 @@ async function route(req, res, url) {
       figures: d.figures,
       mtimes: d.mtimes || {},
       settings: readSettings(),
-      semantic: aiEdgeCache?.edges || [],
+      semantic: index.semanticEdges(),
       ai: aiInfo(),
       meta: {vault: VAULT, counts: d.counts, generatedAt: d.generatedAt, indexed: index.count()}
     });
@@ -571,16 +720,17 @@ function runJob(kind, total, fn, opts = {}) {
     try {
       const result = await fn(progress);
       index.updateJob(id, {status: 'done', done: total, message: '完成', result});
-      if (opts.cache) aiEdgeCache = result; // 语义边缓存在内存，/api/data 时带上
+      // 语义边写进 SQLite：刷新页面、重启服务后仍然保留，直到下次 relate 覆盖。
+      if (opts.cache && Array.isArray(result?.edges)) {
+        try { index.replaceSemantic(result.edges); }
+        catch (e) { console.error('[note-api] 语义边持久化失败：', e.message); }
+      }
     } catch (e) {
       index.updateJob(id, {status: 'error', error: String(e.message || e)});
     } finally { if (runningJob === id) runningJob = null; }
   })();
   return {id, kind, total, status: 'running'};
 }
-
-// 语义边的内存缓存（ai/relate 的产出）：/api/data 响应里的 semantic 字段直接从这里取。
-let aiEdgeCache = null;
 
 // 标题改了就把文件名跟着改：Obsidian 的双链按文件名解析，文件名不跟着动会让链接对不上
 function renameTo(title, rel) {
@@ -607,7 +757,18 @@ const server = createServer(async (req, res) => {
   try {
     if (url.pathname.startsWith('/api/')) return await route(req, res, url);
     if (STATIC_DIR && (req.method === 'GET' || req.method === 'HEAD')) {
-      if (!authed(req)) return json(res, 401, {error: '未授权'});
+      // 登录页与头像必须公开，否则未登录时连登录表单都打不开
+      const publicStatic = url.pathname === '/login.html' || url.pathname === '/avatar.svg';
+      if (!publicStatic && !authed(req)) {
+        // 直接访问页面时跳登录页；静态资源仍返回 401，避免把 HTML 当 JS 返回
+        const wantsHtml = String(req.headers.accept || '').includes('text/html') &&
+          !url.pathname.startsWith('/assets/');
+        if (wantsHtml) {
+          res.writeHead(302, {location: '/login.html', 'cache-control': 'no-store'});
+          return res.end();
+        }
+        return json(res, 401, {error: '未登录'});
+      }
       if (serveStatic(req, res, url.pathname)) return;
     }
     json(res, 404, {error: '没有这个路径'});
@@ -637,7 +798,11 @@ if (process.env.NEWS_CRON !== '0') {
 }
 
 server.listen(PORT, HOST, () => {
-  console.error(`[note-api] http://${HOST}:${PORT}  笔记库：${VAULT}${STATIC_DIR ? `  静态目录：${STATIC_DIR}` : ''}${API_TOKEN ? '  （已开启 token 鉴权）' : ''}`);
+  const auth = currentAuth();
+  const authNote = auth
+    ? `  已开启登录（用户 ${auth.user}）`
+    : (API_TOKEN ? '  （已开启 token 鉴权）' : '  未开启登录');
+  console.error(`[note-api] http://${HOST}:${PORT}  笔记库：${VAULT}${STATIC_DIR ? `  静态目录：${STATIC_DIR}` : ''}${authNote}`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { index.close(); process.exit(0); });

@@ -1,10 +1,11 @@
-// 神经图谱数据：全部由 src/data/sample.js 的资料在浏览器中推导，不读取任何外部仓库。
-// 连接来源：笔记正文 [[双链]]、目录归属、选题转草稿记录、作品话题标签、正文提及的概念词，
-// 以及两篇内容共同提及 ≥2 个概念时形成的「双向共振」。
-// 分区（partition）：知识笔记是 knowledge，作品/选题/草稿是 works。两套内容各有各的概念节点、
-// 共振也只在同区内发生——图谱上「方法笔记」和「已发布素材」是两个分开的集群，不连成一坨。
+// 神经图谱数据：全部由当前数据源（note-api / my-data.local.js / sample.js）在浏览器中推导。
+// 连接来源：笔记正文 [[双链]]、目录归属、选题转草稿记录、选题引用的热点日报、话题标签、
+// 正文提及的概念词、两篇内容共同提及 ≥2 个概念时形成的「双向共振」，以及 AI 语义边。
+// 分区（partition）：知识笔记和 AI 热点是 knowledge，作品/选题/草稿是 works。两套内容各有各的
+// 概念节点和共振；同名概念、共享话题和显式来源关系会自动把两个分区桥接起来。
 import {posts, workContent} from './works';
 import {notes as notesRaw, concepts as CONCEPTS} from '../data';
+import {getData} from '../data/store.js';
 import {CONFIG} from '../config';
 import {T} from './theme';
 
@@ -24,21 +25,25 @@ export const LINK_KINDS = {
   contain: '目录归属',
   wiki: '[[双链]]',
   source: '选题来源',
+  news: '热点依据',
+  publish: '发布为作品',
   tag: '话题标签',
   mention: '正文提及',
   resonance: '双向共振',
+  bridge: '同名概念',
   semantic: '语义相关'
 };
-export const LINK_EN = {contain: 'Contains', wiki: 'Wikilink', source: 'Source', tag: 'Topic', mention: 'Mention', resonance: 'Resonance', semantic: 'Semantic'};
-export const CONTENT = new Set(['post', 'note', 'idea', 'draft']);
-// 内容分区：方法笔记（note）与「已发布素材」这一侧（作品/选题/草稿）。数据里带 partition 时以数据为准。
-export const PARTITION_OF = n => n?.partition || (n?.kind === 'note' ? 'knowledge' : 'works');
+export const LINK_EN = {contain: 'Contains', wiki: 'Wikilink', source: 'Source', news: 'News source', publish: 'Published as', tag: 'Topic', mention: 'Mention', resonance: 'Resonance', bridge: 'Shared concept', semantic: 'Semantic'};
+export const CONTENT = new Set(['post', 'note', 'idea', 'draft', 'news']);
+// 内容分区：方法笔记 / AI 热点（knowledge）与作品侧（works）。数据里带 partition 时以数据为准。
+export const PARTITION_OF = n => n?.partition || (n?.kind === 'note' || n?.kind === 'news' ? 'knowledge' : 'works');
 
 const FOLDERS = [
   {id: 'f:works', title: '作品库', path: '02-作品库', angle: 180},
   {id: 'f:drafts', title: '创作台', path: '03-创作台', angle: 145},
   {id: 'f:ideas', title: '选题池', path: '04-选题池', angle: 35},
-  {id: 'f:methods', title: '方法库', path: '05-方法库 methods', angle: 0}
+  {id: 'f:methods', title: '方法库', path: '05-方法库 methods', angle: 0},
+  {id: 'f:00-AI热点', title: 'AI 热点', path: '00-AI热点', angle: -35}
 ];
 
 // 首页围绕光球的六个模块；角度与图谱布局的目录锚点一致，背景网络会朝各自模块蔓延。
@@ -53,6 +58,9 @@ export const MODULES = [
 export const moduleOf = node => MODULES.find(m => m.kind === node?.kind) || null;
 
 export const cleanTitle = t => String(t || '').replace(/^\d+[A-Z]?-☑️/, '').replace(/^\d+-/, '').replace(/_/g, ' · ');
+// 标题归一化：去掉 Obsidian 前缀、编号和多余空白，用于「草稿 → 选题 / 作品」的自动回连。
+export const normTitle = t => cleanTitle(String(t || '').replace(/^Obsidian[：:]\s*/i, ''))
+  .replace(/[·_\s]+/g, ' ').trim().toLowerCase();
 const contentOf = id => workContent.find(c => c.title === posts.find(p => p.id === id)?.title);
 export const postMedia = post => contentOf(post.id) || null;
 
@@ -89,7 +97,7 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     add({id: subId, kind: 'folder', title: sub.replace(/^\d+-/, '').replace(/\s+[a-z-]+$/i, ''), path: parts.slice(0, 2).join('/'), level: 2});
     link(isNews ? 'f:00-AI热点' : 'f:methods', subId, 'contain');
     const id = (isNews ? 'news:' : 'note:') + n.id;
-    add({id, kind: isNews ? 'news' : 'note', title: n.title, short: cleanTitle(n.title), path: n.path, folder: subId, partition: n.partition || 'knowledge', text: n.title + '\n' + n.body, body: n.body});
+    add({id, kind: isNews ? 'news' : 'note', title: n.title, short: cleanTitle(n.title), path: n.path, folder: subId, partition: n.partition || 'knowledge', text: n.title + '\n' + n.body, body: n.body, tags: n.tags || []});
     link(subId, id, 'contain');
   }
 
@@ -102,13 +110,36 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     link('f:drafts', 'draft:' + d.id, 'contain');
   }
 
-  // 选题 ⇄ 草稿：草稿记录来源选题；选题状态为「已转草稿」时反向也成立。
+  // 选题 ⇄ 草稿：草稿记录来源选题；没有 source 时按同名标题回连（导入或手工草稿也能自动接上）。
   for (const d of drafts) {
-    if (d.source == null) continue;
-    const idea = ideas.find(i => i.id === d.source);
+    let idea = d.source != null ? ideas.find(i => i.id === d.source) : null;
+    if (!idea) idea = ideas.find(i => normTitle(i.title) === normTitle(d.title));
     if (!idea) continue;
     link('draft:' + d.id, 'idea:' + idea.id, 'source');
     if (idea.status === '已转草稿') link('idea:' + idea.id, 'draft:' + d.id, 'source');
+  }
+
+  // 草稿 → 作品：标题归一化后相同即视为这篇草稿已经发布。发布后通常会把文件移进
+  // 02-作品库，标题保持不变，这条边让创作台和作品库自动接上。
+  const postByTitle = new Map();
+  for (const p of posts) postByTitle.set(normTitle(p.title), 'post:' + p.id);
+  for (const d of drafts) {
+    const pid = postByTitle.get(normTitle(d.title));
+    if (pid) link('draft:' + d.id, pid, 'publish');
+  }
+
+  // 热点日报 → 选题：自动生成的选题在 frontmatter 里记录 sourceNews（YYYY-MM-DD）。
+  // 日报节点按路径/标题里的日期匹配，手动建的选题没有这个字段就不连。
+  const newsByDate = new Map();
+  for (const n of nodes.values()) {
+    if (n.kind !== 'news') continue;
+    const date = (String(n.path || '').match(/(\d{4}-\d{2}-\d{2})\.md$/) || String(n.title || '').match(/(\d{4}-\d{2}-\d{2})/))?.[1];
+    if (date && !newsByDate.has(date)) newsByDate.set(date, n.id);
+  }
+  for (const i of ideas) {
+    const date = String(i.sourceNews || '').match(/(\d{4}-\d{2}-\d{2})/)?.[1];
+    const newsId = date && newsByDate.get(date);
+    if (newsId) link('idea:' + i.id, newsId, 'news');
   }
 
   // [[双链]]：方法笔记与草稿正文。能对应到现有内容即为实链，否则是「未创建」笔记。
@@ -133,7 +164,19 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     }
   }
 
-  // 话题标签（大小写合并）。
+  // 话题标签：frontmatter 的 tags 与正文里的 #话题 都自动成为节点（大小写合并）。
+  const hashtagsOf = text => {
+    const out = [];
+    for (const m of String(text || '').matchAll(/(?:^|\s)#([^\s#，。,.!?！？、；;:：()（）\[\]{}]+)/g)) {
+      const t = m[1].replace(/^#/, '').trim();
+      if (t && !/^\d+$/.test(t)) out.push(t);
+    }
+    return [...new Set(out)];
+  };
+  for (const n of nodes.values()) {
+    if (!CONTENT.has(n.kind)) continue;
+    n.tags = [...new Set([...(n.tags || []), ...hashtagsOf(n.text)])].slice(0, 12);
+  }
   for (const n of [...nodes.values()]) for (const tag of n.tags || []) {
     const id = 'tag:' + tag.toLowerCase();
     add({id, kind: 'tag', title: '#' + tag, short: '#' + tag, text: ''});
@@ -162,6 +205,22 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     const A = mentions.get(content[i].id) || [], B = mentions.get(content[j].id) || [];
     const shared = A.filter(x => B.includes(x));
     if (shared.length >= 2) { link(content[i].id, content[j].id, 'resonance', shared.length); link(content[j].id, content[i].id, 'resonance', shared.length); }
+  }
+
+  // 同名概念桥：知识分区（方法笔记 / AI 热点）和作品分区各有一个同名概念节点时，自动连一条桥。
+  const conceptByName = new Map();
+  for (const n of nodes.values()) if (n.kind === 'concept') {
+    const group = conceptByName.get(n.title.toLowerCase()) || {};
+    group[PARTITION_OF(n)] = n.id;
+    conceptByName.set(n.title.toLowerCase(), group);
+  }
+  for (const group of conceptByName.values()) if (group.knowledge && group.works) link(group.knowledge, group.works, 'bridge');
+
+  // AI 语义边（/api/ai/relate 的 embedding 结果）。服务端持久化，前端任务完成后也会
+  // 通过 setSemantic 更新运行时仓，所以图谱无需刷新就能重建。
+  for (const e of (getData().semantic || [])) {
+    if (!e?.a || !e?.b) continue;
+    link(e.a, e.b, 'semantic', e.sim ? Math.max(1, Math.round(e.sim * 10)) : 1);
   }
 
   const list = [...nodes.values()];
@@ -233,7 +292,7 @@ export function forceLayout(graph) {
     const n = idx.get(id);
     // 概念各归各的分区：作品侧偏左上、方法笔记侧偏右上，两团在图上分开
     if (n.kind === 'concept') return PARTITION_OF(n) === 'knowledge' ? [.62, -.78] : [-.62, -.78];
-    const f = FOLDERS.find(f => f.id === (n.folder?.startsWith('f:0') || n.level === 2 ? 'f:methods' : n.folder) || f.id === id);
+    const f = FOLDERS.find(f => f.id === (n.level === 2 ? 'f:methods' : n.folder) || f.id === id);
     return f ? [Math.cos(rad(f.angle)), Math.sin(rad(f.angle))] : null;
   };
   for (const n of N) {
@@ -243,8 +302,8 @@ export function forceLayout(graph) {
     const ang = base + (r() - .5) * (a ? 1.1 : 6.28);
     n.x = Math.cos(ang) * R * (0.8 + r() * .4); n.y = Math.sin(ang) * R * (0.8 + r() * .4); n.vx = 0; n.vy = 0;
   }
-  const rest = {contain: 120, wiki: 95, source: 90, tag: 52, mention: 135, resonance: 170};
-  const strength = {contain: .05, wiki: .06, source: .08, tag: .09, mention: .018, resonance: .006};
+  const rest = {contain: 120, wiki: 95, source: 90, news: 110, publish: 130, tag: 52, mention: 135, resonance: 170, bridge: 240, semantic: 150};
+  const strength = {contain: .05, wiki: .06, source: .08, news: .06, publish: .06, tag: .09, mention: .018, resonance: .006, bridge: .004, semantic: .008};
   for (let it = 0; it < 520; it++) {
     const alpha = 1 - it / 520;
     for (let i = 0; i < N.length; i++) for (let j = i + 1; j < N.length; j++) {
@@ -278,7 +337,7 @@ export function forceLayout(graph) {
 export function radialLayout(graph) {
   const depth = new Map([['core', 0]]), parent = new Map(), q = ['core'];
   const adj = new Map(graph.nodes.map(n => [n.id, []]));
-  const order = {contain: 0, source: 1, wiki: 1, tag: 2, mention: 3, resonance: 4};
+  const order = {contain: 0, source: 1, news: 1, publish: 1, wiki: 1, semantic: 2, tag: 2, mention: 3, resonance: 4, bridge: 5};
   for (const l of [...graph.links].sort((a, b) => order[a.kind] - order[b.kind])) { adj.get(l.a).push(l.b); adj.get(l.b).push(l.a); }
   while (q.length) { const id = q.shift(); for (const o of adj.get(id)) if (!depth.has(o)) { depth.set(o, depth.get(id) + 1); parent.set(o, id); q.push(o); } }
   const pos = {core: [0, 0]};

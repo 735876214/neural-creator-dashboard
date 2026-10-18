@@ -23,6 +23,7 @@
 ## 结构
 
 - `index.html`：页面入口，加载 `src/neural/main.jsx`。
+- `public/login.html`：独立登录页（代码自绘星空，无外部素材）；部署模式下未登录先到这里。
 - `src/neural/theme.js`、`neural.css` 顶部的 CSS 变量：配色（深空蓝紫底 + 金色星座线，只有一套深空配色）。
 - `src/config.js`：品牌、头像、页脚；`storagePrefix` 仅用于清理旧版浏览器缓存。
 - `src/data/index.js`：数据入口。本机存在 `src/data/my-data.local.js` 时优先用它，否则用 `./sample.js`；改数据不用动这个文件。
@@ -38,11 +39,12 @@
 - `snapshot`：`account`、`followers`、`capturedAt`、`publishedFrom`、`publishedTo`、`source`
 - `posts`：`id`、`title`、`date`（`YYYY-MM-DD HH:mm`）、`views`（数字，缺失写 0）、`likes`、`comments`、`saves`、`shares`、`follows`、`impressions`、`ctr`、`duration`（缺失写 `null`）
 - `postContent`：与 `posts` 按 `title` 对应，`body`、`tags`、`media`（`images` / `video`）
-- `notes`：`id`、`title`、`path`（形如 `05-方法库 methods/<子目录>/<文件名>.md`）、`body`
-- `seedIdeas`：`id`（数字）、`title`、`platform`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note`
+- `notes`：`id`、`title`、`path`（方法笔记形如 `05-方法库 methods/<子目录>/<文件名>.md`；AI 热点日报形如 `00-AI热点/YYYY-MM-DD.md` 并带 `kind: 'news'`）、`body`、`tags`（可选，frontmatter 与正文话题）
+- `seedIdeas`：`id`（数字）、`title`、`platform`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note`、`sourceNews`（可选，自动生成时的来源日报日期 `YYYY-MM-DD`）
 - `seedDrafts`：`id`、`title`、`body`、`source`（来源选题 id 或 `null`）
 - `concepts`：`[概念名, [关键词…]]`
 - `settings` / `mtimes`（仅部署模式）：`settings` 是月目标与 AI 模型选择（存 NAS 的 `vault/.dashboard/settings.json`）；`mtimes` 是节点 id → 文件 mtime，写回时做乐观锁。
+- `semantic`（仅部署模式）：AI 语义边 `{a, b, sim}`，由 `/api/ai/relate` 生成并持久化到 SQLite；`buildGraph` 会把它接成「语义相关」边。
 
 ## 规矩
 
@@ -52,6 +54,7 @@
 - **不要再引入视频或图片素材。** reskin v0 起星核、星团、星云全部代码自绘，`public/` 只剩头像 `avatar.svg`（抽象图形）；`npm run verify` 会检查页面里没有 `<video>`。
 - `src/data/my-data.local.js` 含用户个人笔记，已在 `.gitignore`；不要提交、不要写进示例或文档。
 - **业务数据不保存在浏览器。** 部署模式下选题、草稿、月目标、AI 模型选择一律经 `src/neural/persist.js` 写入 NAS（vault `.md` + `vault/.dashboard/settings.json`），不要新增 localStorage 持久化；纯静态模式只读，编辑入口由 `isLive()` 禁用。
+- **登录是部署模式的一部分。** note-api 用单用户密码 + HMAC 会话 Cookie（`/api/session`、`/api/login`、`/api/logout`、`/api/auth-check`），密码来自 `DASHBOARD_PASSWORD` 或 compose 的 `auth` 容器写到容器卷里的 `auth.json`；nginx 用 `auth_request` 保护静态资源。`login.html` 与 `avatar.svg` 必须保持公开。不要把登录改回 Basic Auth，也不要把密码写进前端 bundle 或笔记库。
 - 写回必须用相对路径 + `mtime` 乐观锁；409 不静默覆盖。删除草稿走 `DELETE /api/note`（服务端先备份到 `.trash/`）。
 - `src/data/sample.js` 与 `examples/vault/` 只能放虚构内容。
 - 纯静态模式不要加入联网请求、统计脚本或 AI 调用；部署模式的前端请求只能发往同源 `/api`（note-api）。

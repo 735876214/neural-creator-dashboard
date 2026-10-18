@@ -83,7 +83,9 @@ function renderMd(date, items, {digest, topics}) {
     `---`, '',
     `共 ${items.length} 条原始动态（最近 48 小时）。生成自 [AIHOT](${NEWS_SOURCE}) RSS，由 AI 汇总，可能存在偏差，引用前请核对原文。`
   ].join('\n');
-  return writeDoc('', {fm: {tags: ['AI热点'], date, kind: 'news'}, body});
+  // 主题名也写进 tags：图谱里不同日期的日报会因共享主题自动靠拢，也能和正文话题对上。
+  const tags = ['AI热点', ...topics.map(t => String(t.name || '').trim()).filter(Boolean).slice(0, 6)];
+  return writeDoc('', {fm: {tags, date, kind: 'news'}, body});
 }
 
 // 生成（或复用）当天的日报。io 注入便于测试：{writeExisting, createNote, mtimeOf, join, readFileSync}
@@ -146,6 +148,7 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
     platform: ['小红书', 'B站', '公众号', '抖音'].includes(i.platform) ? i.platform : '小红书',
     priority: ['高', '中', '低'].includes(i.priority) ? i.priority : '中',
     note: String(i.note || '').slice(0, 300),
+    sourceNews: news.date,
     newsTitles: (i.newsTitles || []).map(String).slice(0, 3),
     newsLinks: (i.newsTitles || []).map(linkOf).filter(Boolean)
   })).filter(i => i.title);
@@ -156,7 +159,12 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
   const written = [];
   if (news.ideasAt) return {candidates, written, skipped: '今天的选题已自动落盘过'};
   for (const c of candidates) {
-    const r = createNote('idea', {title: c.title, body: c.note, fm: {platform: c.platform, priority: c.priority, status: '待写', note: c.note}});
+    // 正文保留依据的热点条目与原文链接，frontmatter 记 sourceNews，图谱据此连回日报。
+    const sources = c.newsTitles.length
+      ? ['', '依据热点：', ...c.newsTitles.map((t, i) => `- ${c.newsLinks?.[i] ? `[${t}](${c.newsLinks[i]})` : t}`)].join('\n')
+      : '';
+    const body = `${c.note || ''}${sources}`.trim();
+    const r = createNote('idea', {title: c.title, body, fm: {platform: c.platform, priority: c.priority, status: '待写', note: c.note, sourceNews: news.date}});
     written.push({...c, path: r.path});
   }
   if (written.length) {

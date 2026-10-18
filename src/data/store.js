@@ -55,6 +55,13 @@ export function setError(e) {
   for (const fn of listeners) fn();
 }
 
+// AI 语义关联任务完成后由前端写回运行时仓：主图谱立刻重建，不需要刷新页面。
+// 真正的持久化在服务端 SQLite；这里只是当前会话的镜像。
+export function setSemantic(edges) {
+  data = {...data, semantic: Array.isArray(edges) ? edges : []};
+  for (const fn of listeners) fn();
+}
+
 // 保存后刷新用：订阅变化重新推导图谱。
 export function subscribe(fn) {
   listeners.add(fn);

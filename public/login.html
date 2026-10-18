@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<link rel="icon" type="image/svg+xml" href="/avatar.svg"/>
+<meta name="theme-color" content="#04050c"/>
+<title>登录 · Neural Creator Dashboard</title>
+<style>
+  :root {
+    --bg: #04050c;
+    --text: #eaeefb;
+    --text-2: #aeb8d4;
+    --muted: #8b95b4;
+    --gold: #e8c884;
+    --gold-2: #b98f3c;
+    --line: rgba(198, 214, 255, .13);
+    --line-2: rgba(206, 220, 255, .26);
+    --serif: "Songti SC", "Source Han Serif SC", "Noto Serif SC", "STSong", "SimSun", Georgia, serif;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid;
+    place-items: center;
+    min-height: 100vh;
+    padding: 28px 18px;
+    overflow-x: hidden;
+    color: var(--text);
+    background:
+      radial-gradient(ellipse 90% 70% at 20% 12%, #101a3c 0%, rgba(9, 13, 30, .82) 44%, transparent 80%),
+      radial-gradient(ellipse 82% 62% at 86% 86%, #150f33 0%, rgba(9, 9, 24, .64) 46%, transparent 82%),
+      linear-gradient(180deg, #080b18 0%, #06080f 56%, #04050b 100%);
+    font: 13px/1.55 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  #sky { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse 80% 74% at 50% 48%, transparent 38%, rgba(3, 4, 10, .42) 74%, rgba(2, 3, 7, .84) 100%);
+  }
+
+  .stage { position: relative; width: min(100%, 424px); }
+  .stage::before, .stage::after {
+    content: ""; position: absolute; left: 50%; top: -92px; translate: -50% 0;
+    width: 340px; height: 340px; border-radius: 50%; pointer-events: none;
+  }
+  .stage::before {
+    background: radial-gradient(circle closest-side,
+      rgba(255, 240, 200, .92) 0%, rgba(255, 214, 140, .52) 22%,
+      rgba(255, 180, 90, .2) 44%, rgba(200, 150, 255, .1) 66%, transparent 88%);
+    filter: blur(6px);
+    animation: breathe 6.5s ease-in-out infinite;
+  }
+  .stage::after {
+    border: 1px solid rgba(232, 200, 132, .2);
+    box-shadow: 0 0 60px rgba(232, 200, 132, .1), inset 0 0 60px rgba(160, 180, 255, .06);
+    transform: rotate(-18deg) scaleY(.42);
+    animation: orbit 38s linear infinite;
+  }
+  @keyframes breathe { 50% { opacity: .74; scale: 1.05; } }
+  @keyframes orbit { to { transform: rotate(342deg) scaleY(.42); } }
+
+  .card {
+    position: relative;
+    padding: 34px 32px 28px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: linear-gradient(160deg, rgba(22, 30, 62, .68), rgba(5, 7, 16, .86));
+    box-shadow: inset 0 1px 0 rgba(214, 226, 255, .07), 0 28px 70px rgba(0, 0, 0, .52);
+    backdrop-filter: blur(18px) saturate(1.2);
+    -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  }
+  .card.shake { animation: shake .32s ease; }
+  @keyframes shake {
+    20% { transform: translateX(-6px); } 40% { transform: translateX(5px); }
+    60% { transform: translateX(-3px); } 80% { transform: translateX(2px); }
+  }
+
+  .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 26px; }
+  .mark {
+    display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px;
+    border: 1px solid rgba(232, 200, 132, .32);
+    background: rgba(20, 30, 66, .72);
+    box-shadow: 0 0 22px rgba(232, 200, 132, .16);
+  }
+  .brand-text { display: grid; gap: 3px; }
+  .brand-text b { font: 600 13px/1.2 var(--serif); letter-spacing: .18em; color: #f1e9d2; }
+  .brand-text small { font-size: 10px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }
+
+  h1 { margin: 0 0 6px; font: 500 25px/1.3 var(--serif); letter-spacing: .06em; color: #fff6e2; }
+  h1 em { display: block; margin-top: 5px; font: 400 11px/1.4 var(--sans); letter-spacing: .16em; color: var(--gold); text-transform: uppercase; }
+  .lead { margin: 0 0 24px; color: var(--muted); font-size: 12px; }
+  .lead em { font-style: normal; display: block; margin-top: 3px; opacity: .78; }
+
+  form { display: grid; gap: 14px; }
+  label { display: flex; align-items: baseline; gap: 7px; font-size: 11.5px; letter-spacing: .08em; color: var(--text-2); }
+  label span em { font-style: normal; color: var(--muted); margin-left: 5px; letter-spacing: .02em; text-transform: uppercase; font-size: 9.5px; }
+  .field { position: relative; }
+  input {
+    width: 100%; height: 44px; padding: 0 13px;
+    color: var(--text); font: 14px/1 var(--sans);
+    background: rgba(4, 6, 14, .62);
+    border: 1px solid var(--line); border-radius: 11px;
+    outline: none; transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
+  }
+  input:hover { border-color: var(--line-2); }
+  input:focus {
+    border-color: rgba(232, 200, 132, .58);
+    box-shadow: 0 0 0 3px rgba(232, 200, 132, .1), 0 0 26px rgba(232, 200, 132, .08);
+    background: rgba(6, 9, 20, .82);
+  }
+  input::placeholder { color: #5f6a89; }
+  .field input { padding-right: 62px; }
+  .reveal {
+    position: absolute; right: 7px; top: 7px; height: 30px; padding: 0 10px;
+    border: 0; border-radius: 8px; background: transparent;
+    color: var(--muted); font: 11px/1 var(--sans); letter-spacing: .04em; cursor: pointer;
+  }
+  .reveal:hover { color: var(--gold); background: rgba(232, 200, 132, .07); }
+
+  button.submit {
+    position: relative; height: 45px; margin-top: 6px; border: 0; border-radius: 12px; cursor: pointer;
+    color: #1b1608; font: 600 13.5px/1 var(--sans); letter-spacing: .16em;
+    background: linear-gradient(180deg, #f4dda6, #d9b56d 58%, #c39a4e);
+    box-shadow: 0 8px 26px rgba(200, 158, 76, .24), inset 0 1px 0 rgba(255, 250, 232, .7);
+    transition: transform .16s ease, box-shadow .16s ease, filter .16s ease;
+  }
+  button.submit:hover { filter: brightness(1.05); box-shadow: 0 10px 32px rgba(200, 158, 76, .32); }
+  button.submit:active { transform: translateY(1px); }
+  button.submit:disabled { cursor: progress; filter: saturate(.6) brightness(.92); }
+  button.submit:focus-visible, .reveal:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+  .status { min-height: 20px; margin: 2px 0 0; color: #ff9fae; font-size: 12px; }
+  .status.ok { color: #9fe6c8; }
+  .status:empty { min-height: 0; margin: 0; }
+
+  .foot { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); color: #6d7897; font-size: 10.5px; line-height: 1.5; }
+  .foot em { display: block; font-style: normal; margin-top: 2px; opacity: .8; }
+
+  .checking { display: flex; align-items: center; gap: 9px; min-height: 220px; color: var(--muted); font-size: 12px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 12px var(--gold); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .28; transform: scale(.7); } }
+  [hidden] { display: none !important; }
+
+  @media (max-width: 420px) {
+    .card { padding: 28px 22px 24px; }
+    h1 { font-size: 22px; }
+    .stage::before, .stage::after { width: 260px; height: 260px; top: -66px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .stage::before, .stage::after, .dot { animation: none; }
+    .card.shake { animation: none; }
+    input, button.submit { transition: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="sky" aria-hidden="true"></canvas>
+<div class="vignette" aria-hidden="true"></div>
+
+<main class="stage">
+  <section class="card" id="card" aria-labelledby="title">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22">
+          <g stroke="#3b4a86" stroke-width=".7" opacity=".85">
+            <path d="M12 5 6.5 9M12 5l6 3.6M6.5 9 7 17.5M12 5v12.4M18 8.6 17 17.6M7 17.5l10 .1"/>
+          </g>
+          <path fill="#ffd98f" d="m12 1.6 1.5 4.3 4.3 1.5-4.3 1.5L12 13.2l-1.5-4.3L6.2 7.4l4.3-1.5Z"/>
+          <circle cx="7" cy="17.6" r="1.5" fill="#a9bcff"/>
+          <circle cx="17" cy="17.7" r="1.1" fill="#7f8fd0"/>
+          <circle cx="18" cy="8.6" r=".9" fill="#fff"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <b>NEURAL CREATOR</b>
+        <small>dashboard · 星穹星座</small>
+      </span>
+    </div>
+
+    <div class="checking" id="checking"><span class="dot" aria-hidden="true"></span>正在确认登录状态 · Checking session…</div>
+
+    <div id="panel" hidden>
+      <h1 id="title">登录你的星穹<em>Sign in</em></h1>
+      <p class="lead">笔记库只对你开放<em>Your vault stays private.</em></p>
+
+      <form id="form" novalidate>
+        <label for="username">用户名 <span><em>Username</em></span></label>
+        <div class="field">
+          <input id="username" name="username" type="text" value="admin" autocomplete="username" autocapitalize="none" spellcheck="false" required/>
+        </div>
+
+        <label for="password">密码 <span><em>Password</em></span></label>
+        <div class="field">
+          <input id="password" name="password" type="password" autocomplete="current-password" required/>
+          <button class="reveal" id="reveal" type="button" aria-label="显示密码" aria-pressed="false">显示</button>
+        </div>
+
+        <button class="submit" id="submit" type="submit">进入看板 <span aria-hidden="true">·</span> ENTER</button>
+        <p class="status" id="status" role="alert" aria-live="polite"></p>
+      </form>
+
+      <p class="foot">笔记是明文，请只在局域网或 Tailscale 内访问<em>Plaintext notes — keep this on your private network.</em></p>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const $ = id => document.getElementById(id);
+  const panel = $('panel'), checking = $('checking'), card = $('card');
+  const form = $('form'), user = $('username'), pass = $('password');
+  const submit = $('submit'), status = $('status'), reveal = $('reveal');
+
+  // 只允许站内跳转，避免 ?next=//evil.example 这类开放重定向
+  function safeNext(raw) {
+    const next = String(raw || '');
+    if (!next.startsWith('/') || next.startsWith('//') || next.startsWith('/\\')) return '/';
+    return next;
+  }
+  const next = safeNext(new URLSearchParams(location.search).get('next'));
+
+  function setError(text) {
+    status.textContent = text || '';
+    status.classList.remove('ok');
+    if (!text || reduced) return;
+    card.classList.remove('shake');
+    void card.offsetWidth;
+    card.classList.add('shake');
+  }
+
+  function showForm() {
+    checking.hidden = true;
+    panel.hidden = false;
+    (user.value ? pass : user).focus({preventScroll: true});
+  }
+
+  // —— 已登录 / 未开启登录：直接回看板；否则显示表单 ——
+  (async () => {
+    try {
+      const res = await fetch('/api/session', {headers: {accept: 'application/json'}, cache: 'no-store'});
+      if (res.status === 404) { location.replace(next); return; } // 纯静态站没有登录接口
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const s = await res.json();
+      if (!s.required || s.authenticated) { location.replace(next); return; }
+      showForm();
+    } catch {
+      // note-api 没起来时仍然显示表单，提交时再给出明确错误
+      showForm();
+      setError('连不上笔记库服务，请确认 note-api 正在运行 · Cannot reach note-api');
+    }
+  })();
+
+  // —— 密码显隐 ——
+  reveal.addEventListener('click', () => {
+    const shown = pass.type === 'text';
+    pass.type = shown ? 'password' : 'text';
+    reveal.textContent = shown ? '显示' : '隐藏';
+    reveal.setAttribute('aria-pressed', String(!shown));
+    reveal.setAttribute('aria-label', shown ? '显示密码' : '隐藏密码');
+    pass.focus({preventScroll: true});
+  });
+
+  // —— 登录 ——
+  let busy = false;
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (busy) return;
+    if (!user.value.trim() || !pass.value) {
+      setError('请输入用户名和密码 · Enter your username and password');
+      (user.value.trim() ? pass : user).focus();
+      return;
+    }
+    busy = true;
+    submit.disabled = true;
+    status.textContent = '';
+    status.classList.remove('ok');
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({username: user.value.trim(), password: pass.value})
+      });
+      let body = {};
+      try { body = await res.json(); } catch {}
+      if (res.ok) {
+        status.textContent = '正在进入… · Signing in…';
+        status.classList.add('ok');
+        location.replace(next);
+        return;
+      }
+      if (res.status === 429) setError('尝试太频繁，请稍后再试 · Too many attempts, try again later');
+      else if (res.status === 401) setError('用户名或密码不正确 · Incorrect username or password');
+      else setError((body.error || '登录失败') + ' · HTTP ' + res.status);
+      pass.value = '';
+      pass.focus({preventScroll: true});
+    } catch {
+      setError('连不上笔记库服务，请确认 note-api 正在运行 · Cannot reach note-api');
+    } finally {
+      busy = false;
+      submit.disabled = false;
+    }
+  });
+
+  // —— 星穹背景：与看板同一套配色，全部代码自绘 ——
+  const canvas = $('sky');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, dpr = 1, stars = [], meteors = [], raf = 0;
+  let last = performance.now(), t = 0, nextMeteor = 3 + Math.random() * 5;
+  const rnd = (() => { let s = 20261018; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); })();
+  const tint = () => {
+    const q = rnd();
+    return q > .9 ? '255,226,186' : q > .62 ? '255,250,238' : q > .3 ? '226,234,255' : '242,246,255';
+  };
+
+  function build() {
+    dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    const n = Math.round(Math.min(420, Math.max(150, W * H / 4200)));
+    stars = Array.from({length: n}, () => {
+      const q = rnd();
+      const tier = q > .965 ? 2 : q > .86 ? 1 : 0;
+      return {
+        x: rnd(), y: rnd(), tier,
+        r: (tier === 2 ? 1.5 + rnd() * .9 : tier === 1 ? .9 + rnd() * .45 : .42 + rnd() * .4) * (.9 + .25 * rnd()),
+        a: tier === 2 ? .92 : tier === 1 ? .5 + rnd() * .3 : .16 + rnd() * .34,
+        ph: rnd() * 6.283, sp: .3 + rnd() * 1.4, c: tint()
+      };
+    });
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (reduced) draw(0);
+  }
+
+  function draw(dt) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+    for (const s of stars) {
+      const tw = reduced ? 1 : .58 + .42 * Math.sin(t * s.sp + s.ph) * Math.sin(t * s.sp * .37 + s.ph * 1.7);
+      ctx.globalAlpha = s.a * Math.max(.14, tw);
+      const x = s.x * W, y = s.y * H;
+      if (s.tier === 2) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, s.r * 8);
+        g.addColorStop(0, `rgba(${s.c},1)`);
+        g.addColorStop(.2, `rgba(${s.c},.5)`);
+        g.addColorStop(1, `rgba(${s.c},0)`);
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(x, y, s.r * 8, 0, 6.283); ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(x, y, Math.max(.8, s.r * .34), 0, 6.283); ctx.fill();
+      } else if (s.tier === 1) {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, s.r * 4);
+        g.addColorStop(0, `rgba(${s.c},.9)`);
+        g.addColorStop(1, `rgba(${s.c},0)`);
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(x, y, s.r * 4, 0, 6.283); ctx.fill();
+      } else {
+        ctx.fillStyle = `rgb(${s.c})`;
+        ctx.fillRect(x, y, s.r, s.r);
+      }
+    }
+
+    if (!reduced) {
+      nextMeteor -= dt;
+      if (nextMeteor <= 0 && meteors.length < 2) {
+        const dir = Math.random() < .5 ? -1 : 1;
+        const ang = .16 + Math.random() * .3;
+        meteors.push({
+          x: (dir < 0 ? .3 + Math.random() * .68 : .02 + Math.random() * .68) * W,
+          y: (.02 + Math.random() * .5) * H,
+          vx: dir * Math.cos(ang), vy: Math.sin(ang),
+          sp: (.42 + Math.random() * .3) * Math.min(W, H),
+          len: .1 + Math.random() * .1, life: 0, dur: .85 + Math.random() * .5
+        });
+        nextMeteor = 6 + Math.random() * 9;
+      }
+      for (let i = meteors.length - 1; i >= 0; i--) {
+        const m = meteors[i];
+        m.life += dt;
+        if (m.life >= m.dur) { meteors.splice(i, 1); continue; }
+        const k = m.life / m.dur, head = k * m.sp * (1.15 - .35 * k);
+        const hx = m.x + m.vx * head, hy = m.y + m.vy * head;
+        const tl = m.len * Math.min(W, H) * (1 - k * .55);
+        const tx = hx - m.vx * tl, ty = hy - m.vy * tl;
+        const fade = Math.sin(Math.min(1, k * 3.2) * Math.PI * .5) * (1 - Math.pow(k, 2.2));
+        const lg = ctx.createLinearGradient(tx, ty, hx, hy);
+        lg.addColorStop(0, 'rgba(196,214,255,0)');
+        lg.addColorStop(.72, `rgba(196,214,255,${.34 * fade})`);
+        lg.addColorStop(1, `rgba(255,253,246,${.85 * fade})`);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = lg; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(hx, hy); ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function frame(now) {
+    raf = requestAnimationFrame(frame);        // 先排下一帧，本帧出错也不会停住
+    try {
+      const dt = Math.max(0, Math.min(.05, (now - last) / 1000));
+      last = Math.max(last, now);
+      if (document.hidden) return;
+      t += dt;
+      draw(dt);
+    } catch { /* 背景只是装饰，出错不影响登录 */ }
+  }
+
+  build();
+  addEventListener('resize', build);
+  if (!reduced) raf = requestAnimationFrame(frame);
+  else cancelAnimationFrame(raf);
+})();
+</script>
+</body>
+</html>

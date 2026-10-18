@@ -57,8 +57,13 @@ function check(m, label, {allowEmptyPosts = false} = {}) {
     if (!m.postContent.some(c => c.title === p.title)) errs.push(`postContent 里找不到作品：${p.title}`);
   }
   if (new Set(m.posts.map(p => p.id)).size !== m.posts.length) errs.push('作品 id 有重复');
-  // 导入脚本写「05-方法库 methods/」；手写数据时也用这个前缀。
-  for (const n of m.notes) if (!/^05-方法库 methods\/[^/]+\/.+/.test(n.path || '')) errs.push(`笔记 path 格式不对：${n.title}`);
+  // 导入脚本写「05-方法库 methods/」；手写数据时也用这个前缀。AI 热点日报走自己的目录。
+  for (const n of m.notes) {
+    const okPath = n.kind === 'news'
+      ? /^00-AI热点\/.+\.md$/.test(n.path || '')
+      : /^05-方法库 methods\/[^/]+\/.+/.test(n.path || '');
+    if (!okPath) errs.push(`笔记 path 格式不对：${n.title}`);
+  }
   for (const i of m.seedIdeas) if (typeof i.id !== 'number' || !['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题 id 须为数字、status 须为 待写/待扩展/已转草稿：${i.title}`);
   for (const d of m.seedDrafts) if (d.source != null && !m.seedIdeas.some(i => i.id === d.source)) errs.push(`草稿的来源选题不存在：${d.title}`);
   for (const c of m.concepts) if (!Array.isArray(c) || typeof c[0] !== 'string' || !Array.isArray(c[1])) errs.push('concepts 格式应为 [概念名, [关键词…]]');
@@ -147,6 +152,31 @@ for (const f of ['src/neural/pages.jsx']) {
 if (!/from '\.\/constellations'/.test(home) || !/figData/.test(home) || !/drawCluster\(canvasRefs/.test(home)) fail('Home.jsx 没有用星座层渲染星团');
 else ok('主视图星团层 = 六星座（烘焙 + 主星闪烁）');
 for (const f of ['media/orb.mp4', 'media/jellyfish.mp4']) if (existsSync(join(ROOT, 'public', f))) warnings.push(`public/${f} 已不再被引用，可以删除（保留不影响）`);
+
+// 3c. 登录页与会话鉴权
+console.log('登录');
+const loginSrc = existsSync(join(ROOT, 'public/login.html')) ? readFileSync(join(ROOT, 'public/login.html'), 'utf8') : '';
+if (!loginSrc) fail('缺少 public/login.html');
+else {
+  if (!/<form/i.test(loginSrc) || !/\/api\/login/.test(loginSrc)) fail('login.html 必须包含登录表单并调用 /api/login');
+  else ok('登录页表单与 /api/login');
+  if (/<video/i.test(loginSrc) || /<img[^>]+src="https?:/i.test(loginSrc)) fail('login.html 不应引用视频或外部图片素材');
+  else ok('登录页零视频 / 外部图片素材');
+}
+const serverSrc = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+for (const [label, re] of [
+  ['会话接口 /api/session', /p === '\/api\/session'/],
+  ['登录接口 /api/login', /p === '\/api\/login'/],
+  ['nginx 校验接口 /api/auth-check', /p === '\/api\/auth-check'/],
+  ['HttpOnly 会话 Cookie', /HttpOnly; SameSite=Lax/],
+  ['登录失败限流', /LOGIN_MAX/]
+]) { if (!re.test(serverSrc)) fail(`note-api 缺少：${label}`); else ok(label); }
+const nginxSrc = readFileSync(join(ROOT, 'deploy/nginx.conf'), 'utf8');
+if (!/auth_request \/_auth/.test(nginxSrc) || !/location = \/login\.html/.test(nginxSrc)) fail('部署版 nginx 必须用 auth_request 保护静态资源，并放行 login.html');
+else ok('nginx auth_request 保护静态资源、放行登录页');
+const bootSrc = readFileSync(join(ROOT, 'src/neural/boot.js'), 'utf8');
+if (!/\/api\/session/.test(bootSrc)) fail('boot.js 没有在取数前检查 /api/session');
+else ok('boot.js 取数前检查登录状态');
 
 // 4. 页面与素材
 console.log('页面与素材');

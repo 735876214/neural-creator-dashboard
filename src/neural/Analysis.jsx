@@ -2,7 +2,7 @@ import React, {useEffect, useMemo, useState} from 'react';
 import {KINDS, CONTENT, MODULES, neighbors, latent, askGraph, LINK_KINDS, LINK_EN} from './graph';
 import {Icon} from './icons';
 import {profileFor, bandsOf, outerCountOf} from './v41';
-import {isLive, getMeta, getFiles} from '../data/store';
+import {isLive, getMeta, getFiles, setSemantic} from '../data/store';
 import {aiAnalyze, aiRelate, aiIdeas, aiModels, pickedModel, setPickedModel} from './sync';
 import {apiUrl} from './persist';
 
@@ -109,7 +109,10 @@ function AiPanel({graph, node, onGo, onToast}) {
       {ai.embed?.enabled && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
         const job = await aiRelate();
         const r = await pollJob(job.job.id);
-        const mine = (r.result?.edges || []).filter(e => e.a === 'note:' + node.id || e.b === 'note:' + node.id);
+        const edges = r.result?.edges || [];
+        // 写入运行时仓：主图谱立即重建，语义边不用刷新页面才出现。
+        setSemantic(edges);
+        const mine = edges.filter(e => e.a === 'note:' + node.id || e.b === 'note:' + node.id);
         return {related: mine.map(e => ({id: e.a === 'note:' + node.id ? e.b : e.a, sim: e.sim}))};
       }, '语义关联已更新')}>语义关联 <em>Semantic links</em></button>}
       <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
@@ -221,6 +224,7 @@ function analyze(graph, node) {
     const rank = [...P].sort((a, b) => b.post.views - a.post.views).indexOf(node) + 1;
     const engage = p.views ? (p.likes + p.comments + p.saves + p.shares) / p.views * 100 : null;
     const ideas = latent(graph, node.id).filter(x => graph.index.get(x.id).kind === 'idea');
+    const fromDraft = [...nb.out, ...nb.back, ...nb.mutual].filter(x => graph.index.get(x.id).kind === 'draft').map(x => graph.index.get(x.id));
     return {
       badge: ['已发布', 'Published'], status: `首发 First published ${p.date} · ${node.tags.length} 个话题 topics`,
       action: ['查看作品', 'Open in Works', {type: 'page', page: 'library', id: p.id}],
@@ -230,6 +234,7 @@ function analyze(graph, node) {
       all: [['曝光', 'Impressions', fmt(p.impressions)], ['封面点击率', 'CTR', p.ctr == null ? '—' : p.ctr + '%'], ['平均观看', 'Avg. watch', p.duration == null ? '—' : p.duration + 's'], ['点赞', 'Likes', fmt(p.likes)], ['评论', 'Comments', fmt(p.comments)], ['分享', 'Shares', fmt(p.shares)], ['互动率', 'Engagement', engage == null ? '—' : engage.toFixed(1) + '%'], ['涨粉转化', 'Follow rate', p.follows == null || !p.views ? '—' : (p.follows / p.views * 1000).toFixed(1) + '‰']],
       insights: [
         ['表现排名', 'Ranking', `观看第 ${rank}/${P.length} 名；收藏率${r >= avg ? '高于' : '低于'}其他作品均值 ${Math.abs(r - avg).toFixed(1)} 个百分点。`, r >= avg ? 'gold' : 'info'],
+        ...(fromDraft.length ? [['来自草稿', 'From draft', `同名草稿「${fromDraft.slice(0, 3).map(x => x.short || x.title).join('、')}」已进入作品库。`, 'gold']] : []),
         ...resonance,
         ...(ideas.length ? [['可延伸选题', 'Next ideas', ideas.slice(0, 2).map(x => `「${graph.index.get(x.id).short}」（共享：${x.via.join('、')}）`).join('；'), 'info']] : []),
         ...(p.updated ? [['数据时点', 'Snapshot', p.updated, 'muted']] : [['数据时点', 'Snapshot', '读取时累计值，缺失项保留为「—」。', 'muted']])
@@ -255,6 +260,7 @@ function analyze(graph, node) {
     const posts = lat.filter(x => graph.index.get(x.id).kind === 'post');
     const notes = lat.filter(x => graph.index.get(x.id).kind === 'note').length + nb.mutual.filter(x => graph.index.get(x.id).kind === 'note').length;
     const hasDraft = [...nb.out, ...nb.back, ...nb.mutual].some(x => graph.index.get(x.id).kind === 'draft');
+    const news = [...nb.out, ...nb.back, ...nb.mutual].filter(x => graph.index.get(x.id).kind === 'news').map(x => graph.index.get(x.id));
     return {
       badge: [`优先级 ${node.idea.priority}`, 'Priority'], status: `${node.idea.status} · ${node.idea.platform}`,
       action: hasDraft ? ['打开草稿', 'Open draft', {type: 'ideaToDraft', idea: node.idea}] : ['转为草稿', 'To draft', {type: 'ideaToDraft', idea: node.idea}],
@@ -264,6 +270,7 @@ function analyze(graph, node) {
       tiles: [['concept', node.shared.length, '提及概念', 'Concepts'], ['works', posts.length, '关联作品', 'Works'], ['methods', notes, '关联笔记', 'Notes'], ['draft', hasDraft ? 1 : 0, '草稿', 'Drafts']],
       insights: [
         ['创作备注', 'Brief', node.idea.note || '还没有备注。', 'info'],
+        ...(news.length ? [['热点依据', 'News source', news.map(x => `「${x.short || x.title}」`).join('、'), 'gold']] : []),
         ...(posts.length ? [['可以延伸的作品', 'Builds on', posts.slice(0, 3).map(x => `「${graph.index.get(x.id).short}」`).join('、') + ` · 共享：${[...new Set(posts.flatMap(x => x.via))].join('、')}`, 'gold']] : []),
         ...resonance
       ]
@@ -271,22 +278,32 @@ function analyze(graph, node) {
   }
   if (node.kind === 'draft') {
     const src = [...nb.out, ...nb.mutual].find(x => graph.index.get(x.id).kind === 'idea');
+    const published = [...nb.out, ...nb.back, ...nb.mutual].filter(x => graph.index.get(x.id).kind === 'post').map(x => graph.index.get(x.id));
     return {
-      badge: ['正在写', 'Writing'], status: src ? `来自选题「${graph.index.get(src.id).short}」` : '独立草稿 · Standalone',
+      badge: ['正在写', 'Writing'], status: src ? `来自选题「${graph.index.get(src.id).short}」` : published.length ? `已发布为「${published[0].short || published[0].title}」` : '独立草稿 · Standalone',
       action: ['继续写作', 'Continue', {type: 'page', page: 'drafts', id: node.draft.id}],
       metric: connectivity(),
       tiles: [['file', (node.body || '').length, '字数', 'Chars'], ['idea', src ? 1 : 0, '来源选题', 'Source'], ['concept', node.shared.length, '提及概念', 'Concepts'], ['link', graph.links.filter(l => l.kind === 'wiki' && l.s === node.id).length, '双链', 'Wikilinks']],
-      insights: [...resonance, ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文还没有命中概念词，可以在创作台用 [[ ]] 链接笔记。', 'info']]
+      insights: [
+        ...(published.length ? [['已发布作品', 'Published', published.map(x => `「${x.short || x.title}」`).join('、'), 'gold']] : []),
+        ...resonance,
+        ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文还没有命中概念词，可以在创作台用 [[ ]] 链接笔记。', 'info']
+      ]
     };
   }
   // news（AI 热点日报）：按内容型节点的通用面板展示
   if (node.kind === 'news') {
+    const seeded = nb.back.filter(x => graph.index.get(x.id).kind === 'idea').map(x => graph.index.get(x.id));
     return {
       badge: ['AI 热点', 'AI news'], status: node.path,
       action: ['阅读日报', 'Read digest', {type: 'read', id: node.id}],
       metric: connectivity(),
       tiles: [['outlink', d.out, '出链', 'Outgoing'], ['back', d.back, '反链', 'Backlinks'], ['link', d.both, '双向共振', 'Mutual'], ['file', (node.body || '').length, '字数', 'Chars']],
-      insights: [...resonance, ['关于这份数据', 'About', '每天由 AI 从公开 AI 动态 RSS 汇总生成，存在偏差可能，引用前请核对原文。', 'info']]
+      insights: [
+        ...(seeded.length ? [['已转化为选题', 'Ideas seeded', `${seeded.length} 个选题引用了这份日报：${seeded.slice(0, 3).map(x => `「${x.short || x.title}」`).join('、')}。`, 'gold']] : []),
+        ...resonance,
+        ['关于这份数据', 'About', '每天由 AI 从公开 AI 动态 RSS 汇总生成，存在偏差可能，引用前请核对原文。', 'info']
+      ]
     };
   }
   // concept：概念按分区各有一份（同名两条），面板里按名字合并报数

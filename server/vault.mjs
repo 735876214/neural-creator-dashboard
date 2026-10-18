@@ -151,7 +151,7 @@ export function readVault(opts = {}) {
   const ideas = bucket.ideas.map((x, i) => {
     const status = String(pick(x.fm, ['status', '状态']) || '待写');
     return {id: i + 1, title: x.title, platform: String(pick(x.fm, ['platform', '平台']) || '小红书'), priority: ['高', '中', '低'].includes(String(pick(x.fm, ['priority', '优先级']))) ? String(pick(x.fm, ['priority', '优先级'])) : '中',
-      status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120)), rel: norm(x.rel)};
+      status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120)), sourceNews: String(pick(x.fm, ['sourceNews', '来源热点', '热点日期', 'newsDate']) || '') || undefined, rel: norm(x.rel)};
   });
 
   // —— 草稿 ——

@@ -1,14 +1,33 @@
-# 部署版：看板 + note-api + Syncthing + Tailscale（本机开发用 docker-compose.dev.yml）
+# 部署版：看板 + note-api（本机开发用 docker-compose.dev.yml）
+#
+# 目录要求（build context 是 deploy/ 的上一级）：
+#   neural-creator-dashboard/
+#   ├── server/                 ← 必须上传；缺了会报 lstat .../server: no such file or directory
+#   ├── package.json            ← 必须上传
+#   ├── dist/                   ← 本机构建后上传，nginx 托管
+#   ├── notes-vault/            ← 笔记库
+#   └── deploy/
+#       ├── docker-compose.yml
+#       └── .env                ← 可选，从 .env.example 复制
 #
 # 用法：
 #   1. 本机构建前端：npm run build
 #   2. 把整个项目目录 + notes-vault/ 放到 NAS，进入 deploy/ 目录：
-#        cp .env.example .env
-#        htpasswd -bc .htpasswd 用户名
-#        docker compose up -d
+#        cp .env.example .env          # 可选：填 AI key / 看板密码等；不填也能启动
+#        docker compose up -d --build
 #   3. 打开 http://<NAS-IP>:8088
 #
-# .env 会整体注入 note-api；AI、热点、embedding 等变量都从这里读。
+# 登录：用户默认 admin。.env 里设置了 DASHBOARD_PASSWORD 就用它；
+# 没设置时首次启动随机生成一个，用 `docker compose logs auth` 查看。
+# 密码保存在容器卷里，note-api 只读它；nginx 用 auth_request 保护静态资源，
+# 未登录访问会跳到 login.html，登录成功后回到看板。
+#
+# Syncthing / Tailscale 是可选服务，默认不启动（避免和 NAS 上已有的同类服务抢端口）：
+#   docker compose --profile sync up -d --build     # Syncthing
+#   docker compose --profile vpn  up -d --build     # Tailscale
+#
+# .env 是可选的：Compose 会自动读取本目录的 .env 并填充下面的 ${VAR}。
+# 没有 .env 也能启动（AI / 热点关闭），不会再因为缺少 env 文件而直接失败。
 services:
   note-api:
     build:
@@ -16,77 +35,152 @@ services:
       dockerfile: server/Dockerfile
     container_name: neural-note-api
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      # 容器内固定路径与端口；其余变量（AI / NEWS / EMBED / MAX_BODY…）来自 .env
+      # 容器内固定路径与端口
       VAULT_DIR: /vault
       DATA_DIR: /data
       PORT: "8787"
       HOST: 0.0.0.0
-      # vault 是 git 仓库时每次写入自动提交（误写可回滚）；0 关闭
+      # vault 是 git 仓库时每次写入自动提交（误写可回滚）；0 关闭。
+      # 镜像里已装 git，并配置了 safe.directory 与提交身份。
       VAULT_GIT: ${VAULT_GIT:-1}
       # 与 nginx 的 client_max_body_size 4m 对齐（单位：字节）
       MAX_BODY: ${MAX_BODY:-4194304}
-      # .env 是共享的；不把 Tailscale 凭据带进 API 容器
-      TS_AUTHKEY: ""
+      # —— AI（可选）——
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com/v1}
+      AI_MODEL: ${AI_MODEL:-deepseek-chat}
+      AI_PROTOCOL: ${AI_PROTOCOL:-openai}
+      AI_TIMEOUT: ${AI_TIMEOUT:-60000}
+      AI_CONCURRENCY: ${AI_CONCURRENCY:-4}
+      AI_MODEL_ASK: ${AI_MODEL_ASK:-}
+      AI_MODEL_ANALYZE: ${AI_MODEL_ANALYZE:-}
+      AI_MODEL_IDEAS: ${AI_MODEL_IDEAS:-}
+      AI_MODEL_NEWS: ${AI_MODEL_NEWS:-}
+      # —— AI 热点 ——
+      NEWS_SOURCE: ${NEWS_SOURCE:-}
+      NEWS_HOUR: ${NEWS_HOUR:-8}
+      NEWS_CRON: ${NEWS_CRON:-}
+      # —— embedding ——
+      EMBED_PROTOCOL: ${EMBED_PROTOCOL:-}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_MODEL: ${EMBED_MODEL:-}
+      CF_ACCOUNT_ID: ${CF_ACCOUNT_ID:-}
+      # —— 登录 ——
+      # 密码优先取 .env；没填时读 auth 容器生成的只读文件
+      DASHBOARD_USER: ${DASHBOARD_USER:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
+      AUTH_FILE: /auth/auth.json
+      SESSION_DAYS: ${SESSION_DAYS:-30}
     volumes:
       - ../notes-vault:/vault
       - note-api-data:/data
+      - dashboard-auth:/auth:ro
     ports:
-      - "127.0.0.1:8787:8787"   # 只绑本机回环，外部一律走 web 反代
+      - "127.0.0.1:${NOTE_API_PORT:-8787}:8787"   # 只绑本机回环，外部一律走 web 反代
+    depends_on:
+      auth:
+        condition: service_completed_successfully
+
+  # 一次性任务：生成登录密码（存在命名卷里），并打印到日志。
+  # 不依赖宿主机的 htpasswd 命令，也不会像 bind mount 那样在源文件缺失时建出一个目录。
+  auth:
+    image: node:24-alpine
+    container_name: neural-auth
+    restart: "no"
+    environment:
+      DASHBOARD_USER: ${DASHBOARD_USER:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
+    volumes:
+      - dashboard-auth:/auth
+    command:
+      - node
+      - -e
+      - |
+        const fs = require('node:fs');
+        const crypto = require('node:crypto');
+        const file = '/auth/auth.json';
+        const user = process.env.DASHBOARD_USER || 'admin';
+        let pass = process.env.DASHBOARD_PASSWORD || '';
+        if (!pass) {
+          if (fs.existsSync(file) && fs.statSync(file).size > 0) {
+            console.log('已存在登录密码文件，沿用上次的密码。');
+            process.exit(0);
+          }
+          pass = crypto.randomBytes(9).toString('base64url');
+          console.log('');
+          console.log('========== 看板登录 ==========');
+          console.log('用户名：' + user);
+          console.log('密码：  ' + pass);
+          console.log('固定密码：在 deploy/.env 设置 DASHBOARD_PASSWORD=你的密码');
+          console.log('=============================');
+          console.log('');
+        }
+        const body = JSON.stringify({user, password: pass, createdAt: new Date().toISOString()}, null, 2) + '\n';
+        fs.writeFileSync(file, body, {mode: 0o600});
+        console.log('已写入 ' + file + '（用户 ' + user + '）');
 
   web:
     image: nginx:alpine
     container_name: neural-web
     restart: unless-stopped
     depends_on:
-      - note-api
+      note-api:
+        condition: service_healthy
+      auth:
+        condition: service_completed_successfully
     ports:
-      - "8088:80"               # 局域网入口；外网建议走 Tailscale 直接访问这个端口
+      - "${WEB_PORT:-8088}:80"   # 局域网入口；外网建议走 Tailscale 直接访问这个端口
     volumes:
       - ../dist:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      # Basic Auth：htpasswd -bc deploy/.htpasswd 用户名
-      - ./.htpasswd:/etc/nginx/.htpasswd:ro
 
+  # 可选：把 vault 同步到桌面 / 手机 Obsidian
+  #   docker compose --profile sync up -d
   syncthing:
     image: syncthing/syncthing
     container_name: neural-syncthing
     restart: unless-stopped
+    profiles: ["sync"]
     hostname: nas-vault
     environment:
-      PUID: "1000"
-      PGID: "1000"
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
     volumes:
       - ../notes-vault:/var/syncthing/vault   # 同步的就是明文 vault
       - syncthing-config:/var/syncthing
     ports:
-      - "22000:22000/tcp"       # 同步协议
-      - "22000:22000/udp"
-      - "127.0.0.1:8384:8384"   # 管理界面（只绑回环，SSH 隧道或 Tailscale 里打开）
+      # 端口可改：NAS 上已有 Syncthing 时，在 .env 里换一组
+      - "${SYNCTHING_SYNC_PORT:-22000}:22000/tcp"
+      - "${SYNCTHING_SYNC_PORT:-22000}:22000/udp"
+      - "127.0.0.1:${SYNCTHING_GUI_PORT:-8384}:8384"   # 管理界面（只绑回环，用 SSH 隧道打开）
 
+  # 可选：外网访问，不开放公网端口
+  #   docker compose --profile vpn up -d
   tailscale:
     image: tailscale/tailscale
     container_name: neural-tailscale
     restart: unless-stopped
-    hostname: neural-dashboard
+    profiles: ["vpn"]
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:-}
-      TS_EXTRA_ARGS: --advertise-tags=tag:dashboard
+      TS_HOSTNAME: ${TS_HOSTNAME:-neural-dashboard}
       TS_STATE_DIR: /var/lib/tailscale
+      # 需要设备标签时才填，例如 --advertise-tags=tag:dashboard；
+      # 默认留空——普通 auth key 带标签参数会登录失败。
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
     volumes:
       - tailscale-state:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
-    # 加入你的 Tailnet 后，手机/电脑装 Tailscale 客户端，
-    # 访问 http://neural-dashboard:80 即可（web 容器与它同网络时）；
-    # 简单起见也可以用 TS_AUTHKEY 起来后在管理台把它当子网路由。
+    # 加入你的 Tailnet 后，手机 / 电脑装 Tailscale 客户端，
+    # 访问 http://<tailscale-IP 或主机名>:8088 即可（web 端口发布在宿主机上）。
     network_mode: host           # 子网路由模式需要 host 网络
 
 volumes:
   note-api-data:
+  dashboard-auth:
   syncthing-config:
   tailscale-state:

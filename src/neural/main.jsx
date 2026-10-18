@@ -1,6 +1,7 @@
 import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, snapshot, settings, isLive} from '../data';
+import {subscribe as subscribeData} from '../data/store.js';
 import {posts, monthPosts} from './works';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, MODULES} from './graph';
@@ -88,9 +89,12 @@ function App() {
   const [editing, setEditing] = useState(null);
   const [goalInput, setGoalInput] = useState(String(goal));
   const [toast, setToast] = useState('');
+  const [dataRev, setDataRev] = useState(0);
   const reduced = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
   const slowDrafts = useDeferredValue(drafts);
-  const graph = useMemo(() => buildGraph({ideas, drafts: slowDrafts}), [ideas, slowDrafts]);
+  // 数据仓变化（目前是 AI 语义边写回）时重建图谱，不必刷新页面。
+  useEffect(() => subscribeData(() => setDataRev(v => v + 1)), []);
+  const graph = useMemo(() => buildGraph({ideas, drafts: slowDrafts}), [ideas, slowDrafts, dataRev]);
   const layout = useMemo(() => forceLayout(graph), [graph]);
   const draftsRef = useRef(drafts);
   useEffect(() => { draftsRef.current = drafts; }, [drafts]);
@@ -133,6 +137,10 @@ function App() {
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2800); return () => clearTimeout(t); }, [toast]);
 
   const close = useCallback(() => setModal(null), []);
+  const signOut = useCallback(async () => {
+    try { await fetch(persist.apiUrl('/api/logout'), {method: 'POST'}); } catch {}
+    location.replace((import.meta.env.BASE_URL || '/') + 'login.html');
+  }, []);
   const sourceTitleOf = sourceId => ideas.find(i => i.id === sourceId)?.title || null;
   const onDraftDirty = useCallback(d => {
     if (!live) return;
@@ -258,17 +266,24 @@ function App() {
         <p>数据来源 <em>Source</em>：{snapshot.source}；笔记首发 {snapshot.publishedFrom} — {snapshot.publishedTo}。</p>
         <hr/>
         <h3>图谱怎么来的 <em>How the graph is built</em></h3>
-        <p>全部由 <code>src/data/sample.js</code> 里的资料在浏览器中推导，不读取外部 Obsidian 仓库：</p>
+        <p>全部由当前笔记库的资料在浏览器中推导，不依赖 Obsidian 插件：</p>
         <ul>
           <li><b>[[双链]] Wikilinks</b>：方法笔记与草稿正文中的双链；找不到对应笔记的记为「未创建」。</li>
-          <li><b>话题 Topics</b>：作品正文里的 # 话题标签。</li>
+          <li><b>话题 Topics</b>：内容正文里的 # 话题标签和 frontmatter 的 tags，都会自动成为话题节点。</li>
           <li><b>正文提及 Mentions</b>：内容中出现概念词（如「模板」「口播」），且至少两条内容提及才成为概念节点。</li>
           <li><b>双向共振 Resonance</b>：两条内容共同提及 ≥2 个概念，或选题与草稿互相记录。</li>
-          <li><b>选题来源 Source</b>：草稿记录来源选题；选题状态为「已转草稿」时反向成立。</li>
+          <li><b>选题来源 Source</b>：草稿记录来源选题；选题状态为「已转草稿」时反向成立；缺 <code>source</code> 时按同名标题自动回连。</li>
+          <li><b>发布为作品 Published as</b>：草稿与作品标题相同（忽略编号和 Obsidian 前缀）即自动连线。</li>
+          <li><b>热点依据 News source</b>：选题的 <code>sourceNews</code> 指向当天的 AI 热点日报。</li>
+          <li><b>同名概念 Shared concept</b>：方法笔记侧和作品侧出现同名概念时自动桥接。</li>
+          <li><b>语义相关 Semantic</b>：部署模式下由 embedding 计算并持久化的语义边。</li>
         </ul>
         <p>作品库：{posts.length} 篇<b>示例作品</b>，账号、标题、日期与指标均为虚构，仅用于展示效果。</p>
         <p>当前：{s.content} 条内容 · {s.links} 条连接 · {s.mutual} 组双向 · {s.ghosts} 个未创建双链。</p>
         <p className="quiet">{live ? '已连接 NAS 笔记库：选题、草稿与目标都写入 NAS（设置文件为 vault/.dashboard/settings.json），浏览器不保存业务数据。' : '未连接 NAS：当前为只读演示，编辑入口已禁用。'}<em>{live ? 'All data lives on the NAS vault' : 'Read-only demo (no NAS)'}</em></p>
+        {live && <div className="form-actions signout-row">
+          <button className="pill ghost" onClick={signOut}>退出登录 <em>Sign out</em></button>
+        </div>}
       </div>
     </Modal>}
     {modal === 'goal' && <Modal title="本月发布目标" en="Monthly goal" onClose={close}>

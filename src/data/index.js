@@ -14,6 +14,8 @@ export const notes = data.notes;
 export const seedIdeas = data.seedIdeas;
 export const seedDrafts = data.seedDrafts;
 export const concepts = data.concepts;
+// AI 语义边初始快照（运行中的更新走 store.setSemantic；graph.js 直接读运行时仓）
+export const semantic = data.semantic || [];
 
 // —— 只有部署模式（连着 note-api）才有的一层；纯静态构建时都是空的 ——
 // files：图谱节点 id → 文件相对路径，写回笔记时用它定位文件

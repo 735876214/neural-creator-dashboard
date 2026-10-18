@@ -54,6 +54,10 @@ export function openIndex(file) {
       date TEXT PRIMARY KEY, digest TEXT NOT NULL, topics TEXT NOT NULL,
       items TEXT NOT NULL, model TEXT, ideas_at TEXT, created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS semantic_edges(
+      a TEXT NOT NULL, b TEXT NOT NULL, sim REAL NOT NULL, created_at TEXT NOT NULL,
+      PRIMARY KEY(a, b)
+    );
   `);
   return new Index(db);
 }
@@ -81,6 +85,8 @@ class Index {
         else if (existing.get(r.id) !== r.hash) { upd.run(r.path, r.title, r.kind, r.body, r.hash, r.mtime, now(), r.id); changed++; }
       }
       for (const id of existing.keys()) if (!seen.has(id)) { del.run(id); changed++; }
+      // 笔记删掉后，指向它的语义边也一起清掉，避免 /api/data 带着悬空 id。
+      this.db.prepare('DELETE FROM semantic_edges WHERE a NOT IN (SELECT id FROM notes) OR b NOT IN (SELECT id FROM notes)').run();
       this.db.exec('COMMIT');
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     return changed;
@@ -148,6 +154,20 @@ class Index {
   listNews(limit = 14, withItems = false) {
     return this.db.prepare(`SELECT date, digest, topics, model, ideas_at, created_at${withItems ? ', items' : ''} FROM news ORDER BY date DESC LIMIT ?`).all(limit)
       .map(r => ({...r, topics: JSON.parse(r.topics), ideasAt: r.ideas_at || null, items: r.items ? JSON.parse(r.items) : undefined}));
+  }
+
+  // —— 语义边：/api/ai/relate 的产物，持久化后刷新页面仍然有效 ——
+  replaceSemantic(edges = []) {
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM semantic_edges').run();
+      const ins = this.db.prepare('INSERT OR REPLACE INTO semantic_edges(a, b, sim, created_at) VALUES(?,?,?,?)');
+      for (const e of edges) if (e?.a && e?.b) ins.run(e.a, e.b, Number(e.sim) || 0, now());
+      this.db.exec('COMMIT');
+    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  semanticEdges() {
+    return this.db.prepare('SELECT a, b, sim FROM semantic_edges ORDER BY sim DESC').all();
   }
 
   // —— 任务进度：AI 调用是秒级到几十秒级，不能同步阻塞 HTTP ——

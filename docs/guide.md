@@ -15,7 +15,7 @@
 |---|---|---|
 | 纯静态 | `npm run build` 后的 `dist/` | 构建时打包进 bundle 的 `my-data.local.js` 或 `sample.js` |
 | 本机开发 | `npm run dev`（Vite :5173）+ `npm run api`（note-api :8787） | note-api 实时读取 vault；Vite 把 `/api` 代理到 8787 |
-| 部署（NAS） | nginx（web）+ note-api + Syncthing + Tailscale，见 `deploy/docker-compose.yml` | vault 里的 `.md` 文件 |
+| 部署（NAS） | nginx（web）+ note-api；Syncthing / Tailscale 可选，见 `deploy/docker-compose.yml` | vault 里的 `.md` 文件 |
 
 核心不变式：**`.md` 文件是唯一真相**；SQLite 与前端内存里的图谱都是可删可重建的派生物。唯一的例外是 `vault/.dashboard/settings.json`（月目标、AI 模型选择），它也是用户数据，随 vault 一起备份，但不参与笔记解析。
 
@@ -55,7 +55,8 @@ Obsidian / Syncthing            看板设置 vault/.dashboard/settings.json
 |---|---|
 | `index.html` | 页面入口，加载 `src/neural/main.jsx`（实际先走 `boot.js`） |
 | `src/config.js` | 品牌名、工作台名、头像路径、页脚；可有 `config.local.js` 覆盖 |
-| `src/neural/boot.js` | **挂载 React 之前**先取数：`VITE_API_BASE`（或同源）`/api/data`，8s 超时；失败则回退本地快照并进入只读模式 |
+| `src/neural/boot.js` | **挂载 React 之前**先确认登录状态（`/api/session`）再取数：`VITE_API_BASE`（或同源）`/api/data`，8s 超时；未登录跳 `login.html`，失败则回退本地快照并进入只读模式 |
+| `public/login.html` | 独立登录页（深空星空代码自绘、中英双语、支持 prefers-reduced-motion）；登录成功后回到原页面；纯静态部署不会用到 |
 | `src/data/store.js` | 运行时数据仓：保存 boot 取回的数据、`files`（节点 id → 文件路径）、`mtimes`、`figures`（附件）、`settings`、`meta`、来源与错误 |
 | `src/data/index.js` | 同步导出 `snapshot / posts / postContent / notes / seedIdeas / seedDrafts / concepts / files / figures / mtimes / settings / meta` |
 | `src/neural/persist.js` | NAS 持久化：防抖自动保存、同 key 串行、mtime 乐观锁、内存 outbox 重试、409 冲突、新建后回填 path/mtime、完整正文 hydrate；**不写 localStorage** |
@@ -80,9 +81,9 @@ Obsidian / Syncthing            看板设置 vault/.dashboard/settings.json
 | `askGraph` | 底部「问图谱」的本地规则检索，不调用 AI |
 | `forceLayout` | 星团节点布局 |
 
-连接规则：目录归属、`[[双链]]`（未命中记为「未创建」）、选题来源（草稿 `source` ↔ 选题状态「已转草稿」）、话题标签、正文提及概念（至少两条内容提及才成为概念节点）、双向共振（共同提及 ≥2 个概念）、以及 AI 语义边（`semantic`，来自 `/api/ai/relate`）。
+连接规则：目录归属、`[[双链]]`（未命中记为「未创建」）、选题来源（草稿 `source` ↔ 选题状态「已转草稿」，缺 `source` 时按同名标题回连）、发布为作品（草稿与作品标题相同）、热点依据（选题 `sourceNews` → 当天 AI 热点日报）、话题标签（frontmatter tags + 正文 `#话题`）、正文提及概念（至少两条内容提及才成为概念节点）、双向共振（共同提及 ≥2 个概念）、同名概念桥（知识分区与作品侧同名概念自动相连），以及 AI 语义边（`semantic`，来自 `/api/ai/relate`，持久化在 SQLite）。
 
-分区：知识笔记（`note`）与作品侧（`post / idea / draft`）各自成团，概念节点与共振只在同区内发生。
+分区：知识笔记和 AI 热点（`note / news`）与作品侧（`post / idea / draft`）各自成团，概念节点与共振以同区为主；同名概念、共享话题、热点来源和语义边会把两侧桥接起来。
 
 ### 3.3 视觉与交互
 
@@ -143,7 +144,7 @@ Obsidian / Syncthing            看板设置 vault/.dashboard/settings.json
 | `skills/neural-creator-dashboard/SKILL.md` | 可被 `npx skills add` 安装的通用 Agent Skill |
 | `examples/vault/` | 虚构示例笔记库，演示 frontmatter 格式 |
 | `deploy/docker-compose.dev.yml` | 开发版：只起 note-api 容器 |
-| `deploy/docker-compose.yml` / `nginx.conf` | 部署版：note-api + nginx（Basic Auth）+ Syncthing + Tailscale |
+| `deploy/docker-compose.yml` / `nginx.conf` | 部署版：note-api + nginx（登录页 + 会话 Cookie，`auth_request` 保护静态资源）；Syncthing / Tailscale 是可选 profile |
 | `docs/nas-deployment.md` | 极空间 NAS 部署全流程 |
 
 ---
@@ -227,7 +228,7 @@ notes-vault/
 | `DATA_DIR` | `.note-api` | SQLite 与运行时数据目录（可删可重建；看板设置不在里面，见 `vault/.dashboard/settings.json`） |
 | `PORT` / `HOST` | `8787` / `0.0.0.0` | 监听地址 |
 | `STATIC_DIR` | 无 | 同时托管 `dist/`，省掉 nginx |
-| `API_TOKEN` | 无 | 仅用于 curl / 脚本等非浏览器客户端；浏览器看板不携带，填了会导致看板请求 401。看板部署用 nginx Basic Auth |
+| `API_TOKEN` | 无 | 仅用于 curl / 脚本等非浏览器客户端；浏览器看板不携带，填了会导致看板请求 401。看板部署用登录页 + 会话 Cookie |
 | `VAULT_GIT` | 开 | vault 是 git 仓库时每次写入自动 commit；`0` 关闭 |
 | `MAX_BODY` | 2 MB | 请求体上限（字节）；compose 部署版设为 4 MB，与 nginx `client_max_body_size 4m` 对齐 |
 | `AI_PROTOCOL` | `openai` | 或 `anthropic` |

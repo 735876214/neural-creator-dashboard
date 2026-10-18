@@ -122,7 +122,7 @@ export function bandsOf(graph) {
   const c = k => graph.nodes.filter(n => n.kind === k).length;
   return [
     {id: 'works', label: '作品', n: Math.max(1, c('post')), color: '#e6c68a', density: .62, rip: 17},
-    {id: 'knowledge', label: '知识', n: Math.max(1, c('note')), color: '#f2dcaa', density: .95, rip: 23, sub: [[.30, .030, .80], [.64, .026, .62]]},
+    {id: 'knowledge', label: '知识', n: Math.max(1, c('note') + c('news')), color: '#f2dcaa', density: .95, rip: 23, sub: [[.30, .030, .80], [.64, .026, .62]]},
     {id: 'ideas', label: '选题', n: Math.max(1, c('idea')), color: '#ffd79a', density: .46, rip: 13},
     {id: 'drafts', label: '草稿', n: Math.max(1, c('draft')), color: '#e2d6a6', density: .34, rip: 9}
   ];

@@ -25,6 +25,7 @@ const freePort = () => new Promise((ok, fail) => {
 });
 
 let child;
+let authChild;
 let logs = '';
 let passed = 0;
 const ok = msg => { passed++; console.log('  ✓ ' + msg); };
@@ -53,7 +54,11 @@ try {
       VAULT_GIT: '0',
       NEWS_CRON: '0',
       AI_API_KEY: '',
-      EMBED_API_KEY: ''
+      EMBED_API_KEY: '',
+      // 基础用例不开启登录，也避免开发机上的环境变量干扰
+      DASHBOARD_PASSWORD: '',
+      AUTH_FILE: '',
+      API_TOKEN: ''
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -126,6 +131,71 @@ try {
   assert.equal(bad.status, 400);
   ok('非法选题状态返回 400');
 
+  // 7. 登录：未登录 401 → /api/login 拿 Cookie → 带 Cookie 可读 → auth-check 204
+  const authPort = await freePort();
+  const authBase = `http://127.0.0.1:${authPort}`;
+  authChild = spawn(process.execPath, [join(ROOT, 'server/index.mjs')], {
+    env: {
+      ...process.env,
+      VAULT_DIR: vault,
+      DATA_DIR: join(tmp, 'data-auth'),
+      PORT: String(authPort),
+      HOST: '127.0.0.1',
+      VAULT_GIT: '0',
+      NEWS_CRON: '0',
+      AI_API_KEY: '',
+      EMBED_API_KEY: '',
+      DASHBOARD_USER: 'tester',
+      DASHBOARD_PASSWORD: 'e2e-pass',
+      AUTH_FILE: '',
+      API_TOKEN: ''
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  authChild.stdout.on('data', d => { logs += d; });
+  authChild.stderr.on('data', d => { logs += d; });
+  await waitReady(authBase);
+
+  const ajson = async (path, init) => {
+    const res = await fetch(authBase + path, init);
+    return {status: res.status, body: await res.json().catch(() => null), headers: res.headers};
+  };
+
+  const session = await ajson('/api/session');
+  assert.equal(session.status, 200);
+  assert.equal(session.body.required, true);
+  assert.equal(session.body.authenticated, false);
+  assert.equal((await ajson('/api/data')).status, 401, '未登录不应读到 /api/data');
+  assert.equal((await fetch(authBase + '/api/auth-check')).status, 401);
+  ok('开启登录后未登录请求返回 401');
+
+  const wrong = await ajson('/api/login', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({username: 'tester', password: 'wrong'})
+  });
+  assert.equal(wrong.status, 401);
+
+  const login = await fetch(authBase + '/api/login', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({username: 'tester', password: 'e2e-pass'})
+  });
+  assert.equal(login.status, 200);
+  const cookie = (login.headers.get('set-cookie') || '').split(';')[0];
+  assert.match(cookie, /^nd_session=/, '登录成功应设置会话 Cookie');
+  ok('POST /api/login 校验密码并设置 HttpOnly 会话 Cookie');
+
+  assert.equal((await ajson('/api/data', {headers: {cookie}})).status, 200);
+  assert.equal((await fetch(authBase + '/api/auth-check', {headers: {cookie}})).status, 204);
+  const signed = await ajson('/api/session', {headers: {cookie}});
+  assert.equal(signed.body.authenticated, true);
+  assert.equal(signed.body.user, 'tester');
+  ok('带会话 Cookie 可读数据，auth-check 放行');
+
+  const logout = await fetch(authBase + '/api/logout', {method: 'POST', headers: {cookie}});
+  assert.equal(logout.status, 200);
+  assert.match(logout.headers.get('set-cookie') || '', /Max-Age=0/, '登出应让浏览器清掉 Cookie');
+  ok('POST /api/logout 清掉会话 Cookie');
+
   console.log(`\n全部通过（${passed} 项）。`);
 } catch (e) {
   console.error('\n未通过：', e.message);
@@ -133,11 +203,12 @@ try {
   process.exitCode = 1;
 } finally {
   child?.kill();
+  authChild?.kill();
   // Windows 上 index.sqlite 可能还被服务进程占着：等它退出再清理。
-  await new Promise(res => {
-    if (!child || child.exitCode != null) return res();
-    child.once('exit', res);
+  await Promise.all([child, authChild].filter(Boolean).map(c => new Promise(res => {
+    if (c.exitCode != null) return res();
+    c.once('exit', res);
     setTimeout(res, 3000);
-  });
+  })));
   rmSync(tmp, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
 }

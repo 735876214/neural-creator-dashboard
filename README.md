@@ -84,6 +84,8 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 - 按文件夹名自动识别：名字含「作品 / works」的是作品，「方法 / 模板 / 流程 / methods」的是方法笔记，「选题 / ideas」的是选题，「草稿 / 创作台 / drafts」的是草稿；也可以用 `--works`、`--methods`、`--ideas`、`--drafts` 指定文件夹。
 - 作品数据写在 frontmatter 里，中英文字段都认（`观看/views`、`收藏/saves`、`点赞/likes`、`发布时间/date`、`类型/media`……），支持「1.2万」「12.4%」这类写法。
 - 正文的 `[[双链]]` 自动连线；同一个话题标签出现在两条以上内容里，会成为「概念」节点。
+- AI 热点日报（`00-AI热点/YYYY-MM-DD.md`）会作为 `kind: 'news'` 的内容进入图谱；自动生成的选题在 frontmatter 里写 `sourceNews`，图谱据此把选题连回当天日报。
+- 方法笔记和作品各自的概念、话题会自动桥接：同名概念连一条「同名概念」边，共享话题共用同一个话题节点。
 - 格式参考 `examples/vault/`，可以先 `npm run import -- --vault examples/vault` 试试。
 - 导入结果写到 `src/data/my-data.local.js`（已在 `.gitignore`，不会被提交，看板会自动优先读它；代码里不动任何被跟踪的文件）；`npm run import -- --reset` 删掉本机数据、切回示例；`npm run import -- --help` 查看全部选项。
 - 导入脚本只读你的笔记、不联网。
@@ -97,10 +99,11 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 |---|---|---|
 | `snapshot` | 账号概况 | `account` 账号名、`followers` 粉丝数、`capturedAt` 数据日期、`source` 来源说明 |
 | `posts` / `postContent` | 作品（由 `W(...)` 一次写出） | 指标：`views` `likes` `comments` `saves` `follows` `shares` `impressions` `ctr` `duration`，缺失填 `null`；内容：`body` 正文、`tags` 话题、`media`（`images` / `video`） |
-| `notes` | 方法库笔记 | `title`、`path`（第二段是子目录）、`body`（可以写 `[[双链]]`） |
-| `seedIdeas` | 选题池 | `title`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note` |
+| `notes` | 方法库笔记与 AI 热点日报 | `title`、`path`（方法笔记第二段是子目录；日报为 `00-AI热点/YYYY-MM-DD.md` 并带 `kind: 'news'`）、`body`（可以写 `[[双链]]`）、`tags`（可选） |
+| `seedIdeas` | 选题池 | `title`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note`、`sourceNews`（可选，来源日报日期） |
 | `seedDrafts` | 创作台草稿 | `title`、`body`、`source`（来源选题的 id） |
 | `concepts` | 概念词表 | `[概念名, [关键词…]]`，换成你所在领域的词 |
+| `semantic` | AI 语义边（仅部署模式） | `{a, b, sim}`，由 `/api/ai/relate` 生成并持久化 |
 
 改完刷新页面即可。旧版浏览器里保存过的选题/草稿/目标不会再被读取；连接 NAS 后启动时会自动清掉这些旧键。
 
@@ -112,8 +115,10 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 |---|---|
 | 目录归属 | 内容属于哪个模块 / 子目录 |
 | `[[双链]]` | 笔记与草稿正文里的双链；找不到对应内容的显示为「未创建」 |
-| 选题来源 | 草稿记录了来源选题；选题状态为「已转草稿」时反向也成立 |
-| 话题标签 | 作品的话题 |
+| 选题来源 | 草稿记录了来源选题；选题状态为「已转草稿」时反向也成立；缺 `source` 时按同名标题自动回连 |
+| 发布为作品 | 草稿与作品标题相同（忽略编号和 Obsidian 前缀）即自动相连 |
+| 热点依据 | 选题的 `sourceNews` 指向当天 AI 热点日报；日报也会参与概念提及与共振 |
+| 话题标签 | 作品、方法笔记、选题、草稿、日报的 frontmatter `tags` 与正文 `#话题` |
 | 正文提及 | 正文出现概念词；至少两条内容提及，才成为概念节点 |
 | 双向共振 | 两条内容共同提及 ≥ 2 个概念 |
 
@@ -158,13 +163,13 @@ npm run build
 
 公开部署前请运行 `npm run import -- --reset`（会删掉 `src/data/my-data.local.js`），并确认没有留下本机的 `src/config.local.js`。构建产物里打包的是构建当时生效的那份数据与配置：`.gitignore` 只阻止源码提交，不能阻止个人数据被打包进网页，导入私人笔记后的构建产物不可直接公开。
 
-`dist/` 是纯静态文件，可以放到任何静态托管（GitHub Pages、Vercel、Netlify、Cloudflare Pages 等）。构建使用相对路径，部署在子路径下也能正常加载。纯静态页面只读；需要在线编辑选题/草稿/目标时，按 **[NAS 部署说明](docs/nas-deployment.md)** 启动 note-api，数据会实时写入 vault 与 `vault/.dashboard/settings.json`。
+`dist/` 是纯静态文件，可以放到任何静态托管（GitHub Pages、Vercel、Netlify、Cloudflare Pages 等）。构建使用相对路径，部署在子路径下也能正常加载。纯静态页面只读；需要在线编辑选题/草稿/目标时，按 **[NAS 部署说明](docs/nas-deployment.md)** 启动 note-api，数据会实时写入 vault 与 `vault/.dashboard/settings.json`。NAS 部署模式带独立的登录页与会话 Cookie，未登录访问会先跳到 `login.html`。
 
 ## 关于素材
 
 - 星核、六簇星团与星穹背景**全部由代码在 Canvas 上逐帧自绘**，页面里没有任何图片或视频素材文件，`npm run verify` 会校验这一点。
 - 六个星座的星位取自真实星表（J2000 赤经 / 赤纬 + 经典连线），见 `src/neural/constellations.js`；第六个是 AI 热点（仙女座），部署模式下由 note-api 每天生成日报。
-- 仓库里唯一的静态素材是头像 `public/avatar.svg`，它是抽象图形。示例数据全部虚构，与任何真实账号无关。
+- 仓库里唯一的静态图片素材是头像 `public/avatar.svg`，它是抽象图形。示例数据全部虚构，与任何真实账号无关。
 
 ## 它是怎么做出来的
 

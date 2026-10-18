@@ -490,6 +490,7 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .form input:focus, .form select:focus, .form textarea:focus { border-color: rgba(240, 210, 150, .5); }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.signout-row { justify-content: flex-start; }
 .reader pre { margin: 0; white-space: pre-wrap; font: inherit; font-size: 14px; line-height: 1.9; color: var(--text); }
 .reader-edit { width: 100%; min-height: 40vh; padding: 12px 14px; border: 1px solid var(--rule); border-radius: var(--radius-sm);
   background: rgba(0,0,0,.25); color: var(--text); font: inherit; font-size: 14px; line-height: 1.8; resize: vertical; }

@@ -8,9 +8,9 @@
 极空间 NAS（Docker）
 ├── notes-vault/          明文 .md —— Obsidian 和看板共用，唯一真相
 ├── note-api              读写笔记 + AI 编排 + 索引（本仓库 server/）
-├── web (nginx)           托管看板 + Basic Auth
-├── syncthing             把 vault 同步到桌面 / 手机 Obsidian
-└── tailscale             外网访问（不开放公网端口）
+├── web (nginx)           托管看板与登录页 + auth_request 会话校验
+├── syncthing             把 vault 同步到桌面 / 手机 Obsidian（可选，profile sync）
+└── tailscale             外网访问（可选，profile vpn，不开放公网端口）
 ```
 
 ## 0. 前置条件
@@ -74,29 +74,52 @@ npm run build          # 产物在 dist/
 
 ```bash
 cd deploy
-cp .env.example .env       # 填 AI_API_KEY 等（不填也能用，只是没有 AI 区块）
-htpasswd -bc .htpasswd 你的用户名   # 没有 htpasswd 工具就用在线生成器
-docker compose up -d
+cp .env.example .env       # 可选：填 AI_API_KEY、DASHBOARD_PASSWORD 等
+docker compose up -d --build
 ```
+
+登录密码由 compose 里的 `auth` 容器生成在容器卷里，note-api 只读它；**不需要**宿主机安装 `htpasswd`，也不需要手动创建 `.htpasswd`。两种用法：
+
+- `.env` 里设置了 `DASHBOARD_PASSWORD`：直接用它；
+- 留空：首次启动随机生成，执行下面这条命令查看（同时确认用户名）：
+
+```bash
+docker compose logs auth
+```
+
+登录状态保存在 HttpOnly 会话 Cookie 里，默认 30 天（`SESSION_DAYS` 可改）。未登录访问任何页面都会先跳到 `login.html`，登录成功后回到看板；退出登录可调用 `POST /api/logout`。
 
 > 极空间的 Container Manager 也可以图形化导入这个 compose 文件。
 >
-> `.env` 会整体注入 note-api，AI / 热点 / embedding 等变量都不用改 compose。看板本身用 nginx Basic Auth 认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
+> `.env` 是可选的：Compose 会自动读取 `deploy/.env` 填充 compose 里的 `${VAR}`；不填也能启动，只是 AI / 热点关闭。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
 
-浏览器打开 `http://<NAS-IP>:8088`，输入刚设的 Basic Auth 密码，星核亮起来就是成功了。
+浏览器打开 `http://<NAS-IP>:8088`，会先看到登录页；输入用户名和密码后进入看板，星核亮起来就是成功了。8088 被占用时在 `.env` 里改 `WEB_PORT`。
 
-## 4. 多端同步（Syncthing）
+> Syncthing 与 Tailscale 默认**不启动**，避免和 NAS 上已有的同类服务抢端口。需要时用后面对应的 `--profile` 命令。
 
-1. 打开 Syncthing 管理界面（NAS 上 `127.0.0.1:8384`，用 SSH 隧道或在 Tailscale 网络里访问）；
+## 4. 多端同步（Syncthing，可选）
+
+```bash
+docker compose --profile sync up -d
+```
+
+1. 打开 Syncthing 管理界面（NAS 上 `127.0.0.1:8384`，用 SSH 隧道 `ssh -L 8384:127.0.0.1:8384 <NAS>` 打开；端口被占用时在 `.env` 里改 `SYNCTHING_GUI_PORT`）；
 2. 添加共享文件夹，路径 `/var/syncthing/vault`，这就是 NAS 侧的 vault；
 3. 桌面 / 手机的 Syncthing 客户端扫码配对，指向你的 Obsidian vault 本地目录；
 4. Obsidian 打开这个 vault，正常写、正常贴图——图片存在 vault 里，看板会识别并显示「N 张图」角标。
 
 **注意**：看板和 Obsidian 写的是同一批文件。看板的写入带冲突检测（mtime 不一致返回 409，不覆盖），但偶尔仍可能在 Syncthing 里出现 `.sync-conflict-` 文件——那是双端几乎同时写入的漏网信号，定期看一眼即可。
 
-## 5. 外网访问（Tailscale）
+## 5. 外网访问（Tailscale，可选）
 
-compose 里带了 tailscale 容器：`.env` 里填 `TS_AUTHKEY`（在 [login.tailscale.com/admin/authkeys](https://login.tailscale.com/admin/authkeys) 生成），`docker compose up -d` 后设备自动入网。手机 / 电脑装 Tailscale 客户端登录同一账号，浏览器访问 NAS 的 Tailscale IP 或主机名即可。
+```bash
+# .env 里先填 TS_AUTHKEY（在 login.tailscale.com/admin/authkeys 生成）
+docker compose --profile vpn up -d
+```
+
+设备自动入网后，手机 / 电脑装 Tailscale 客户端登录同一账号，浏览器访问 `http://<Tailscale IP 或主机名>:8088`。默认主机名是 `neural-dashboard`，可用 `TS_HOSTNAME` 改。
+
+> 普通 auth key 不要带 `TS_EXTRA_ARGS=--advertise-tags=...`，除非你已经在 Tailnet ACL 里建好对应 tag 并授权；否则 tailscaled 会一直登录失败。需要排查时看 `docker compose logs tailscale`。
 
 不想用 Tailscale 的替代：Cloudflare Tunnel + Access（需要域名，自带登录）；极空间自带的远程访问功能能否转发 Docker 容器端口、是否有认证，请在你的 ZOS 版本上确认后再用——**笔记是明文，没有任何认证的公网暴露绝对不行**。
 
@@ -139,6 +162,14 @@ compose 里带了 tailscale 容器：`.env` 里填 `TS_AUTHKEY`（在 [login.tai
 
 | 现象 | 原因与处理 |
 |---|---|
+| build 报 `lstat .../server: no such file or directory` | 只上传了 `deploy/`，构建上下文里没有 `server/`。把整个项目目录（至少 `server/`、`package.json`、`dist/`、`notes-vault/`）放到 NAS，并保证 compose 在 `项目根/deploy/docker-compose.yml` |
+| 旧版报 `env file .../deploy/.env not found` | 早期 compose 硬依赖 `.env`。更新到当前版本后 `.env` 可选；需要 AI 时再 `cp .env.example .env` |
+| 不知道登录密码 | `.env` 没设 `DASHBOARD_PASSWORD` 时首次启动随机生成：`docker compose logs auth` |
+| 登录后又跳回登录页 | 会话 Cookie 丢了或密码改过。检查浏览器是否禁用 Cookie；改密码后执行 `docker compose up -d --force-recreate auth note-api` 重新登录 |
+| 登录页一直提示「连不上笔记库服务」 | note-api 没起来或 `/api` 反代不通：`docker compose logs note-api`，并确认 nginx 的 `proxy_pass http://note-api:8787` 可用 |
+| `neural-auth` 显示 `Exited (0)` | 正常：它是一次性任务，只负责生成认证文件，跑完就退出 |
+| `ports are not available ... 8384/22000` | NAS 上已有 Syncthing 在跑。在 `.env` 改 `SYNCTHING_GUI_PORT` / `SYNCTHING_SYNC_PORT`，或不用 `--profile sync` |
+| Tailscale 一直登录失败 | 检查 `TS_AUTHKEY` 是否过期；普通 key 不要带 `TS_EXTRA_ARGS=--advertise-tags=...` |
 | 页面显示「正在读取笔记库…」不动 | note-api 没起来：`docker compose logs note-api`；常见是 VAULT_DIR 挂载路径不对 |
 | 保存提示「文件已被其他编辑器改动」 | Obsidian 或另一台设备刚改过这篇。看板没有覆盖，重新打开比对后再存 |
 | 作品库是空的 | 还没有作品笔记——正常现象；或目录名不含「作品 / works」，用导入脚本时 `--works` 指定 |

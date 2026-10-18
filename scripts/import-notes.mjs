@@ -71,7 +71,7 @@ export const posts = ${J(works.map(w => w.post))};
 
 export const postContent = ${J(works.map(w => w.content))};
 
-export const notes = ${J(notes.map(({tags, rel, ...n}) => n))};
+export const notes = ${J(notes.map(({rel, ...n}) => n))};
 
 export const seedIdeas = ${J(ideas.map(({rel, ...i}) => i))};
 
