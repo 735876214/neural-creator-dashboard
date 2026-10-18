@@ -76,12 +76,12 @@ npm run build
 
 ### 6. 部署（可选）
 
-`npm run build` 生成的 `dist/` 是纯静态文件，可以放到任何静态托管。
+`npm run build` 生成的 `dist/` 是纯静态文件，可以放到任何静态托管；纯静态模式只读。需要在线编辑选题/草稿/目标时，按 `docs/nas-deployment.md` 启动 note-api，数据会写回 NAS vault 与 `vault/.dashboard/settings.json`。
 
 ## 注意
 
 - 星核和五片星座是这个看板的核心动效，个性化时可以改配色或替换星座骨架，但不要删除、隐藏或改成静态图片；全部画面由代码绘制，不要再引入图片或视频素材（`public/` 里只剩头像）。改完运行 `npm run verify` 确认核心动效检查通过。
 - `src/data/my-data.local.js` 含用户的个人笔记，已写进 `.gitignore`。不要提交或公开部署它，除非用户明确要求。
-- 选题、草稿、目标只保存在浏览器 localStorage；换了数据但页面还显示旧的选题和草稿时，改 `src/config.js` 里的 `storagePrefix` 或清空该站点的 localStorage。
-- 不要往项目里加联网请求或 AI 调用；图谱分析是本地规则。
+- 业务数据不保存在浏览器：纯静态模式只读；连接 note-api 后选题、草稿、月目标、AI 模型选择都写入 NAS（vault `.md` + `vault/.dashboard/settings.json`）。
+- 纯静态模式不要往项目里加联网请求或 AI 调用；图谱分析是本地规则。
 - 更多开发约定见项目根目录的 `AGENTS.md`。

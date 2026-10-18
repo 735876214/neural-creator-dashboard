@@ -31,6 +31,8 @@ notes-vault/
 └── 05-方法库/    ← 方法笔记（可再分子目录，子目录会出现在图谱里）
 ```
 
+note-api 还会在 vault 根目录自动创建隐藏目录 `.dashboard/settings.json`，保存月目标与 AI 模型选择；它不会出现在 Obsidian 文件树或图谱里，随 vault 一起备份。
+
 作品笔记的 frontmatter 中英文字段都认：
 
 ```yaml
@@ -103,7 +105,7 @@ compose 里带了 tailscale 容器：`.env` 里填 `TS_AUTHKEY`（在 [login.tai
 | 变量 | 用途 | 说明 |
 |---|---|---|
 | `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL` | 打标签 + 摘要、选题生成、问答、热点日报 | 默认 DeepSeek；通义 / Kimi / 硅基流动 / 自建 OpenAI 兼容网关都行 |
-| `AI_MODEL_ASK` / `AI_MODEL_ANALYZE` / `AI_MODEL_IDEAS` / `AI_MODEL_NEWS` | 各任务的默认模型 | 缺省回落 `AI_MODEL`；前端对话框里也可随时手动切换（记在浏览器） |
+| `AI_MODEL_ASK` / `AI_MODEL_ANALYZE` / `AI_MODEL_IDEAS` / `AI_MODEL_NEWS` | 各任务的默认模型 | 缺省回落 `AI_MODEL`；前端对话框里也可随时手动切换（选择写在 NAS 的 `vault/.dashboard/settings.json`） |
 | `EMBED_*` | 语义关联、向量检索 | 两种方案见 `.env.example`：Cloudflare Workers AI（每天免费 10,000 Neurons）或 OpenAI 兼容接口 |
 
 配置后重启 `note-api`，每篇方法笔记的分析栏会出现「AI 分析」区块：
@@ -127,8 +129,9 @@ compose 里带了 tailscale 容器：`.env` 里填 `TS_AUTHKEY`（在 [login.tai
 ## 7. 日常使用
 
 - **Obsidian 里写**（长文、图片、整理），等 Syncthing 同步，看板刷新即见；
-- **看板里速记**：新建草稿 / 改选题，直接落成 NAS 上的 `.md`，Obsidian 端同步后就能看到；
-- **备份**：vault 建议 `git init` 一次（note-api 每次写入自动 commit，AI 误写可回滚）+ 极空间自身的快照。`index.sqlite` 是索引，删了会自动重建，不用备份。
+- **看板里速记**：新建/改名/删除草稿、编辑选题、修改月目标，全部直接写回 NAS——草稿与选题落成 `.md`，月目标与 AI 模型选择写在 `vault/.dashboard/settings.json`。浏览器不保存这些业务数据；
+- **离线时**：改动暂存在当前页面的内存里，恢复网络后自动补传；刷新或关闭页面会丢失未落盘的改动（页面会提示），所以断网时请保持标签页打开；
+- **备份**：vault 建议 `git init` 一次（note-api 每次写入自动 commit，AI 误写可回滚）+ 极空间自身的快照。`vault/.dashboard/settings.json` 属于用户数据，会随 vault 一起备份；`index.sqlite` 是索引，删了会自动重建，不用备份。
 
 ## 常见问题
 

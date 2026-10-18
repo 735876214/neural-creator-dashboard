@@ -27,7 +27,9 @@ Turn your works, notes, ideas and drafts into a living neural network — a star
 - **作品库 / 创作台 / 选题池**三个内页：作品卡片与排序、草稿编辑（支持 `[[` 双链补全）、选题转草稿，每个内页顶部带一条星座轨。
 - **深空配色**：深空蓝紫底、金色星座线、星核与星云由代码逐帧自绘，颜色集中在 `src/neural/theme.js` 和 `neural.css` 顶部的 CSS 变量里。
 - **中英双语**界面，尊重系统的「减少动态效果」设置。
-- 纯前端，选题、草稿和目标保存在浏览器 `localStorage`，无后台同步服务。
+- 纯静态模式只读；连接 note-api（NAS 部署）后，选题、草稿与月目标全部写入 NAS，浏览器不保存业务数据。
+
+> 各模块的职责、数据流、API 与配置速查，见 **[模块与使用指导手册](docs/guide.md)**。
 
 ## 快速开始
 
@@ -86,7 +88,7 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 
 ### 方式二：手动改数据
 
-1. **`src/config.js`**：品牌名、图谱中心的名字、头像（放进 `public/`）、页脚文字、本地存储的键名前缀。
+1. **`src/config.js`**：品牌名、图谱中心的名字、头像（放进 `public/`）、页脚文字。
 2. **`src/data/sample.js`**（或你自己的 `src/data/my-data.local.js`）：所有内容数据，字段如下。
 
 | 导出 | 内容 | 关键字段 |
@@ -98,7 +100,7 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 | `seedDrafts` | 创作台草稿 | `title`、`body`、`source`（来源选题的 id） |
 | `concepts` | 概念词表 | `[概念名, [关键词…]]`，换成你所在领域的词 |
 
-改完刷新页面即可。如果浏览器里已经保存过选题和草稿，想看到新的示例数据，可以把 `storagePrefix` 改个名字，或清空该站点的 localStorage。
+改完刷新页面即可。旧版浏览器里保存过的选题/草稿/目标不会再被读取；连接 NAS 后启动时会自动清掉这些旧键。
 
 ## 图谱是怎么连起来的
 
@@ -121,21 +123,26 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 ├── skills/neural-creator-dashboard/SKILL.md   通用 Agent Skill
 ├── scripts/import-notes.mjs   笔记导入；scripts/verify.mjs 校验（npm run verify）
 ├── examples/vault/            虚构的示例笔记库
+├── server/                    note-api（读写 vault、AI 编排、索引）
+├── deploy/                    NAS 部署用 compose / nginx 配置
+├── docs/                      部署、使用指南与架构说明
 ├── public/avatar.svg          头像（抽象图形）
 ├── src/config.js              个性化配置
-├── src/data/index.js          数据入口（示例 / 你的数据）
+├── src/data/index.js          数据入口（示例 / 你的数据 / note-api）
 ├── src/data/sample.js         示例数据（虚构）
 └── src/neural/
     ├── graph.js               图谱推导、布局、本地检索
-    ├── Home.jsx               星核、五簇星团、星座线与三层交互
+    ├── Home.jsx               星核、六簇星团、星座线与三层交互
     ├── Cosmos.jsx             星穹背景（星云、星尘、流星）
     ├── StarCore.jsx           星核渲染
     ├── v41.js                 星核渲染参数
-    ├── constellations.js      五个星座的真实星表骨架
+    ├── constellations.js      六个星座的真实星表骨架
     ├── ConstellationBand.jsx  内页星座轨
     ├── NetworkCanvas.jsx      背景神经网络
     ├── Analysis.jsx           右侧分析栏
     ├── pages.jsx              作品库 / 创作台 / 选题池
+    ├── persist.js             NAS 持久化（防抖、mtime、内存重试、冲突）
+    ├── SaveStatus.jsx         保存状态徽标与同步横幅
     ├── main.jsx               页面框架与弹窗
     ├── theme.js               配色与素材路径
     └── neural.css             样式
@@ -149,7 +156,7 @@ npm run build
 
 公开部署前请运行 `npm run import -- --reset`（会删掉 `src/data/my-data.local.js`），并确认没有留下本机的 `src/config.local.js`。构建产物里打包的是构建当时生效的那份数据与配置：`.gitignore` 只阻止源码提交，不能阻止个人数据被打包进网页，导入私人笔记后的构建产物不可直接公开。
 
-`dist/` 是纯静态文件，可以放到任何静态托管（GitHub Pages、Vercel、Netlify、Cloudflare Pages 等）。构建使用相对路径，部署在子路径下也能正常加载。
+`dist/` 是纯静态文件，可以放到任何静态托管（GitHub Pages、Vercel、Netlify、Cloudflare Pages 等）。构建使用相对路径，部署在子路径下也能正常加载。纯静态页面只读；需要在线编辑选题/草稿/目标时，按 **[NAS 部署说明](docs/nas-deployment.md)** 启动 note-api，数据会实时写入 vault 与 `vault/.dashboard/settings.json`。
 
 ## 关于素材
 

@@ -16,6 +16,8 @@ const local = import.meta.glob('./my-data.local*.js', {eager: true})['./my-data.
 let data = {...sample, ...(local || {})};
 let files = {};
 let figures = {};
+let mtimes = {};
+let settings = null;
 let meta = null;
 let source = local ? 'local' : 'sample';
 let error = null;
@@ -26,17 +28,21 @@ const listeners = new Set();
 export const getData = () => data;
 export const getFiles = () => files;
 export const getFigures = () => figures;
+export const getMtimes = () => mtimes;
+export const getSettings = () => settings;
 export const getMeta = () => meta;
 export const getSource = () => source;
 export const getError = () => error;
 export const getLoadedAt = () => loadedAt;
 
-// note-api 的 /api/data 返回的就是这份数据的形状，外加 files / figures / meta 三样。
+// note-api 的 /api/data 返回的就是这份数据的形状，外加 files / figures / mtimes / settings / meta。
 export function setApiData(payload) {
-  const {files: f, figures: g, meta: m, ...rest} = payload || {};
+  const {files: f, figures: g, mtimes: t, settings: s, meta: m, ...rest} = payload || {};
   data = {...data, ...rest};
   files = f || {};
   figures = g || {};
+  mtimes = t || {};
+  settings = s || null;
   meta = m || null;
   source = 'api';
   error = null;

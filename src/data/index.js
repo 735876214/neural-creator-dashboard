@@ -3,7 +3,7 @@
 // 数据的实际内容由 src/data/store.js 提供：boot.js 在挂载 React 之前把 note-api 的数据填进去，
 // 没起后端时就沿用 my-data.local.js（npm run import 生成的）或 src/data/sample.js。
 // 导出名字保持不变，works.js / graph.js / Analysis.jsx 一行都不用改。
-import {getData, getFiles, getFigures, getMeta, getSource, getError, isLive} from './store.js';
+import {getData, getFiles, getFigures, getMeta, getSource, getError, isLive, getSettings, getMtimes} from './store.js';
 
 const data = getData();
 
@@ -20,6 +20,8 @@ export const concepts = data.concepts;
 // figures：节点 id → 这篇笔记引用的附件，用于显示「N 张图」角标
 export const files = getFiles();
 export const figures = getFigures();
+export const mtimes = getMtimes();
+export const settings = getSettings();
 export const meta = getMeta();
 export const dataSource = getSource();
 export const dataError = getError();

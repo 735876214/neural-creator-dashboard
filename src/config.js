@@ -10,8 +10,8 @@ const defaults = {
   // 头像放在 public/ 下，填相对路径
   avatar: 'avatar.svg',
   footer: {zh: '笔记与作品，都是星图里的一颗恒星。', en: 'Every note and every work is a star in the chart.'},
-  // 选题、草稿、目标保存在浏览器 localStorage 里的键名前缀
-  // 换成了自己的数据，就换一个前缀：否则浏览器里遗留的示例选题、草稿会盖住导入的真实数据
+  // 旧版浏览器存储的键名前缀：现在业务数据只存 NAS，这个值只用于启动时清理历史遗留键。
+  // 可保留原值，避免旧键残留；新部署不再使用 localStorage 保存选题、草稿或目标。
   storagePrefix: 'neural-dashboard'
 };
 

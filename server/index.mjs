@@ -29,6 +29,10 @@ import {randomUUID} from 'node:crypto';
 
 const VAULT = resolve(process.env.VAULT_DIR || '');
 const DATA_DIR = resolve(process.env.DATA_DIR || '.note-api');
+// 看板设置（月目标、AI 模型选择）是用户数据，放 vault 内隐藏目录：
+// 随 vault 的 Syncthing/git 备份，且以点开头，readVault 的 walk() 会跳过，不会进图谱。
+const SETTINGS_DIR = join(VAULT, '.dashboard');
+const SETTINGS_FILE = join(SETTINGS_DIR, 'settings.json');
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '0.0.0.0';
 const STATIC_DIR = process.env.STATIC_DIR ? resolve(process.env.STATIC_DIR) : null;
@@ -96,10 +100,16 @@ function loadData(maxAge = 1500) {
   for (const i of data.ideas) files['idea:' + i.id] = i.rel;
   for (const d of data.drafts) files['draft:' + d.id] = d.rel;
   const figures = {};
+  const mtimes = {};
   for (const [id, rel] of Object.entries(files)) {
-    try { const f = attachmentsOf(readFileSync(join(VAULT, rel), 'utf8')); if (f.length) figures[id] = f; } catch {}
+    const abs = join(VAULT, rel);
+    try {
+      mtimes[id] = mtimeOf(abs);
+      const f = attachmentsOf(readFileSync(abs, 'utf8'));
+      if (f.length) figures[id] = f;
+    } catch {}
   }
-  cache = {at: Date.now(), data: {...data, files, figures, generatedAt: new Date().toISOString()}};
+  cache = {at: Date.now(), data: {...data, files, figures, mtimes, generatedAt: new Date().toISOString()}};
   return cache.data;
 }
 const invalidate = () => { cache = {at: 0, data: null}; };
@@ -131,6 +141,90 @@ function gitCommit(rel, message) {
   } catch { return false; }
 }
 
+// —— 看板设置（vault/.dashboard/settings.json）——
+// 只存少量不属于笔记的看板偏好：月目标、用户选的 AI 模型。
+const SETTINGS_DEFAULTS = {version: 1, goal: 8, aiModel: null};
+const SETTINGS_KEYS = new Set(['goal', 'aiModel']);
+
+function readSettings() {
+  try {
+    if (!existsSync(SETTINGS_FILE)) return {...SETTINGS_DEFAULTS};
+    const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
+    const goal = Number.isInteger(raw?.goal) && raw.goal >= 1 && raw.goal <= 100 ? raw.goal : SETTINGS_DEFAULTS.goal;
+    const aiModel = typeof raw?.aiModel === 'string' && raw.aiModel ? raw.aiModel : null;
+    return {version: 1, goal, aiModel, ...(raw?.updatedAt ? {updatedAt: String(raw.updatedAt)} : {})};
+  } catch {
+    return {...SETTINGS_DEFAULTS};
+  }
+}
+
+function writeSettings(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) fail(400, '设置必须是对象');
+  for (const k of Object.keys(patch)) if (!SETTINGS_KEYS.has(k)) fail(400, `未知设置项：${k}`);
+  if ('goal' in patch && !(Number.isInteger(patch.goal) && patch.goal >= 1 && patch.goal <= 100)) fail(400, '目标必须是 1–100 的整数');
+  if ('aiModel' in patch && !(patch.aiModel === null || (typeof patch.aiModel === 'string' && patch.aiModel))) fail(400, 'AI 模型必须是字符串或 null');
+  const next = {...readSettings(), ...patch, version: 1, updatedAt: new Date().toISOString()};
+  mkdirSync(SETTINGS_DIR, {recursive: true});
+  const tmp = join(SETTINGS_DIR, `.settings-${process.pid}-${Date.now()}.tmp`);
+  try {
+    writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    renameSync(tmp, SETTINGS_FILE);
+  } catch (e) {
+    try { rmSync(tmp, {force: true}); } catch {}
+    throw new Error(`写入设置失败：${e.message}`);
+  }
+  gitCommit('.dashboard/settings.json', '更新看板设置');
+  return next;
+}
+
+// idea / draft 的 frontmatter 白名单校验：只接受约定字段，非法值直接 400，
+// 避免把前端的临时状态写进笔记文件。
+function cleanFm(kind, fm) {
+  if (fm == null) return {};
+  if (typeof fm !== 'object' || Array.isArray(fm)) fail(400, 'fm 必须是对象');
+  const out = {};
+  if (kind === 'idea') {
+    for (const k of ['platform', 'priority', 'status', 'note']) {
+      if (!(k in fm)) continue;
+      if (typeof fm[k] !== 'string') fail(400, `选题属性 ${k} 必须是字符串`);
+      out[k] = fm[k];
+    }
+    if ('priority' in out && !['高', '中', '低'].includes(out.priority)) fail(400, '优先级必须是 高/中/低');
+    if ('status' in out && !['待写', '待扩展', '已转草稿'].includes(out.status)) fail(400, '状态必须是 待写/待扩展/已转草稿');
+  } else {
+    if ('source' in fm) {
+      if (!(typeof fm.source === 'string' || typeof fm.source === 'number')) fail(400, 'source 必须是选题标题');
+      out.source = String(fm.source);
+    }
+  }
+  return out;
+}
+
+// 用户笔记可能用中文键（来源选题 / 状态 / 标签…），前端统一用英文键。
+// 写回时优先复用文件里已有的同义键，避免同一语义出现两行（例如 source 与 来源选题并存）。
+const KEY_ALIASES = {
+  title: ['标题'],
+  platform: ['平台'],
+  priority: ['优先级'],
+  status: ['状态'],
+  note: ['备注', 'description', '简介'],
+  source: ['来源选题', '选题'],
+  tags: ['标签', '话题'],
+  summary: ['摘要']
+};
+
+function alignKeys(fm, text) {
+  if (!fm || !Object.keys(fm).length) return fm;
+  const {fm: existing} = parse(text);
+  const names = Object.keys(existing);
+  const out = {};
+  for (const [key, value] of Object.entries(fm)) {
+    const hit = (KEY_ALIASES[key] || []).find(alias => names.some(n => n.toLowerCase() === alias.toLowerCase()));
+    out[hit || key] = value;
+  }
+  return out;
+}
+
 // 写一个已存在的笔记：乐观锁 → 备份 → 最小侵入改写 → 落盘 → 提交
 function writeExisting(rel, {body, fm, mtime}) {
   const {abs} = inside(rel);
@@ -140,7 +234,7 @@ function writeExisting(rel, {body, fm, mtime}) {
   if (mtime != null && Math.abs(Number(mtime) - current) > 1) {
     fail(409, '文件已被其他地方改动', {path: rel, mtime: current, content: before});
   }
-  const after = writeDoc(before, {fm, body});
+  const after = writeDoc(before, {fm: alignKeys(fm, before), body});
   if (after === before) return {path: rel, mtime: current, changed: false, text: after};
   backup(rel, before);
   writeFileSync(abs, after, 'utf8');
@@ -245,10 +339,18 @@ async function route(req, res, url) {
       concepts: d.concepts,
       files: d.files,
       figures: d.figures,
+      mtimes: d.mtimes || {},
+      settings: readSettings(),
       semantic: aiEdgeCache?.edges || [],
       ai: aiInfo(),
       meta: {vault: VAULT, counts: d.counts, generatedAt: d.generatedAt, indexed: index.count()}
     });
+  }
+
+  if (p === '/api/settings' && req.method === 'GET') return json(res, 200, readSettings());
+
+  if (p === '/api/settings' && req.method === 'PUT') {
+    return json(res, 200, writeSettings(await readBody(req)));
   }
 
   if (p === '/api/note' && req.method === 'GET') {
@@ -278,14 +380,14 @@ async function route(req, res, url) {
       const rel = target({path, id});
       // 标题按 Obsidian 的约定就是文件名，不额外写 title 键；
       // 只有用户已经在属性里写了 title 时，才连那一行一起改，免得文件名和属性对不上。
-      const fmPatch = {...fm};
+      const fmPatch = cleanFm(kind, fm);
       if (title && hasKey(readFileSync(join(VAULT, rel), 'utf8'), 'title')) fmPatch.title = title;
       const r = writeExisting(rel, {body, fm: fmPatch, mtime});
       const finalRel = title ? renameTo(title, rel) : rel;
       return json(res, 200, {path: finalRel, mtime: r.mtime, changed: r.changed, renamed: finalRel !== rel});
     }
     if (!title) fail(400, '新建需要一个标题');
-    const r = createNote(kind, {title, body, fm});
+    const r = createNote(kind, {title, body, fm: cleanFm(kind, fm)});
     return json(res, 201, {path: r.path, mtime: r.mtime, created: true});
   }
 

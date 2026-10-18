@@ -6,6 +6,8 @@ import {ConstellationBand} from './ConstellationBand';
 import {snapshot} from '../data';
 import {posts} from './works';
 import {T} from './theme';
+import {useSaveState, draftKey} from './persist';
+import {SaveBadge} from './SaveStatus';
 
 const fmt = v => v == null ? '—' : Number(v).toLocaleString('zh-CN');
 
@@ -83,14 +85,21 @@ function MiniGraph({graph, node}) {
   </svg>;
 }
 
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onGo, onModule}) {
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const [suggest, setSuggest] = useState(null);
   const [pick, setPick] = useState(0);
-  const change = (key, value) => setDrafts(drafts.map(d => d.id === draft.id ? {...d, [key]: value} : d));
+  const saveState = useSaveState(draftKey(draft?.id));
+  const change = (key, value) => {
+    if (readOnly) return;
+    const updated = {...draft, [key]: value};
+    setDrafts(drafts.map(d => d.id === draft.id ? updated : d));
+    onDirty?.(updated);
+  };
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'draft:' + draft?.id).map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, draft?.id]);
   const check = el => {
+    if (readOnly) return;
     const before = el.value.slice(0, el.selectionStart);
     const m = before.match(/\[\[([^\]\n]*)$/);
     if (!m) { setSuggest(null); return; }
@@ -109,7 +118,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const wiki = node ? graph.links.filter(l => l.kind === 'wiki' && l.s === node.id).map(l => graph.index.get(l.t)) : [];
   return <div className="page page-drafts">
     <PageHead zh="创作台" en="Drafts" sub="把灵感，写成下一篇。" subEn="Write with [[links]] — every link grows a backlink.">
-      <button className="pill primary" onClick={() => onNew()}><Icon name="plus" size={15}/>新建草稿 <em>New draft</em></button>
+      <button className="pill primary" onClick={() => onNew()} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="plus" size={15}/>新建草稿 <em>New draft</em></button>
     </PageHead>
     <ConstellationBand page="drafts" onGo={onModule}/>
     <div className="drafts-layout">
@@ -121,10 +130,10 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         {!drafts.length && <p className="empty-line">还没有草稿 <em>No drafts yet</em></p>}
       </aside>
       {draft ? <section className="editor glass">
-        <div className="editor-meta"><span>03-创作台 / 正在写 <em>Writing</em></span><span><Icon name="check" size={13}/>自动保存到 NAS 笔记库 <em>Auto-saved to NAS vault</em></span></div>
-        <input className="editor-title" value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题"/>
+        <div className="editor-meta"><span>03-创作台 / 正在写 <em>Writing</em></span>{readOnly ? <span><Icon name="info" size={13}/>只读演示 · Read-only</span> : <SaveBadge state={saveState}/>}</div>
+        <input className="editor-title" readOnly={readOnly} value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题"/>
         <div className="editor-area">
-          <textarea ref={area} value={draft.body} aria-label="草稿正文" placeholder="开始写… 输入 [[ 链接到其他笔记 Type [[ to link a note"
+          <textarea ref={area} readOnly={readOnly} value={draft.body} aria-label="草稿正文" placeholder="开始写… 输入 [[ 链接到其他笔记 Type [[ to link a note"
             onChange={e => { change('body', e.target.value); check(e.target); }} onClick={e => check(e.target)}
             onKeyDown={e => {
               if (!suggest?.list.length) return;
@@ -141,7 +150,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         </div>
         <footer className="editor-foot">
           <span>{(draft.body || '').length} 字 <em>chars</em> · {wiki.length} 个双链 <em>wikilinks</em></span>
-          <button className="pill ghost danger" onClick={() => onDelete(draft.id)}><Icon name="trash" size={14}/>删除 <em>Delete</em></button>
+          <button className="pill ghost danger" onClick={() => onDelete(draft.id)} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="trash" size={14}/>删除 <em>Delete</em></button>
         </footer>
       </section> : <section className="editor glass empty"><p>新建一篇草稿开始写作 <em>Create a draft to begin</em></p></section>}
       {node && <aside className="draft-links glass">
@@ -162,10 +171,10 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
 const LANES = [['待写', 'To write'], ['待扩展', 'To expand'], ['已转草稿', 'Drafted']];
 const PRI = {高: ['High', 'high'], 中: ['Medium', 'mid'], 低: ['Low', 'low']};
 
-export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule}) {
+export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule, readOnly}) {
   return <div className="page page-ideas">
     <PageHead zh="选题池" en="Ideas" sub="下一篇，从这里开始。" subEn="Ideas linked to what you have already published.">
-      <button className="pill primary" onClick={onNew}><Icon name="plus" size={15}/>添加选题 <em>New idea</em></button>
+      <button className="pill primary" onClick={onNew} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="plus" size={15}/>添加选题 <em>New idea</em></button>
     </PageHead>
     <ConstellationBand page="ideas" onGo={onModule}/>
     <div className="lanes">{LANES.map(([zh, en], li) => {
@@ -185,7 +194,7 @@ export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule}) {
             <div className="ic-reach"><Icon name="link" size={13}/>{works.length ? <>可延伸 {works.length} 篇作品 <em>builds on {works.length} works</em></> : <>暂无关联作品 <em>No related works</em></>}</div>
             <footer>
               <button className="pill ghost" onClick={() => onGraph(n.id)}><Icon name="concept" size={14}/>图谱 <em>Graph</em></button>
-              <button className="pill" onClick={() => onEdit(idea)}>编辑 <em>Edit</em><Icon name="chevron" size={13}/></button>
+              <button className="pill" onClick={() => onEdit(idea)} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}>编辑 <em>Edit</em><Icon name="chevron" size={13}/></button>
             </footer>
           </article>;
         })}

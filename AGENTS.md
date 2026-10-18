@@ -4,7 +4,7 @@
 
 ## 项目
 
-创作神经网络看板：React 19 + Vite 7 的纯前端页面，把作品、方法笔记、选题、草稿推导成一张神经网络图谱。默认不联网、不调用 AI，用户数据只在本地。
+创作神经网络看板：React 19 + Vite 7 的纯前端页面，把作品、方法笔记、选题、草稿推导成一张神经网络图谱。纯静态模式不联网、不调用 AI；部署模式由 note-api 读写 NAS 上的 vault，业务数据不保存在浏览器。
 
 > **部署模式（deploy）**：项目有两种运行类型——部署（后端 note-api 读写 vault，见 `docs/nas-deployment.md` 与 `deploy/`）和开发（本机 `docker-compose.dev.yml` + `npm run dev`）。部署模式引入 note-api 服务（`server/`）与可选的 AI 能力（`server/ai.mjs`，OpenAI 兼容接口）。纯静态行为保留：`src/neural/boot.js` 先尝试 `fetch('/api/data')`，取不到就回退本地数据（示例或 `npm run import` 的快照）。AI key 只存在于服务端环境变量，绝不进前端 bundle。
 
@@ -23,11 +23,11 @@
 
 - `index.html`：页面入口，加载 `src/neural/main.jsx`。
 - `src/neural/theme.js`、`neural.css` 顶部的 CSS 变量：配色（深空蓝紫底 + 金色星座线，只有一套深空配色）。
-- `src/config.js`：品牌、头像、页脚、localStorage 前缀。
+- `src/config.js`：品牌、头像、页脚；`storagePrefix` 仅用于清理旧版浏览器缓存。
 - `src/data/index.js`：数据入口。本机存在 `src/data/my-data.local.js` 时优先用它，否则用 `./sample.js`；改数据不用动这个文件。
 - `src/data/sample.js`：虚构示例数据，也是数据字段的权威说明。
 - `src/neural/graph.js`：图谱推导（目录归属、双链、选题来源、话题、概念提及、双向共振）、布局和本地检索。
-- `src/neural/Home.jsx`：星核、五簇星团与三层交互；`Cosmos.jsx` 星穹背景；`StarCore.jsx` / `v41.js` 星核渲染；`constellations.js` 五个星座的真实星表骨架；`ConstellationBand.jsx` 内页星座轨；`NetworkCanvas.jsx` 背景星图；`Analysis.jsx` 分析栏；`pages.jsx` 三个内页。
+- `src/neural/Home.jsx`：星核、六簇星团与三层交互；`Cosmos.jsx` 星穹背景；`StarCore.jsx` / `v41.js` 星核渲染；`constellations.js` 六个星座的真实星表骨架；`ConstellationBand.jsx` 内页星座轨；`NetworkCanvas.jsx` 背景星图；`Analysis.jsx` 分析栏；`pages.jsx` 三个内页；`persist.js` NAS 持久化（防抖、mtime 乐观锁、内存 outbox、冲突状态）；`SaveStatus.jsx` 保存状态与同步横幅。
 - `scripts/import-notes.mjs`：笔记导入；`scripts/verify.mjs`：校验；`server/`：note-api 服务（vault.mjs 解析、frontmatter.mjs 最小侵入改写、db.mjs SQLite 索引、ai.mjs AI 编排、index.mjs HTTP 服务）。
 - `skills/neural-creator-dashboard/SKILL.md`：通用 Agent Skill，可用 `npx skills add` 安装到各家智能体。
 - `examples/vault/`：虚构的示例笔记库，演示导入格式。
@@ -41,6 +41,7 @@
 - `seedIdeas`：`id`（数字）、`title`、`platform`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note`
 - `seedDrafts`：`id`、`title`、`body`、`source`（来源选题 id 或 `null`）
 - `concepts`：`[概念名, [关键词…]]`
+- `settings` / `mtimes`（仅部署模式）：`settings` 是月目标与 AI 模型选择（存 NAS 的 `vault/.dashboard/settings.json`）；`mtimes` 是节点 id → 文件 mtime，写回时做乐观锁。
 
 ## 规矩
 
@@ -49,8 +50,10 @@
 - 动画循环必须保持「先排下一帧、再在 try 里执行本帧」的写法，时间差 `dt` 不能为负：否则某一帧出错就会让星核和星团停在隐形状态（刷新后消失）。
 - **不要再引入视频或图片素材。** reskin v0 起星核、星团、星云全部代码自绘，`public/` 只剩头像 `avatar.svg`（抽象图形）；`npm run verify` 会检查页面里没有 `<video>`。
 - `src/data/my-data.local.js` 含用户个人笔记，已在 `.gitignore`；不要提交、不要写进示例或文档。
+- **业务数据不保存在浏览器。** 部署模式下选题、草稿、月目标、AI 模型选择一律经 `src/neural/persist.js` 写入 NAS（vault `.md` + `vault/.dashboard/settings.json`），不要新增 localStorage 持久化；纯静态模式只读，编辑入口由 `isLive()` 禁用。
+- 写回必须用相对路径 + `mtime` 乐观锁；409 不静默覆盖。删除草稿走 `DELETE /api/note`（服务端先备份到 `.trash/`）。
 - `src/data/sample.js` 与 `examples/vault/` 只能放虚构内容。
-- 不要加入联网请求、统计脚本或 AI 调用。
+- 纯静态模式不要加入联网请求、统计脚本或 AI 调用；部署模式的前端请求只能发往同源 `/api`（note-api）。
 - 保持「减少动态效果」支持（`prefers-reduced-motion`）和中英双语文案。
 
 ## 改完之后的验证

@@ -4,6 +4,7 @@ import {Icon} from './icons';
 import {profileFor, bandsOf, outerCountOf} from './v41';
 import {isLive, getMeta, getFiles} from '../data/store';
 import {aiAnalyze, aiRelate, aiIdeas, aiModels, pickedModel, setPickedModel} from './sync';
+import {apiUrl} from './persist';
 
 const fmt = (v, d = 0) => v == null || Number.isNaN(v) ? '—' : Number(v).toLocaleString('zh-CN', {minimumFractionDigits: d, maximumFractionDigits: d});
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -150,7 +151,7 @@ function AskBox({graph, node, onGo}) {
     // NAS + 配了 AI：走 RAG（带引用）；否则用本地规则检索（不联网）
     if (ai) {
       try {
-        const r = await fetch('/api/ai/ask', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question: q})});
+        const r = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question: q})});
         const j = await r.json();
         setRes([{title: 'AI 回答', en: 'AI answer', tone: 'info', text: j.answer || '（空）', refs: j.refs || []}]);
       } catch (e2) {
@@ -182,7 +183,7 @@ function AskBox({graph, node, onGo}) {
 }
 
 function pollJob(id, tries = 120) {
-  const tick = () => fetch('/api/ai/jobs/' + id).then(r => r.json());
+  const tick = () => fetch(apiUrl('/api/ai/jobs/' + id)).then(r => r.json());
   return (async () => {
     for (let i = 0; i < tries; i++) {
       const j = await tick();

@@ -414,6 +414,19 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .editor.empty { min-height: 300px; place-items: center; color: var(--muted); }
 .editor-meta { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
 .editor-meta span { display: inline-flex; align-items: center; gap: 5px; }
+/* —— NAS 保存状态与同步横幅 —— */
+.save-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); }
+.save-badge em { font-style: normal; opacity: .7; }
+.save-badge.sb-saved { color: var(--green); }
+.save-badge.sb-saving { color: var(--cyan); }
+.save-badge.sb-pending, .save-badge.sb-error, .save-badge.sb-conflict { color: var(--gold); }
+.sync-banner { position: fixed; z-index: 45; top: 72px; right: 16px; max-width: min(600px, calc(100vw - 32px)); display: grid; gap: 6px; padding: 10px 14px; border-radius: 14px; font-size: 12px; }
+.sync-banner .sb-title { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.sync-banner .sb-item { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; color: var(--text-2); }
+.sync-banner .sb-item b { color: var(--text); }
+.sync-banner .text-btn { margin-left: auto; }
+.sync-banner.read-only { border-color: rgba(232, 200, 132, .35); }
+@media (max-width: 720px) { .sync-banner { top: 60px; left: 8px; right: 8px; max-width: none; } }
 .neural .editor-title { width: 100%; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 8px 0 12px; font-size: 24px; font-weight: 600; outline: none; }
 .editor-area { position: relative; }
 .editor-area textarea { width: 100%; min-height: 56vh; resize: vertical; border: 0; background: none; outline: none; padding: 10px 0; font-size: 15px; line-height: 1.9; color: var(--text); }
