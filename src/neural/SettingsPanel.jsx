@@ -12,16 +12,6 @@ import {Icon} from './icons';
 import {aiModels} from './sync.js';
 import {saveSettings, apiUrl, saveGoal} from './persist';
 
-function useModels() {
-  const [models, setModels] = useState([]);
-  useEffect(() => {
-    let on = true;
-    aiModels().then(m => { if (on) setModels(m); }).catch(() => {});
-    return () => { on = false; };
-  }, []);
-  return models;
-}
-
 function AiSection({ai, settings, model, onModel, readOnly, onRefresh}) {
   const keyConfigured = !!settings?.aiKeyConfigured;
   const [baseUrl, setBaseUrl] = useState(settings?.aiBaseUrl || '');
@@ -51,10 +41,7 @@ function AiSection({ai, settings, model, onModel, readOnly, onRefresh}) {
       const next = await saveSettings(patch);
       setKey('');
       setMsg('已连接，模型列表已刷新——选一个作为全局默认模型 · Connected');
-      onRefresh?.(next);
-      const j = await aiModels().catch(() => []);
-      setModels(j.map(m => m.id || m).filter(Boolean));
-      if (!j.length) setModelsErr('拉不到模型列表：请检查接口地址与 key');
+      onRefresh?.(next); // settings/aiKeyConfigured 变化触发下方 effect 重新拉模型列表（只拉一次）
     } catch (e) { setMsg('保存失败：' + e.message); }
     finally { setBusy(false); }
   };

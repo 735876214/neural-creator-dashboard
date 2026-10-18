@@ -63,14 +63,18 @@ export async function listModels() {
     const res = await fetch(CHAT_BASE + '/models', {headers: {authorization: `Bearer ${CHAT_KEY}`}, signal: AbortSignal.timeout(8000)});
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const j = await res.json();
-    modelCache = {at: Date.now(), list: (j.data || []).map(m => ({
+    modelCache.at = Date.now();
+    modelCache.list = (j.data || []).map(m => ({
       id: m.id, name: m.name || m.id,
       reasoning: !!(m.only_reasoning || m.reasoning_supported || /reasoning/i.test(String(m.tags || '')))
-    }))};
+    }));
   } catch (e) {
     if (!modelCache.list.length) console.error('[ai] 拉取模型列表失败：', e.message);
     // 失败时保留旧缓存；从来没有成功过就只报默认模型
-    if (!modelCache.list.length) modelCache = {at: Date.now(), list: [{id: CHAT_MODEL, name: CHAT_MODEL, reasoning: false}]};
+    if (!modelCache.list.length) {
+      modelCache.at = Date.now();
+      modelCache.list = [{id: CHAT_MODEL, name: CHAT_MODEL, reasoning: false}];
+    }
   }
   return modelCache.list;
 }

@@ -1,6 +1,6 @@
 ---
 name: neural-creator-dashboard
-description: 把用户的 Markdown / Obsidian 笔记和作品数据做成「创作神经网络看板」网页——中心一颗发光的星核、六片由真实星座骨架绘制的模块星团（含 AI 热点）、点开后星座线展开到每一篇内容、右侧分析栏，深空蓝紫底配金色星座线，全部画面由代码逐帧自绘、无图片视频素材。默认纯静态只读，可选 note-api 部署把选题、草稿与目标写回 NAS。Use when the user wants a neural-network style creator or knowledge dashboard, wants to visualize Obsidian notes, works metrics and bidirectional links, or mentions neural-creator-dashboard.
+description: 把用户的 Markdown / Obsidian 笔记和作品数据做成「创作神经网络看板」网页——中心一颗发光的星核、七片由真实星座骨架绘制的模块星团（含 AI 热点）、点开后星座线展开到每一篇内容、右侧分析栏，深空蓝紫底配金色星座线，全部画面由代码逐帧自绘、无图片视频素材。默认纯静态只读，可选 note-api 部署把选题、草稿与目标写回 NAS。Use when the user wants a neural-network style creator or knowledge dashboard, wants to visualize Obsidian notes, works metrics and bidirectional links, or mentions neural-creator-dashboard.
 license: MIT
 metadata:
   repository: https://github.com/735876214/neural-creator-dashboard

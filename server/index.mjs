@@ -404,8 +404,7 @@ function writeSettings(patch) {
     throw new Error(`写入设置失败：${e.message}`);
   }
   gitCommit('.dashboard/settings.json', '更新看板设置');
-  // AI 运行时配置即时生效：key 走 DATA_DIR 秘密文件（不在 patch 里，见 /api/settings PUT 分流），其余从 next 取
-  setAiRuntime({baseUrl: next.aiBaseUrl || '', apiKey: null, model: next.aiModel || ''});
+  // AI 运行时应用集中在 /api/settings 的 PUT 路由（key 在那里分流后才可用），这里只管持久化。
   return next;
 }
 
@@ -656,17 +655,19 @@ async function route(req, res, url) {
     const body = await readBody(req);
     // AI key 单独分流：不进 settings.json（那会被 git 提交进 vault），存 DATA_DIR 秘密文件。
     // '' = 清除恢复 env 缺省；缺字段 = 不改动。
-    let keyApplied = null;
+    // 先做全部校验（key 的类型 + writeSettings 的 settings 校验，非法时抛 400、不落任何东西），
+    // 校验通过后才落 key——避免「key 已换、settings 未变」的状态分裂。
+    let keyToApply;
     if ('aiApiKey' in body) {
-      const k = typeof body.aiApiKey === 'string' ? body.aiApiKey.trim() : null;
-      if (k == null) fail(400, 'aiApiKey 必须是字符串（空字符串表示清除）');
-      saveAiSecret(k);
-      keyApplied = k;
-      delete body.aiApiKey;
+      if (typeof body.aiApiKey !== 'string') fail(400, 'aiApiKey 必须是字符串（空字符串表示清除）');
+      keyToApply = body.aiApiKey.trim();
+      delete body.aiApiKey; // aiApiKey 不在 SETTINGS_KEYS，writeSettings 会拒绝未知键
     }
     const next = writeSettings(body);
-    // key 与 baseUrl/model 一起应用到运行时（writeSettings 已应用 url/model，这里补 key）
-    setAiRuntime({apiKey: keyApplied != null ? keyApplied : null, baseUrl: next.aiBaseUrl || '', model: next.aiModel || ''});
+    if (keyToApply != null) {
+      saveAiSecret(keyToApply);
+      setAiRuntime({apiKey: keyToApply, baseUrl: next.aiBaseUrl || '', model: next.aiModel || ''});
+    }
     // 返回脱敏视图，secret 不回传；与 GET /api/data 的 settings 形状一致。
     return json(res, 200, {...next, aiKeyConfigured: !!loadAiSecret(), platforms: Object.fromEntries(Object.entries(next.platforms).map(([k, v]) => [k, {appid: v.appid, configured: true, secretMasked: '••••••'}]))});
   }
@@ -1036,17 +1037,18 @@ async function route(req, res, url) {
     const text = page ? htmlToText(page.html) : String(note || '');
 
     // 标题三级来源：og/title 标签 → AI 从正文提炼 →（仍无则报错）。
-    let analysis = null, analysisError = null;
+    // analyze:false 的请求只借 AI 提炼标题（titleForName），不把 summary/keyPoints 写回——尊重「不分析」语义。
+    let analysis = null, analysisError = null, titleProbe = null;
     if (page && !finalTitle && aiEnabled()) {
       try {
-        const probe = await analyzeWebPage({url: page.url, title: null, text});
-        if (probe.title) { finalTitle = probe.title; analysis = probe; }
+        titleProbe = await analyzeWebPage({url: page.url, title: null, text});
+        if (titleProbe.title) finalTitle = titleProbe.title;
       } catch (e) { analysisError = e.message; }
     }
     if (!finalTitle) fail(400, '网页没有标题（AI 也未能从正文提炼），请补一个 title');
 
-    // AI 分析：未启用/失败都不丢剪藏，只带 analysisError（上面标题兜底已分析过就复用）。
-    if (page && analyze !== false && aiEnabled() && !analysis) {
+    // AI 分析：未启用/失败都不丢剪藏，只带 analysisError；analyze:false 只借标题提炼，不写 summary。
+    if (page && analyze !== false && aiEnabled()) {
       try { analysis = await analyzeWebPage({url: page.url, title: finalTitle, text}); }
       catch (e) { analysisError = e.message; }
     }

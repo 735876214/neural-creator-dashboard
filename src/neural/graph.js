@@ -170,8 +170,9 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     };
     // Obsidian 双链 [[目标|别名]]
     for (const m of (n.body || '').matchAll(/\[\[([^\]]+)\]\]/g)) wikiLink(...m[1].split('|'));
-    // 中性链接 [标题](相对路径.md)：标准 Markdown 语法，与 [[双链]] 等效（obsidian-independence P2）
-    for (const m of (n.body || '').matchAll(/\[([^\]]+)\]\(([^)\s]+\.md)\)/g)) wikiLink(m[2], m[1]);
+    // 中性链接 [标题](相对路径.md)：标准 Markdown 语法，与 [[双链]] 等效（obsidian-independence P2）。
+    // 目标先剥掉 .md 扩展名（与 byName 注册口径一致），否则命中不了已有笔记、会误建带 .md 的 ghost。
+    for (const m of (n.body || '').matchAll(/\[([^\]]+)\]\(([^)\s]+\.md)\)/g)) wikiLink(m[2].replace(/\.md$/i, ''), m[1]);
   }
 
   // 话题标签：frontmatter 的 tags 与正文里的 #话题 都自动成为节点（大小写合并）。

@@ -1393,16 +1393,19 @@ export function createCore({w, h, dpr = 1, params = {}, bands, outerN = 0} = {})
       ctx.setTransform(dpr * sc, 0, 0, dpr * sc, dpr * core.x * (1 - sc), dpr * core.y * (1 - sc));
       o.anim = {t, w: TAU / 5};
       drawRings(ctx, o, 'far', core);
-      // 核：两个相邻相位按小数部分交叉淡入（呼吸 + 表面翻涌都在相位图里）
-      const f = ((t / 5) % 1 + 1) % 1, k = f * PHASES, i0 = Math.floor(k) % PHASES, i1 = (i0 + 1) % PHASES, fr2 = k - Math.floor(k);
+      // 核：两个相邻相位交叉淡入（呼吸 + 表面翻涌都在相位图里）。
+      // smoothstep 缓动让段边界处导数为零，亮度增减是连续的，不会有「最亮→最暗」的顿挫。
+      const f = ((t / 5) % 1 + 1) % 1, k = f * PHASES, i0 = Math.floor(k) % PHASES, i1 = (i0 + 1) % PHASES;
+      const fr2 = (() => { const u = k - Math.floor(k); return u * u * (3 - 2 * u); })();
       const x0 = core.x - PB / 2, y0 = core.y - PB / 2;
       ctx.save();
-      // ① 核体：source-over（远半环被它挡住 = 遮挡顺序的第一半）
-      ctx.globalAlpha = 1;
+      // ① 核体：source-over（远半环被它挡住 = 遮挡顺序的第一半）；互补 alpha = 真线性插值
+      ctx.globalAlpha = 1 - fr2;
       ctx.drawImage(bodyPhases[i0], x0, y0, PB, PB);
       if (fr2 > .002) { ctx.globalAlpha = fr2; ctx.drawImage(bodyPhases[i1], x0, y0, PB, PB); }
-      // ② 等离子 + 耀斑：lighter（纯加色，不遮任何东西）
-      ctx.globalAlpha = 1;
+      // ② 等离子 + 耀斑：lighter（纯加色，不遮任何东西）。加色下也必须互补 alpha：
+      //    若 i0 恒为 1、再叠 fr2·i1，过渡中途会亮过两个相位本身再骤降，呼吸看起来像闪烁。
+      ctx.globalAlpha = 1 - fr2;
       ctx.globalCompositeOperation = 'lighter';
       ctx.drawImage(plasmaPhases[i0], x0, y0, PB, PB);
       if (fr2 > .002) { ctx.globalAlpha = fr2; ctx.drawImage(plasmaPhases[i1], x0, y0, PB, PB); }

@@ -102,8 +102,10 @@ export function usePendingSaves() {
 
 const draftPayload = (draft, sourceTitle) => {
   const fm = {};
-  // 选题关联：稳定 id 优先（sourceIdeaId，改名不断链）；标题仅作为老读取端的兼容回退
-  if (draft.source != null && draft.source !== '') fm.sourceIdeaId = String(draft.source);
+  // 选题关联：稳定 id 优先（sourceIdeaId，改名不断链）；标题仅作为老读取端的兼容回退。
+  // 只固化「稳定 id」：老数据里 readVault 按目录顺序生成的数字序号会随文件增删位移，
+  // 固化成 sourceIdeaId 后会在序号位移时错关联；数字 source 保持标题回退，不写 sourceIdeaId。
+  if (draft.source != null && draft.source !== '' && typeof draft.source !== 'number') fm.sourceIdeaId = String(draft.source);
   if (sourceTitle) fm.source = sourceTitle;
   // 发布来源（半自动发布回填）：非空才写，避免把空键刷进文件
   for (const k of ['platform', 'url', 'platformId', 'syncedAt']) {

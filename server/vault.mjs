@@ -93,7 +93,7 @@ export function classify(rel, dirs, allAsNotes = false) {
   const d = dirs || {};
   // Notion 导出适配：剥掉目录名里的 32 位哈希后缀再匹配（文件名里的哈希不影响分类——标题取 basename）
   // 分隔符同时接受 / 与 \（Windows 的 sep 是 \，但 vault 内部路径统一 /）
-  const names = rel.split(/[\\/]/).slice(0, -1).map(n => n.replace(NOTION_HASH, ''));
+  const names = rel.split(/[\\\/]/).slice(0, -1).map(n => n.replace(NOTION_HASH, ''));
   for (const kind of ['works', 'drafts', 'ideas', 'methods']) for (const f of d[kind] || []) {
     const prefix = norm(f);
     if (norm(rel).startsWith(prefix + '/')) return {kind, root: prefix.split('/').length};

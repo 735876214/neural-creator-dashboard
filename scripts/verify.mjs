@@ -187,11 +187,20 @@ const imageMatch = composeSrc.match(/image:\s*ghcr\.io\/([^\s:]+)/);
 if (!imageMatch) {
   fail('compose 未使用 ghcr.io 镜像（部署模式为 GitHub Actions 构建后拉取）');
 } else {
-  // GHCR 镜像名小写；期望值 = 仓库 owner/名（从 git remote 推导，再小写比较）
-  const remote = execSync('git remote get-url origin', {cwd: ROOT, encoding: 'utf8'}).trim();
-  const repo = (remote.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/) || [])[1]?.toLowerCase();
-  if (imageMatch[1].toLowerCase() !== repo) fail(`compose 镜像名 ${imageMatch[1]} 与仓库 ${repo} 不一致`);
-  else ok(`compose 镜像 ghcr.io/${imageMatch[1]} 与仓库一致`);
+  // GHCR 镜像名小写；期望值 = 仓库 owner/名（从 git remote 推导，再小写比较）。
+  // 非 git 目录（Release ZIP 下载）没有 remote：降级为 warning，不让 verify 崩溃。
+  let repo = null;
+  try {
+    const remote = execSync('git remote get-url origin', {cwd: ROOT, encoding: 'utf8'}).trim();
+    repo = (remote.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/) || [])[1]?.toLowerCase();
+  } catch { /* no .git — skip repo consistency check */ }
+  if (repo == null) {
+    warnings.push('非 git 目录（无 origin remote）：跳过 compose 镜像名一致性检查');
+  } else if (imageMatch[1].toLowerCase() !== repo) {
+    fail(`compose 镜像名 ${imageMatch[1]} 与仓库 ${repo} 不一致`);
+  } else {
+    ok(`compose 镜像 ghcr.io/${imageMatch[1]} 与仓库一致`);
+  }
   const wf = readFileSync(join(ROOT, '.github/workflows/docker-image.yml'), 'utf8');
   if (!/IMAGE_NAME:\s*\$\{\{ github\.repository \}\}/.test(wf)) fail('workflow 未使用 github.repository 作为 IMAGE_NAME，镜像名易漂移');
   else ok('workflow 镜像名取自 github.repository');
