@@ -862,3 +862,18 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .set-ok { color: var(--mint, #9fe3c0); }
 .set-off { color: var(--muted); }
 .settings-panel .quiet { font-size: 12px; }
+
+/* —— v7.3 冲突 diff（409 对比视图）—— */
+.diff-modal { width: min(860px, calc(100vw - 40px)); }
+.diff-cols { margin: 10px 0 4px; border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; }
+.diff-head { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--rule); font-size: 11.5px; letter-spacing: .08em; color: var(--gold); background: rgba(232, 200, 132, .06); }
+.diff-head span { padding: 7px 12px; }
+.diff-body { max-height: 46vh; overflow-y: auto; font-family: var(--mono, monospace); font-size: 12px; line-height: 1.55; }
+.diff-row { display: grid; grid-template-columns: 1fr 1fr; }
+.diff-row span { padding: 2px 12px; white-space: pre-wrap; word-break: break-all; color: var(--ink-2); }
+.diff-row.same span { background: rgba(255, 255, 255, .015); }
+.diff-row.del span:first-child { background: rgba(255, 107, 129, .14); color: #ffc9d2; }
+.diff-row.del span:last-child { background: rgba(255, 107, 129, .04); }
+.diff-row.add span:last-child { background: rgba(110, 231, 160, .12); color: #b8f0cd; }
+.diff-row.add span:first-child { background: rgba(110, 231, 160, .04); }
+.diff-modal .form-actions { margin-top: 10px; }

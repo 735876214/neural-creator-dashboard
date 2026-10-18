@@ -23,7 +23,7 @@ export function SaveBadge({state}) {
 const ACTIONS = new Set(['pending', 'error', 'conflict']);
 
 // 顶部同步横幅：列出未落盘/冲突的条目，提供重试与冲突处理。
-export function SyncBanner({items, onRetry, onOverwrite, onRefresh}) {
+export function SyncBanner({items, onRetry, onOverwrite, onRefresh, onDiff}) {
   const list = items.filter(x => ACTIONS.has(x.state?.state));
   if (!list.length) return null;
   return <div className="sync-banner glass" role="status">
@@ -31,6 +31,7 @@ export function SyncBanner({items, onRetry, onOverwrite, onRefresh}) {
     {list.map(x => <span className="sb-item" key={x.key}>
       <b>{x.label}</b>
       <span>{x.state.message || TEXT[x.state.state]?.[0]}</span>
+      {x.state.state === 'conflict' && <button className="text-btn" onClick={() => onDiff?.(x.key)}>对比 <em>Diff</em></button>}
       {x.state.state === 'conflict' && x.state.serverMtime != null && <button className="text-btn" onClick={() => onOverwrite(x.key)}>用我的版本覆盖 <em>Overwrite</em></button>}
       {x.state.state !== 'conflict' && <button className="text-btn" onClick={() => onRetry(x.key)}>重试 <em>Retry</em></button>}
     </span>)}

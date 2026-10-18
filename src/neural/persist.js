@@ -285,6 +285,7 @@ export function flushKey(key) {
         state: 'conflict',
         message: 'NAS 文件已被其他编辑器改动，未覆盖 · Conflict — not overwritten',
         serverMtime: j.mtime,
+        serverContent: j.content, // NAS 当前完整文本：冲突 diff 对比用
         path: j.path || ref?.path
       });
       return;
@@ -350,6 +351,33 @@ export const isPending = key => outbox.has(key) || UNRESOLVED.has(getSaveState(k
 
 export function pendingCount() {
   return [...outbox.keys()].filter(key => ['pending', 'error', 'conflict'].includes(getSaveState(key).state)).length;
+}
+
+// 冲突详情：NAS 版本（完整文本）+ 本地待写内容（outbox payload），供 diff 对话框展示。
+export function conflictInfo(key) {
+  const st = getSaveState(key);
+  if (st.state !== 'conflict') return null;
+  const item = outbox.get(key);
+  return {
+    key,
+    path: st.path,
+    serverMtime: st.serverMtime,
+    serverContent: st.serverContent ?? '',
+    localTitle: item?.payload?.title,
+    localBody: item?.payload?.body,
+    localFm: item?.payload?.fm
+  };
+}
+
+// 放弃本地改动、采用 NAS 版本：清掉 outbox 与状态；refs 保留（mtime 已在 409 时更新为服务端值）。
+export function discardLocal(key) {
+  outbox.delete(key);
+  attempts.delete(key);
+  savedSigs.delete(key);
+  clearTimeout(timers.get(key)); timers.delete(key);
+  clearTimeout(retryTimers.get(key)); retryTimers.delete(key);
+  states.delete(key);
+  emit();
 }
 
 export function overwriteConflict(key) {

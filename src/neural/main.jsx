@@ -10,6 +10,7 @@ import {Cosmos} from './Cosmos';
 import {Library, Drafts, Ideas, Knowledge} from './pages';
 import {PublishDialog} from './PublishDialog';
 import {NewNoteModal, PublishModal} from './NoteModal';
+import {DiffModal} from './DiffModal';
 import {SettingsPanel} from './SettingsPanel';
 import {insertImageAtCursor} from './NoteModal';
 import {Count} from './Analysis';
@@ -327,11 +328,12 @@ function App() {
         <button className="pill primary" onClick={() => newDraft()} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="plus" size={14}/>新建草稿 <em>New</em></button>
         <button className="pill ghost" onClick={() => setModal('new-note')} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="methods" size={14}/>新建笔记 <em>Note</em></button>
         <button className="avatar set-btn" onClick={() => { setSettingsLive(null); setModal('settings'); }} aria-label="打开设置"><Icon name="gear" size={17}/></button>
+        <button className="avatar" onClick={() => setModal('about')} aria-label={`${snapshot.account}，查看账号与数据来源`}><img src={asset(CONFIG.avatar)} alt=""/></button>
       </div>
     </header>
 
     {live
-      ? <SyncBanner items={saveItems} onRetry={persist.retry} onOverwrite={persist.overwriteConflict} onRefresh={() => location.reload()}/>
+      ? <SyncBanner items={saveItems} onRetry={persist.retry} onOverwrite={persist.overwriteConflict} onRefresh={() => location.reload()} onDiff={key => setModal({diff: key})}/>
       : <div className="sync-banner glass read-only" role="status">
           <span className="sb-title"><Icon name="info" size={14}/>未连接 NAS 笔记库 · 只读演示 <em>Read-only (no NAS)</em></span>
           <span className="sb-item">选题、草稿与目标的编辑已禁用；连接 note-api 后自动恢复 <em>Connect note-api to edit</em></span>
@@ -428,6 +430,16 @@ function App() {
       </div>
     </Modal>}
     {modal?.read && <ReadModal node={modal.read} onClose={close} editable={live}/>}
+    {modal?.diff && (() => {
+      const c = persist.conflictInfo(modal.diff);
+      if (!c) return null;
+      return <DiffModal title={c.localTitle || c.path || '冲突'}
+        aText={persist.stripFrontmatter(c.serverContent)} bText={c.localBody || ''}
+        aLabel="NAS 版本 NAS" bLabel="我的版本 Mine"
+        onClose={close}
+        onKeepServer={() => { persist.discardLocal(modal.diff); setModal(null); setToast('已采用 NAS 版本，本地改动放弃 · NAS version kept'); persist.refreshData().catch(() => {}); }}
+        onKeepMine={() => { persist.overwriteConflict(modal.diff); setModal(null); setToast('已用本地版本覆盖 NAS · Overwritten with mine'); }}/>;
+    })()}
     {modal === 'new-note' && <NewNoteModal onClose={close} onDone={path => { setModal(null); setToast('方法笔记已创建（05-方法库/），刷新后进图谱 · Note created'); location.reload(); }}/>}
     {modal?.toPost && (() => {
       const draft = drafts.find(x => x.title === modal.toPost.title);
@@ -476,6 +488,8 @@ function ReadModal({node, onClose, editable}) {
   const [mtime, setMtime] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [serverText, setServerText] = useState(null); // 409 时的 NAS 版本，diff 用
+  const [diffView, setDiffView] = useState(null); // {a, b} 内部 diff 弹窗
 
   // 部署模式下拉服务器上的原文（带 mtime 做乐观锁）；本地模式直接用图谱里的 body。
   useEffect(() => {
@@ -496,8 +510,9 @@ function ReadModal({node, onClose, editable}) {
       });
       if (res.status === 409) {
         const j = await res.json().catch(() => ({}));
-        setErr('文件已被 Obsidian 或其他编辑器改动，没有覆盖。请重新打开比对 · Conflict: file changed elsewhere, not overwritten');
-        setMtime(j.mtime); setText(j.content || text);
+        setErr('文件已被其他编辑器改动，未覆盖 · Conflict: file changed elsewhere, not overwritten');
+        setMtime(j.mtime);
+        setServerText(j.content || ''); // NAS 当前版本，供 diff；不再直接覆盖编辑框（丢输入）
         return;
       }
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -537,12 +552,21 @@ function ReadModal({node, onClose, editable}) {
               <button type="button" className="icon-btn" onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片"><Icon name="save" size={14}/></button>
             </label>}
           </div>
-          {err && <p className="quiet" role="alert">{err}</p>}
+          {err && <p className="quiet" role="alert">{err}
+              {serverText != null && <> · <button className="text-btn" onClick={() => setDiffView({a: serverText, b: text, mtime: mtime})}>对比差异 <em>Diff</em></button></>}
+            </p>}
           <div className="form-actions">
-            <button className="pill ghost" onClick={() => { setEditing(false); setErr(''); }} disabled={busy}>取消 <em>Cancel</em></button>
+            <button className="pill ghost" onClick={() => { setEditing(false); setErr(''); setServerText(null); }} disabled={busy}>取消 <em>Cancel</em></button>
             <button className="pill primary" onClick={save} disabled={busy || mtime == null}>{busy ? '保存中…' : '保存到 NAS 笔记库'} <em>Save to vault on NAS</em></button>
           </div>
         </div>}
+
+    {diffView && <DiffModal title={node.short || node.title} en="Conflict diff"
+      aText={persist.stripFrontmatter(diffView.a)} bText={diffView.b}
+      aLabel="NAS 版本 NAS" bLabel="我的编辑 Mine"
+      onClose={() => setDiffView(null)}
+      onKeepServer={() => { setText(persist.stripFrontmatter(diffView.a)); setMtime(diffView.mtime); setDiffView(null); setErr(''); setServerText(null); }}
+      onKeepMine={() => { setDiffView(null); setServerText(null); setErr('保留本地编辑，重新保存将覆盖 NAS · Keeping mine'); }}/>}
   </Modal>;
 }
 
