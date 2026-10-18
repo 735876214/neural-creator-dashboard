@@ -173,7 +173,7 @@ for (const [label, re] of [
   ['HttpOnly 会话 Cookie', /HttpOnly; SameSite=Lax/],
   ['登录失败限流', /LOGIN_MAX/]
 ]) { if (!re.test(serverSrc)) fail(`note-api 缺少：${label}`); else ok(label); }
-const nginxSrc = readFileSync(join(ROOT, 'deploy/nginx.conf'), 'utf8');
+const nginxSrc = readFileSync(join(ROOT, 'nginx.conf'), 'utf8');
 if (!/auth_request \/_auth/.test(nginxSrc) || !/location = \/login\.html/.test(nginxSrc)) fail('部署版 nginx 必须用 auth_request 保护静态资源，并放行 login.html');
 else ok('nginx auth_request 保护静态资源、放行登录页');
 const bootSrc = readFileSync(join(ROOT, 'src/neural/boot.js'), 'utf8');
