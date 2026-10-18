@@ -2,7 +2,7 @@ import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useSta
 import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, snapshot, settings, isLive} from '../data';
 import {subscribe as subscribeData, getFiles, getData} from '../data/store.js';
-import {posts, monthPosts} from './works';
+import {posts, monthPostsOf} from './works';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, MODULES} from './graph';
 import {Home} from './Home';
@@ -52,7 +52,7 @@ function Modal({title, en, onClose, children, wide}) {
 const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas'], ['knowledge', '知识库', 'Knowledge'], ['methods', '方法库', 'Methods']];
 const initialPage = () => { const h = location.hash.slice(1); return navs.some(n => n[0] === h) ? h : 'home'; };
 
-function Snapshot({goal, onGoal, ideas, drafts, onIdea, onDraft, onLibrary}) {
+function Snapshot({goal, onGoal, ideas, drafts, onIdea, onDraft, onLibrary, monthCount}) {
   const total = posts.reduce((s, p) => s + p.views, 0);
   const stats4 = [['已发布笔记', 'Published', posts.length], ['账号粉丝', 'Followers', snapshot.followers], ['累计观看', 'Total views', total], ['已知笔记涨粉', 'Known follows', posts.reduce((s, p) => s + (p.follows ?? 0), 0)]];
   const max = Math.max(...posts.map(p => p.views));
@@ -69,9 +69,9 @@ function Snapshot({goal, onGoal, ideas, drafts, onIdea, onDraft, onLibrary}) {
       <section className="glass card plan">
         <header><h2>创作计划 <em>Plan</em></h2></header>
         <div className="plan-body">
-          <button className="ring" onClick={onGoal} aria-label={`修改目标，本月 ${monthPosts.length} 篇，目标 ${goal} 篇`}>
-            <svg viewBox="0 0 180 180"><defs><linearGradient id="ring-g" x1="0" x2="1"><stop offset="0" stopColor={T.ring[0]}/><stop offset="1" stopColor={T.ring[1]}/></linearGradient></defs><circle cx="90" cy="90" r="72" className="track"/><circle cx="90" cy="90" r="72" className="value" strokeDasharray={`${Math.min(monthPosts.length / goal, 1) * 452.39} 452.39`}/></svg>
-            <span><strong>{monthPosts.length}</strong>/{goal}<small>本月目标 Goal</small></span>
+          <button className="ring" onClick={onGoal} aria-label={`修改目标，本月 ${monthCount} 篇，目标 ${goal} 篇`}>
+            <svg viewBox="0 0 180 180"><defs><linearGradient id="ring-g" x1="0" x2="1"><stop offset="0" stopColor={T.ring[0]}/><stop offset="1" stopColor={T.ring[1]}/></linearGradient></defs><circle cx="90" cy="90" r="72" className="track"/><circle cx="90" cy="90" r="72" className="value" strokeDasharray={`${Math.min(monthCount / goal, 1) * 452.39} 452.39`}/></svg>
+            <span><strong>{monthCount}</strong>/{goal}<small>本月目标 Goal</small></span>
           </button>
           <div className="plan-ideas"><h3>下一篇写什么 <em>Up next</em></h3>{ideas.slice(0, 3).map((idea, i) => <button key={idea.id} onClick={() => onIdea(idea)}><b>{i + 1}</b><span>{idea.title}</span></button>)}</div>
         </div>
@@ -151,6 +151,8 @@ function App() {
   }, [live]);
 
   const graph = useMemo(() => buildGraph({ideas, drafts: slowDrafts}), [ideas, slowDrafts, dataRev]);
+  // 「本月已发布」随数据仓变化现算：发布新作品 / 外部改动刷新后，环形进度与设置面板立即反映实际数量
+  const monthPosts = useMemo(() => monthPostsOf(getData().posts), [dataRev]);
   const layout = useMemo(() => forceLayout(graph), [graph]);
   const draftsRef = useRef(drafts);
   useEffect(() => { draftsRef.current = drafts; }, [drafts]);
@@ -339,7 +341,7 @@ function App() {
     <main>
       {page === 'home' && <>
         <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced}/>
-        <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }}/>
+        <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} monthCount={monthPosts.length}/>
       </>}
       {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule}/>}
       {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost}/>}
