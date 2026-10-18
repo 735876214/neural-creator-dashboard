@@ -80,9 +80,10 @@ export const RULES = [
 // 注：00-AI热点 由 RULES 之上的显式判断处理不了（新闻目录名不含上述词时），
 // 所以这里加一条——但顺序在 methods 之后，普通笔记优先。
 export const RULES_NEWS = ['news', /(AI热点|ai[ _-]?radar|ai[ _-]?news)/i];
-// Logseq 导出兜底（obsidian-independence P2）：pages/ 与 journals/ 下的 md 全部按方法笔记进 notes。
-// 放在 news 之后（最末兜底），避免抢走前面规则的命中。
-export const RULES_LOGSEQ = ['methods', /(^logseq$|journals?$|^pages$)/i];
+// Logseq 导出兜底（obsidian-independence P2）：只认「logseq」目录名或 .logseq 隐藏目录——
+// 通用的 pages/journals 太宽（任何项目都可能有同名目录），会静默吞掉用户的普通笔记；
+// Logseq 库走 import-notes --logseq（显式 --methods pages --methods journals），不依赖这条规则。
+export const RULES_LOGSEQ = ['methods', /(^|\.)(logseq)$/i];
 // Notion 导出的页面文件夹名带 32 位哈希后缀（如「My Page 1234abcd…」），匹配前剥掉。
 const NOTION_HASH = /\s+[0-9a-f]{32}$/i;
 export const norm = p => p.split(/[\\/]/).filter(Boolean).join('/');
@@ -91,7 +92,8 @@ export const norm = p => p.split(/[\\/]/).filter(Boolean).join('/');
 export function classify(rel, dirs, allAsNotes = false) {
   const d = dirs || {};
   // Notion 导出适配：剥掉目录名里的 32 位哈希后缀再匹配（文件名里的哈希不影响分类——标题取 basename）
-  const names = rel.split(sep).slice(0, -1).map(n => n.replace(NOTION_HASH, ''));
+  // 分隔符同时接受 / 与 \（Windows 的 sep 是 \，但 vault 内部路径统一 /）
+  const names = rel.split(/[\\/]/).slice(0, -1).map(n => n.replace(NOTION_HASH, ''));
   for (const kind of ['works', 'drafts', 'ideas', 'methods']) for (const f of d[kind] || []) {
     const prefix = norm(f);
     if (norm(rel).startsWith(prefix + '/')) return {kind, root: prefix.split('/').length};
