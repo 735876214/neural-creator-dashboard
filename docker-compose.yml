@@ -1,21 +1,16 @@
 # 部署版：note-api 单容器（前端构建进镜像、由 note-api 自托管）。
 # 本机开发用 deploy/docker-compose.dev.yml。
 #
-# 一键部署：整个仓库放到 NAS（git clone 或上传），在仓库根目录：
-#   docker compose up -d --build
+# 一键部署：NAS 上只需要 docker-compose.yml（+.env），不需要源码：
+#   docker compose up -d
 #   打开 http://<NAS-IP>:8088
 #
-# 不需要本机装 Node、不需要手动 npm run build —— 前端在镜像构建阶段自己产出。
+# 镜像由 GitHub Actions 在 push 到 main 时自动构建并发布到 GHCR：
+#   ghcr.io/735876214/cms-single:latest
+# 更新看板 = 在 NAS 上重新拉取镜像（图形界面点一次，或 docker compose pull && up -d）。
 #
-#   neural-creator-dashboard/
-#   ├── docker-compose.yml      ← 本文件
-#   ├── .env                    ← 可选，从 deploy/.env.example 复制
-#   ├── Dockerfile              ← 多阶段：构建前端 + note-api
-#   ├── server/ src/ public/    ← 构建输入，必须在
-#   └── notes-vault/            ← 笔记库（不存在时首次启动自动创建标准子目录）
-#
-# compose / 笔记库放在别处时，在 .env 里覆盖（绝对或相对本文件）：
-#   REPO_ROOT=...   VAULT_DIR=...
+# compose / 笔记库放在别处时，在 .env 里覆盖：
+#   VAULT_DIR=...
 #
 # 登录：用户默认 admin。.env 里设置了 DASHBOARD_PASSWORD 就用它；
 # 没设置时首次启动自动生成随机密码，用 `docker compose logs note-api` 查看
@@ -28,13 +23,9 @@
 # 没有 .env 也能启动（AI / 热点关闭），不会再因为缺少 env 文件而直接失败。
 services:
   note-api:
-    build:
-      # REPO_ROOT：仓库根目录（含 server/ src/ 与 Dockerfile）。
-      # 默认 = compose 文件所在目录；compose 放别处时在 .env 里设 REPO_ROOT=<仓库路径>。
-      # dockerfile 显式指向仓库根的 Dockerfile；部分 NAS 图形界面会忽略该字段、
-      # 直接在上下文根找名为 Dockerfile 的文件 —— 文件就在那里，两种行为都能工作。
-      context: ${REPO_ROOT:-.}
-      dockerfile: Dockerfile
+    # GitHub Actions 构建并发布的多阶段镜像（含前端产物 + note-api）。
+    # 仓库为 public，GHCR 包默认继承可见性，NAS 拉取无需登录。
+    image: ghcr.io/735876214/cms-single:latest
     container_name: neural-note-api
     restart: unless-stopped
     environment:

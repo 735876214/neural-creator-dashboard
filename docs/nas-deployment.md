@@ -56,19 +56,21 @@ tags: [笔记系统, 新手教程]
 
 > 没有作品笔记也完全可以——作品库会是空的，其余照常。
 
-## 2. 上传仓库到 NAS（不用本机构建）
+## 2. 准备 compose 文件（NAS 上不需要源码）
 
-前端在镜像构建阶段自己产出（Dockerfile 多阶段：容器里 `npm install` + `vite build`），
-本机不需要装 Node，也不需要手动 `npm run build`。把整个仓库传到 NAS
-（git clone 或上传整个文件夹，比如放在 `docker/neural-dashboard/`）——
-至少要含 `docker-compose.yml`、`Dockerfile`、`server/`、`src/`、`public/`、`package.json`。
+镜像由 GitHub Actions 自动构建并发布到 GHCR（`ghcr.io/735876214/cms-single:latest`，
+仓库为 public 时拉取无需登录）。NAS 上只需要 `docker-compose.yml`（如放在 `docker/neural/`），
+不需要源码、不需要本机构建。
+
+更新看板：重新拉取镜像即可——图形界面点一次构建/拉取，
+或 `docker compose pull && docker compose up -d`。
 
 ## 3. 起 Docker Compose
 
 ```bash
-cd docker/neural-dashboard        # compose 文件所在目录（仓库根）
+cd docker/neural                  # compose 文件所在目录
 cp deploy/.env.example .env       # 可选：填 AI_API_KEY、DASHBOARD_PASSWORD 等
-docker compose up -d --build
+docker compose up -d
 ```
 
 登录密码由 note-api 首次启动自举生成，写在容器卷的 `auth.json` 里（重启沿用，不会换密码）；**不需要**宿主机安装 `htpasswd`。两种用法：
@@ -82,9 +84,9 @@ docker compose logs note-api
 
 登录状态保存在 HttpOnly 会话 Cookie 里，默认 30 天（`SESSION_DAYS` 可改）。未登录访问任何页面都会先跳到 `login.html`，登录成功后回到看板；退出登录可调用 `POST /api/logout`。
 
-> 极空间的 Container Manager 也可以图形化导入这个 compose 文件（项目指向仓库根目录）。
+> 极空间的 Container Manager 也可以图形化导入这个 compose 文件。
 >
-> `.env` 是可选的：复制 `deploy/.env.example` 到**仓库根目录**（与 `docker-compose.yml` 同目录）为 `.env`；不填也能启动，只是 AI / 热点关闭。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
+> `.env` 是可选的：复制 `deploy/.env.example` 到 compose 文件同目录为 `.env`；不填也能启动，只是 AI / 热点关闭。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
 
 浏览器打开 `http://<NAS-IP>:8088`，会先看到登录页；输入用户名和密码后进入看板，星核亮起来就是成功了。8088 被占用时在 `.env` 里改 `WEB_PORT`。
 
