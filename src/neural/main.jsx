@@ -7,7 +7,7 @@ import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, MODULES} from './graph';
 import {Home} from './Home';
 import {Cosmos} from './Cosmos';
-import {Library, Drafts, Ideas, Knowledge} from './pages';
+import {Library, Drafts, Ideas, Knowledge, Methods} from './pages';
 import {PublishDialog} from './PublishDialog';
 import {NewNoteModal, PublishModal} from './NoteModal';
 import {DiffModal} from './DiffModal';
@@ -49,7 +49,7 @@ function Modal({title, en, onClose, children, wide}) {
   </div>;
 }
 
-const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas'], ['knowledge', '知识库', 'Knowledge']];
+const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas'], ['knowledge', '知识库', 'Knowledge'], ['methods', '方法库', 'Methods']];
 const initialPage = () => { const h = location.hash.slice(1); return navs.some(n => n[0] === h) ? h : 'home'; };
 
 function Snapshot({goal, onGoal, ideas, drafts, onIdea, onDraft, onLibrary}) {
@@ -323,7 +323,6 @@ function App() {
       <nav aria-label="主导航">{navs.map(([id, zh, en]) => <button key={id} className={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}>{zh}<em>{en}</em></button>)}</nav>
       <div className="top-actions">
         <button className="pill primary" onClick={() => newDraft()} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="plus" size={14}/>新建草稿 <em>New</em></button>
-        <button className="pill ghost" onClick={() => setModal('new-note')} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="methods" size={14}/>新建笔记 <em>Note</em></button>
         <button className="avatar set-btn" onClick={() => { setSettingsLive(null); setModal('settings'); }} aria-label="打开设置"><Icon name="gear" size={17}/></button>
         <button className="avatar" onClick={() => setModal('about')} aria-label={`${snapshot.account}，查看账号与数据来源`}><img src={asset(CONFIG.avatar)} alt=""/></button>
       </div>
@@ -344,6 +343,7 @@ function App() {
       {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule}/>}
       {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onModule={goModule} readOnly={!live} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
+      {page === 'methods' && <Methods graph={graph} readOnly={!live} onGo={openInGraph} onAction={onAction} onModule={goModule} showToast={setToast} onNew={() => setModal('new-note')}/>}
       {page === 'knowledge' && <Knowledge graph={graph} readOnly={!live} onGraph={openInGraph} onModule={goModule} onAction={onAction} onNewDraft={newDraft} onEditIdea={editIdea} ideas={ideas} drafts={drafts} onDeleteDraft={deleteDraft} showToast={setToast}/>}
     </main>
 

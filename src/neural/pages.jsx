@@ -7,6 +7,7 @@ import {snapshot} from '../data';
 import {posts} from './works';
 import {T} from './theme';
 import {useSaveState, draftKey, apiUrl, refreshData} from './persist';
+import {getFiles} from '../data/store';
 import {SaveBadge} from './SaveStatus';
 import {Assistant} from './Assistant';
 import {PublishModal, insertImageAtCursor} from './NoteModal';
@@ -362,5 +363,67 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
       </section>
     </div>}
     <Assistant graph={graph} readOnly={readOnly} showToast={showToast} defaultCategory="制度" goNote={onGraph}/>
+  </div>;
+}
+
+
+// —— 方法库 Methods（kind: note 的内页；新建笔记入口在这里）——
+export function Methods({graph, readOnly, onGo, onAction, onModule, showToast, onNew}) {
+  const [q, setQ] = useState('');
+  const [sel, setSel] = useState(null);
+  const items = useMemo(() => graph.nodes.filter(n => n.kind === 'note')
+    .filter(n => {
+      if (!q.trim()) return true;
+      const k = q.toLowerCase();
+      return (n.title || '').toLowerCase().includes(k) || (n.body || '').toLowerCase().includes(k) || (n.tags || []).some(tg => tg.toLowerCase().includes(k));
+    }), [graph, q]);
+  const node = sel ? graph.index.get(sel) : items[0] || null;
+  const mod = MODULES.find(m => m.id === 'methods');
+  const remove = async n => {
+    if (!window.confirm(`删除「${n.short || n.title}」？NAS 上的 .md 文件会先备份到 vault/.trash/ 再删除。`)) return;
+    try {
+      const rel = getFiles()?.[n.id] || n.path;
+      const res = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(rel)), {method: 'DELETE'});
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      setSel(null);
+      showToast('已删除，原文件备份在 vault/.trash/');
+      await refreshData();
+    } catch (err) { showToast('删除失败：' + err.message); }
+  };
+  return <div className="page page-methods">
+    <PageHead zh="方法库" en="Methods" sub="把做法沉淀成方法。" subEn="Every practice becomes a method.">
+      <button className="pill primary" onClick={onNew} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="plus" size={15}/>新建笔记 <em>New note</em></button>
+    </PageHead>
+    <ConstellationBand page="methods" onGo={onModule}/>
+    <div className="library-layout">
+      <section className="works-col">
+        <div className="toolbar-row">
+          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索方法笔记… Search notes" aria-label="搜索方法笔记"/></label>
+          <span className="quiet">{items.length} 条 · {mod?.title} <em>{mod?.en}</em></span>
+        </div>
+        <div className="kgrid">
+          {items.map((n, i) => {
+            const on = node?.id === n.id;
+            return <article className={`kcard glass ${on ? 'active' : ''}`} key={n.id} style={{animationDelay: i * 60 + 'ms', '--kc': KINDS.note.color, cursor: 'pointer'}}
+              onClick={() => setSel(n.id)} role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') setSel(n.id); }}>
+              <header>
+                <h3>{n.short || n.title}</h3>
+                <p className="kc-src"><Icon name="methods" size={12}/>{n.path}{n.tags?.length ? ' · ' + n.tags.length + ' 话题' : ''}</p>
+              </header>
+              <p className="kc-body">{(n.body || '').slice(0, 140)}{(n.body || '').length > 140 ? '…' : ''}</p>
+              {n.tags?.length > 0 && <div className="chip-row">{n.tags.slice(0, 5).map(tg => <span key={tg} className="chip static" style={{'--kc': KINDS.tag.color}}>#{tg}</span>)}</div>}
+              <footer onClick={e => e.stopPropagation()}>
+                <button className="pill ghost" onClick={() => onAction({type: 'read', id: n.id})}><Icon name="file" size={13}/>阅读 <em>Read</em></button>
+                <button className="pill ghost danger" disabled={readOnly} onClick={() => remove(n)} title="删除"><Icon name="trash" size={13}/></button>
+              </footer>
+            </article>;
+          })}
+          {!items.length && <div className="empty kempty"><Icon name="methods" size={30}/><p>{q ? '没有匹配的方法笔记' : '方法库还是空的。点右上角「新建笔记」开始。'}<em>{q ? 'No match' : 'Nothing here yet'}</em></p></div>}
+        </div>
+      </section>
+      {node && <aside className="library-analysis" key={node.id}>
+        <Analysis graph={graph} node={node} module={mod} onGo={onGo} onAction={onAction} onClose={() => setSel(null)}/>
+      </aside>}
+    </div>
   </div>;
 }

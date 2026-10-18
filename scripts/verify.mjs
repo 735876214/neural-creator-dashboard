@@ -148,8 +148,8 @@ if (!/paintConstellation/.test(bandSrc)) fail('内页星座轨（ConstellationBa
 else ok('内页星座轨复用同一套星座画法');
 for (const f of ['src/neural/pages.jsx']) {
   const src = readFileSync(join(ROOT, f), 'utf8');
-  if ((src.match(/<ConstellationBand/g) || []).length !== 4) fail(`${f} 的四个内页都应带星座轨`);
-  else ok('作品库 / 创作台 / 选题池 / 知识库 四个内页都带星座轨');
+  if ((src.match(/<ConstellationBand/g) || []).length !== 5) fail(`${f} 的五个内页都应带星座轨`);
+  else ok('作品库 / 创作台 / 选题池 / 知识库 / 方法库 五个内页都带星座轨');
 }
 if (!/from '\.\/constellations'/.test(home) || !/figData/.test(home) || !/drawCluster\(canvasRefs/.test(home)) fail('Home.jsx 没有用星座层渲染星团');
 else ok('主视图星团层 = 七星座（烘焙 + 主星闪烁）');

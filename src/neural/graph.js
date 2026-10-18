@@ -52,7 +52,7 @@ const FOLDERS = [
 export const MODULES = [
   {id: 'works', title: '作品库', en: 'Works', kind: 'post', folder: 'f:works', angle: 180, icon: 'works', page: 'library'},
   {id: 'concepts', title: '概念网络', en: 'Concepts', kind: 'concept', angle: -90, icon: 'concept'},
-  {id: 'methods', title: '方法库', en: 'Methods', kind: 'note', folder: 'f:methods', angle: 0, icon: 'methods'},
+  {id: 'methods', title: '方法库', en: 'Methods', kind: 'note', folder: 'f:methods', angle: 0, icon: 'methods', page: 'methods'},
   {id: 'ideas', title: '选题池', en: 'Ideas', kind: 'idea', folder: 'f:ideas', angle: 35, icon: 'idea', page: 'ideas'},
   {id: 'drafts', title: '创作台', en: 'Drafts', kind: 'draft', folder: 'f:drafts', angle: 145, icon: 'draft', page: 'drafts'},
   {id: 'news', title: 'AI 热点', en: 'AI Radar', kind: 'news', folder: 'f:00-AI热点', angle: -35, icon: 'news'},

@@ -29,7 +29,7 @@
 - `src/data/index.js`：数据入口。本机存在 `src/data/my-data.local.js` 时优先用它，否则用 `./sample.js`；改数据不用动这个文件。
 - `src/data/sample.js`：虚构示例数据，也是数据字段的权威说明。
 - `src/neural/graph.js`：图谱推导（目录归属、双链、选题来源、话题、概念提及、双向共振）、布局和本地检索。
-- `src/neural/Home.jsx`：星核、七簇星团与三层交互；`Cosmos.jsx` 星穹背景；`StarCore.jsx` / `v41.js` 星核渲染；`constellations.js` 七个星座的真实星表骨架；`ConstellationBand.jsx` 内页星座轨；`NetworkCanvas.jsx` 背景星图；`Analysis.jsx` 分析栏；`pages.jsx` 四个内页；`persist.js` NAS 持久化（防抖、mtime 乐观锁、内存 outbox、冲突状态）；`SaveStatus.jsx` 保存状态与同步横幅。
+- `src/neural/Home.jsx`：星核、七簇星团与三层交互；`Cosmos.jsx` 星穹背景；`StarCore.jsx` / `v41.js` 星核渲染；`constellations.js` 七个星座的真实星表骨架；`ConstellationBand.jsx` 内页星座轨；`NetworkCanvas.jsx` 背景星图；`Analysis.jsx` 分析栏；`pages.jsx` 五个内页；`persist.js` NAS 持久化（防抖、mtime 乐观锁、内存 outbox、冲突状态）；`SaveStatus.jsx` 保存状态与同步横幅。
 - `scripts/import-notes.mjs`：笔记导入；`scripts/verify.mjs`：校验；`server/`：note-api 服务（vault.mjs 解析、frontmatter.mjs 最小侵入改写、db.mjs SQLite 索引、ai.mjs AI 编排、index.mjs HTTP 服务）。
 - `skills/neural-creator-dashboard/SKILL.md`：通用 Agent Skill，可用 `npx skills add` 安装到各家智能体。
 - `examples/vault/`：虚构的示例笔记库，演示导入格式。
