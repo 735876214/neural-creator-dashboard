@@ -80,12 +80,18 @@ export const RULES = [
 // 注：00-AI热点 由 RULES 之上的显式判断处理不了（新闻目录名不含上述词时），
 // 所以这里加一条——但顺序在 methods 之后，普通笔记优先。
 export const RULES_NEWS = ['news', /(AI热点|ai[ _-]?radar|ai[ _-]?news)/i];
+// Logseq 导出兜底（obsidian-independence P2）：pages/ 与 journals/ 下的 md 全部按方法笔记进 notes。
+// 放在 news 之后（最末兜底），避免抢走前面规则的命中。
+export const RULES_LOGSEQ = ['methods', /(^logseq$|journals?$|^pages$)/i];
+// Notion 导出的页面文件夹名带 32 位哈希后缀（如「My Page 1234abcd…」），匹配前剥掉。
+const NOTION_HASH = /\s+[0-9a-f]{32}$/i;
 export const norm = p => p.split(/[\\/]/).filter(Boolean).join('/');
 
 // dirs：显式指定的文件夹（{works: [], methods: [], ideas: [], drafts: []}），优先于按文件夹名自动识别。
 export function classify(rel, dirs, allAsNotes = false) {
   const d = dirs || {};
-  const names = rel.split(sep).slice(0, -1);
+  // Notion 导出适配：剥掉目录名里的 32 位哈希后缀再匹配（文件名里的哈希不影响分类——标题取 basename）
+  const names = rel.split(sep).slice(0, -1).map(n => n.replace(NOTION_HASH, ''));
   for (const kind of ['works', 'drafts', 'ideas', 'methods']) for (const f of d[kind] || []) {
     const prefix = norm(f);
     if (norm(rel).startsWith(prefix + '/')) return {kind, root: prefix.split('/').length};
@@ -97,6 +103,8 @@ export function classify(rel, dirs, allAsNotes = false) {
   }
   // AI 热点目录：普通四类都没匹配到时，00-AI热点 下的文件按 news 处理
   for (let i = 0; i < names.length; i++) if (RULES_NEWS[1].test(names[i])) return {kind: 'news', root: i + 1};
+  // Logseq 导出兜底：pages / journals / logseq 目录按方法笔记处理
+  for (let i = 0; i < names.length; i++) if (RULES_LOGSEQ[1].test(names[i])) return {kind: 'methods', root: i + 1};
   return allAsNotes ? {kind: 'methods', root: 0} : null;
 }
 

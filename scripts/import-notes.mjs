@@ -36,6 +36,7 @@ for (let i = 0; i < args.length; i++) {
   if (a === '--vault') opt.vault = next();
   else if (['--works', '--methods', '--ideas', '--drafts'].includes(a)) opt[a.slice(2)].push(next());
   else if (a === '--all-as-notes') opt.allAsNotes = true;
+  else if (a === '--logseq') { opt.methods.push('pages', 'journals'); opt.isLogseq = true; }
   else if (a === '--account') opt.account = next();
   else if (a === '--followers') opt.followers = Number(next());
   else if (a === '--max-works') opt.maxWorks = Number(next());
@@ -57,6 +58,7 @@ const {works, notes, ideas, drafts, concepts, snapshot, counts} = readVault({
   maxWorks: opt.maxWorks, maxNotes: opt.maxNotes
 });
 
+if (opt.isLogseq) console.log('Logseq 模式：pages/ 与 journals/ 下的笔记按方法笔记导入（--methods 可再指定其他目录）。');
 if (!works.length) {
   console.warn(`提示：没有找到作品笔记，作品库会是空的。作品笔记请放在名字包含「作品 / works」的文件夹里，或用 --works <文件夹> 指定。\n识别到：方法笔记 ${counts.notes}、选题 ${counts.ideas}、草稿 ${counts.drafts}。`);
 }

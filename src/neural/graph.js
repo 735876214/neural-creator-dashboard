@@ -157,18 +157,21 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
   }
   for (const n of [...nodes.values()]) {
     if (n.kind !== 'note' && n.kind !== 'draft') continue;
-    for (const m of (n.body || '').matchAll(/\[\[([^\]]+)\]\]/g)) {
-      const [target, alias] = m[1].split('|');
-      if (target.includes('{{')) continue;
+    const wikiLink = (target, alias) => {
+      if (target.includes('{{')) return;
       const name = target.split('#')[0].split('/').pop().trim();
-      if (!name) continue;
+      if (!name) return;
       let id = byName.get(name.toLowerCase());
       if (!id) {
         id = 'ghost:' + name.toLowerCase();
         add({id, kind: 'ghost', title: alias?.trim() || name, short: alias?.trim() || cleanTitle(name), path: target.trim() + '.md', text: ''});
       }
       link(n.id, id, 'wiki');
-    }
+    };
+    // Obsidian 双链 [[目标|别名]]
+    for (const m of (n.body || '').matchAll(/\[\[([^\]]+)\]\]/g)) wikiLink(...m[1].split('|'));
+    // 中性链接 [标题](相对路径.md)：标准 Markdown 语法，与 [[双链]] 等效（obsidian-independence P2）
+    for (const m of (n.body || '').matchAll(/\[([^\]]+)\]\(([^)\s]+\.md)\)/g)) wikiLink(m[2], m[1]);
   }
 
   // 话题标签：frontmatter 的 tags 与正文里的 #话题 都自动成为节点（大小写合并）。

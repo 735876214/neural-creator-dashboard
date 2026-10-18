@@ -1,7 +1,7 @@
 import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, snapshot, settings, isLive} from '../data';
-import {subscribe as subscribeData, getFiles} from '../data/store.js';
+import {subscribe as subscribeData, getFiles, getData} from '../data/store.js';
 import {posts, monthPosts} from './works';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, MODULES} from './graph';
