@@ -95,6 +95,7 @@ function App() {
   const [goalInput, setGoalInput] = useState(String(goal));
   const [toast, setToast] = useState('');
   const [settingsLive, setSettingsLive] = useState(null); // /api/settings 的脱敏视图（打开设置时现拉）
+  const [settingsRev, setSettingsRev] = useState(0); // AI 配置保存后手动刷新（重新拉 settings + ai info）
   const [aiInfo, setAiInfo] = useState(null);
   const [dataRev, setDataRev] = useState(0);
   const reduced = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
@@ -198,7 +199,7 @@ function App() {
     fetch(persist.apiUrl('/api/settings')).then(r => r.json()).then(j => { if (on) setSettingsLive(j); }).catch(() => {});
     fetch(persist.apiUrl('/api/ai/info')).then(r => r.json()).then(j => { if (on) setAiInfo(j); }).catch(() => {});
     return () => { on = false; };
-  }, [modal]);
+  }, [modal, settingsRev]);
 
   const close = useCallback(() => setModal(null), []);
   const signOut = useCallback(async () => {
@@ -405,6 +406,7 @@ function App() {
         monthCount={monthPosts.length}
         readOnly={!live}
         onClose={close}
+        onRefresh={() => setSettingsRev(v => v + 1)}
       />
       {live && <div className="form-actions signout-row">
         <button className="pill ghost" onClick={signOut}>退出登录 <em>Sign out</em></button>

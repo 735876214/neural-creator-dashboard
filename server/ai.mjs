@@ -21,32 +21,42 @@
 // 护栏：超时、限次重试、并发闸、JSON 输出解析兜底、思考型模型（content 空、只有
 // reasoning_content）的文本兜底。key 只在服务端，绝不进前端。
 const PROTOCOL = (process.env.AI_PROTOCOL || 'openai').toLowerCase();
-const CHAT_BASE = (process.env.AI_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
-const CHAT_KEY = process.env.AI_API_KEY || '';
-const CHAT_MODEL = process.env.AI_MODEL || 'deepseek-chat';
+// 运行时可变：设置面板保存的 AI_BASE_URL / AI_API_KEY / aiModel 会覆盖这里的 env 缺省（setAiRuntime）。
+// 接口地址与 key 存 NAS 数据目录，key 绝不回显、不进笔记库；模型选择存 vault settings。
+let CHAT_BASE = (process.env.AI_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+let CHAT_KEY = process.env.AI_API_KEY || '';
+let CHAT_MODEL = process.env.AI_MODEL || 'deepseek-chat';
+
+// 设置面板保存后即时生效：覆盖 baseUrl / key / 全局默认模型；传 '' 恢复 env 缺省，null 忽略。
+let modelCacheRef = null; // 由下方 modelCache 声明回填
+export function setAiRuntime({baseUrl, apiKey, model} = {}) {
+  if (baseUrl != null) CHAT_BASE = String(baseUrl).trim() ? String(baseUrl).trim().replace(/\/+$/, '') : (process.env.AI_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+  if (apiKey != null) CHAT_KEY = String(apiKey);
+  if (model != null) CHAT_MODEL = String(model).trim() || (process.env.AI_MODEL || 'deepseek-chat');
+  if (modelCacheRef) modelCacheRef.at = 0; // base/key/model 变更后强制重拉模型列表
+}
 // 各任务的默认模型：缺省回落 AI_MODEL
-export const TASK_MODELS = {
-  ask: process.env.AI_MODEL_ASK || CHAT_MODEL,
-  analyze: process.env.AI_MODEL_ANALYZE || CHAT_MODEL,
-  ideas: process.env.AI_MODEL_IDEAS || CHAT_MODEL,
-  news: process.env.AI_MODEL_NEWS || CHAT_MODEL,
-  web: process.env.AI_MODEL_WEB || CHAT_MODEL
-};
-const EMBED_BASE = (process.env.EMBED_BASE_URL || CHAT_BASE).replace(/\/+$/, '');
-const EMBED_KEY = process.env.EMBED_API_KEY || CHAT_KEY;
+const TASK_ENV = {ask: 'AI_MODEL_ASK', analyze: 'AI_MODEL_ANALYZE', ideas: 'AI_MODEL_IDEAS', news: 'AI_MODEL_NEWS', web: 'AI_MODEL_WEB'};
+// 任务级模型：env 显式设置优先；未设则跟随运行时全局模型（设置面板可改）
+export const taskModel = task => process.env[TASK_ENV[task]] || CHAT_MODEL;
+// 兼容旧引用（/api/ai/models 的 taskModels 字段）
+export const TASK_MODELS = new Proxy({}, {get: (_, task) => taskModel(task), has: (_, task) => task in TASK_ENV, ownKeys: () => Object.keys(TASK_ENV)});
+const EMBED_BASE_ENV = process.env.EMBED_BASE_URL || '';
+const EMBED_KEY_ENV = process.env.EMBED_API_KEY || '';
 const EMBED_MODEL = process.env.EMBED_MODEL || '';
 const TIMEOUT = Number(process.env.AI_TIMEOUT || 60_000);
 
 export const aiEnabled = () => PROTOCOL === 'anthropic' ? !!CHAT_BASE : !!CHAT_KEY;
-export const embedEnabled = () => !!EMBED_KEY && !!EMBED_MODEL;
+export const embedEnabled = () => !!(EMBED_KEY_ENV || CHAT_KEY) && !!EMBED_MODEL;
 export const aiInfo = () => ({
   enabled: aiEnabled(), model: CHAT_MODEL, protocol: PROTOCOL,
   taskModels: TASK_MODELS,
-  embed: embedEnabled() ? {model: EMBED_MODEL, sameBase: EMBED_BASE === CHAT_BASE} : {enabled: false}
+  embed: embedEnabled() ? {model: EMBED_MODEL, sameBase: (EMBED_BASE_ENV || CHAT_BASE) === CHAT_BASE} : {enabled: false}
 });
 
 // —— 模型列表（前端下拉用）：/v1/models，缓存 10 分钟 ——
-let modelCache = {at: 0, list: []};
+const modelCache = {at: 0, list: []};
+modelCacheRef = modelCache;
 export async function listModels() {
   if (Date.now() - modelCache.at < 10 * 60_000) return modelCache.list;
   try {
@@ -167,6 +177,7 @@ export async function embed(texts) {
     for (let i = 0; i < list.length; i += 16) {
       await gate();
       try {
+        const EMBED_BASE = EMBED_BASE_ENV || CHAT_BASE, EMBED_KEY = EMBED_KEY_ENV || CHAT_KEY;
         const res = await fetch(`${EMBED_BASE}/accounts/${acct}/ai/run/${EMBED_MODEL}`, {
           method: 'POST',
           headers: {'content-type': 'application/json', authorization: `Bearer ${EMBED_KEY}`},
@@ -185,6 +196,7 @@ export async function embed(texts) {
   const out = [];
   // 分批：多数接口单请求上限 16-64 条
   for (let i = 0; i < list.length; i += 16) {
+    const EMBED_BASE = EMBED_BASE_ENV || CHAT_BASE, EMBED_KEY = EMBED_KEY_ENV || CHAT_KEY;
     const data = await call(EMBED_BASE, EMBED_KEY, '/embeddings', {model: EMBED_MODEL, input: list.slice(i, i + 16)});
     const rows = data.data?.map(d => d.embedding) || [];
     if (rows.length !== Math.min(16, list.length - i)) throw new Error('embedding 返回条数不对');

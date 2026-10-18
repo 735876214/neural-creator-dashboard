@@ -263,6 +263,30 @@ try {
   assert.equal(upNoName.status, 400);
   ok('上传入库：md / docx / 非法类型 / 缺文件名');
 
+  // 6c1. 设置面板 AI 运行时配置：aiBaseUrl 走 settings.json；aiApiKey 走 DATA_DIR 秘密文件（不回显）
+  const st1 = await put('/api/settings', {aiBaseUrl: 'https://gw.example.com/v1'});
+  assert.equal(st1.status, 200);
+  assert.equal(st1.body.aiBaseUrl, 'https://gw.example.com/v1');
+  assert.equal(st1.body.aiKeyConfigured, false);
+  const st2 = await put('/api/settings', {aiApiKey: 'sk-e2e-secret'});
+  assert.equal(st2.status, 200);
+  assert.equal(st2.body.aiKeyConfigured, true, '保存 key 后应报已配置');
+  assert.ok(!('aiApiKey' in st2.body), 'key 绝不回显');
+  const stGet = await json('/api/settings');
+  assert.equal(stGet.body.aiKeyConfigured, true);
+  assert.ok(!('aiApiKey' in stGet.body), 'GET 也不回显 key');
+  assert.ok(existsSync(join(tmp, 'data', 'ai-secrets.json')), 'key 应存在 DATA_DIR 秘密文件');
+  const settingsJson = readFileSync(join(vault, '.dashboard', 'settings.json'), 'utf8');
+  assert.ok(!settingsJson.includes('sk-e2e-secret'), 'key 绝不能进 vault settings.json（会被 git 提交）');
+  assert.match(settingsJson, /gw\.example\.com/, 'baseUrl 应在 settings.json');
+  // 清空 key（空字符串 = 清除）
+  const st3 = await put('/api/settings', {aiApiKey: ''});
+  assert.equal(st3.body.aiKeyConfigured, false, '空字符串应清除 key');
+  // 非法 base url
+  const stBad = await put('/api/settings', {aiBaseUrl: 'ftp://x'});
+  assert.equal(stBad.status, 400);
+  ok('设置面板 AI 运行时配置（baseUrl / key 分离存储 / 不回显 / 清除）');
+
   // 6c2. /api/version：vault 指纹（自动刷新轮询用）——稳定 → 写盘后变化
   const v1 = await json('/api/version');
   assert.equal(v1.status, 200);

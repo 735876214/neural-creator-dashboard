@@ -24,6 +24,7 @@ import {readVault, parse, ATTACHMENTS_DIR} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
 import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateIdeas, answer, embed, listModels, validModel, TASK_MODELS} from './ai.mjs';
+import {setAiRuntime} from './ai.mjs';
 import {fetchPage, htmlToText, htmlTitle, FetchError} from './webclip.mjs';
 import {parseUpload, ParseError} from './docparse.mjs';
 import {refreshNews, forceRefresh, startNewsCron, listNews, ideasFromNews} from './news.mjs';
@@ -308,8 +309,29 @@ function gitCommitMulti(rels, message) {
 
 // —— 看板设置（vault/.dashboard/settings.json）——
 // 只存少量不属于笔记的看板偏好：月目标、用户选的 AI 模型、发布平台凭据与同步时间。
-const SETTINGS_DEFAULTS = {version: 1, goal: 8, aiModel: null, platforms: {}, syncHour: null};
-const SETTINGS_KEYS = new Set(['goal', 'aiModel', 'platforms', 'syncHour']);
+const SETTINGS_DEFAULTS = {version: 1, goal: 8, aiModel: null, aiBaseUrl: null, platforms: {}, syncHour: null};
+const SETTINGS_KEYS = new Set(['goal', 'aiModel', 'aiBaseUrl', 'platforms', 'syncHour']);
+// AI key 存 DATA_DIR/ai-secrets.json（0o600）：settings.json 会 gitCommit 进 vault 并随 Syncthing 分发，key 不能放那里。
+const AI_SECRETS_FILE = join(DATA_DIR, 'ai-secrets.json');
+function loadAiSecret() {
+  try { return String(JSON.parse(readFileSync(AI_SECRETS_FILE, 'utf8')).aiApiKey || ''); } catch { return ''; }
+}
+function saveAiSecret(key) {
+  mkdirSync(DATA_DIR, {recursive: true});
+  const tmp = join(DATA_DIR, `.ai-secrets-${process.pid}-${Date.now()}.tmp`);
+  try {
+    writeFileSync(tmp, JSON.stringify({aiApiKey: key}, null, 2) + '\n', {mode: 0o600});
+    renameSync(tmp, AI_SECRETS_FILE);
+  } catch (e) {
+    try { rmSync(tmp, {force: true}); } catch {}
+    throw new Error(`写入 AI key 失败：${e.message}`);
+  }
+}
+// 启动时应用持久化的运行时配置（env 是初始值，settings 有值才覆盖）
+try {
+  const s0 = readSettings();
+  setAiRuntime({baseUrl: s0.aiBaseUrl || null, apiKey: loadAiSecret() || null, model: s0.aiModel || null});
+} catch {}
 
 // settings.json 里的平台凭据形状：{公众号: {appid, secret, ...}}。
 // 校验白名单：只认公众号，secret 必须是非空字符串；写盘前原样存，读出来给 platforms.mjs 用。
@@ -335,9 +357,10 @@ function readSettings() {
     const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
     const goal = Number.isInteger(raw?.goal) && raw.goal >= 1 && raw.goal <= 100 ? raw.goal : SETTINGS_DEFAULTS.goal;
     const aiModel = typeof raw?.aiModel === 'string' && raw.aiModel ? raw.aiModel : null;
+    const aiBaseUrl = typeof raw?.aiBaseUrl === 'string' ? raw.aiBaseUrl : null;
     const platforms = cleanPlatforms(raw?.platforms);
     const syncHour = Number.isInteger(raw?.syncHour) && raw.syncHour >= 0 && raw.syncHour <= 23 ? raw.syncHour : null;
-    return {version: 1, goal, aiModel, platforms, syncHour, ...(raw?.updatedAt ? {updatedAt: String(raw.updatedAt)} : {})};
+    return {version: 1, goal, aiModel, aiBaseUrl, platforms, syncHour, ...(raw?.updatedAt ? {updatedAt: String(raw.updatedAt)} : {})};
   } catch {
     return {...SETTINGS_DEFAULTS};
   }
@@ -348,6 +371,7 @@ function publicSettings() {
   const s = readSettings();
   return {
     ...s,
+    aiKeyConfigured: !!loadAiSecret(),
     platforms: Object.fromEntries(Object.entries(s.platforms).map(([k, v]) => [k, {
       appid: v.appid, configured: true, secretMasked: '••••••'
     }]))
@@ -359,6 +383,7 @@ function writeSettings(patch) {
   for (const k of Object.keys(patch)) if (!SETTINGS_KEYS.has(k)) fail(400, `未知设置项：${k}`);
   if ('goal' in patch && !(Number.isInteger(patch.goal) && patch.goal >= 1 && patch.goal <= 100)) fail(400, '目标必须是 1–100 的整数');
   if ('aiModel' in patch && !(patch.aiModel === null || (typeof patch.aiModel === 'string' && patch.aiModel))) fail(400, 'AI 模型必须是字符串或 null');
+  if ('aiBaseUrl' in patch && !(patch.aiBaseUrl === null || (typeof patch.aiBaseUrl === 'string' && (/^https?:\/\//.test(patch.aiBaseUrl) || patch.aiBaseUrl === '')))) fail(400, 'AI 接口地址必须以 http(s):// 开头（留空回退环境变量）');
   if ('platforms' in patch) {
     // 前端看不到 secret（只有掩码），只改 AppID 时 secret 不重填：缺 secret 的条目沿用已存的。
     const cur = readSettings().platforms;
@@ -379,6 +404,8 @@ function writeSettings(patch) {
     throw new Error(`写入设置失败：${e.message}`);
   }
   gitCommit('.dashboard/settings.json', '更新看板设置');
+  // AI 运行时配置即时生效：key 走 DATA_DIR 秘密文件（不在 patch 里，见 /api/settings PUT 分流），其余从 next 取
+  setAiRuntime({baseUrl: next.aiBaseUrl || '', apiKey: null, model: next.aiModel || ''});
   return next;
 }
 
@@ -626,9 +653,22 @@ async function route(req, res, url) {
   if (p === '/api/settings' && req.method === 'GET') return json(res, 200, publicSettings());
 
   if (p === '/api/settings' && req.method === 'PUT') {
-    const next = writeSettings(await readBody(req));
+    const body = await readBody(req);
+    // AI key 单独分流：不进 settings.json（那会被 git 提交进 vault），存 DATA_DIR 秘密文件。
+    // '' = 清除恢复 env 缺省；缺字段 = 不改动。
+    let keyApplied = null;
+    if ('aiApiKey' in body) {
+      const k = typeof body.aiApiKey === 'string' ? body.aiApiKey.trim() : null;
+      if (k == null) fail(400, 'aiApiKey 必须是字符串（空字符串表示清除）');
+      saveAiSecret(k);
+      keyApplied = k;
+      delete body.aiApiKey;
+    }
+    const next = writeSettings(body);
+    // key 与 baseUrl/model 一起应用到运行时（writeSettings 已应用 url/model，这里补 key）
+    setAiRuntime({apiKey: keyApplied != null ? keyApplied : null, baseUrl: next.aiBaseUrl || '', model: next.aiModel || ''});
     // 返回脱敏视图，secret 不回传；与 GET /api/data 的 settings 形状一致。
-    return json(res, 200, {...next, platforms: Object.fromEntries(Object.entries(next.platforms).map(([k, v]) => [k, {appid: v.appid, configured: true, secretMasked: '••••••'}]))});
+    return json(res, 200, {...next, aiKeyConfigured: !!loadAiSecret(), platforms: Object.fromEntries(Object.entries(next.platforms).map(([k, v]) => [k, {appid: v.appid, configured: true, secretMasked: '••••••'}]))});
   }
 
   if (p === '/api/note' && req.method === 'GET') {
