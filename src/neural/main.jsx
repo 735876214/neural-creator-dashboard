@@ -194,23 +194,23 @@ function App() {
   useEffect(() => { history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page); window.scrollTo({top: 0}); }, [page]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2800); return () => clearTimeout(t); }, [toast]);
 
-  // 打开设置弹窗时现拉一份脱敏设置（公众号是否已配置、同步时间等）与 AI 服务状态
+  // 打开设置弹窗时现拉一份脱敏设置（公众号是否已配置、同步时间等）
   useEffect(() => {
     if (modal !== 'settings') return;
     let on = true;
     fetch(persist.apiUrl('/api/settings')).then(r => r.json()).then(j => { if (on) setSettingsLive(j); }).catch(() => {});
-    fetch(persist.apiUrl('/api/ai/info')).then(r => r.json()).then(j => { if (on) setAiInfo(j); }).catch(() => {});
     return () => { on = false; };
-  }, [modal, settingsRev, dataRev]); // dataRev：AI 配置经 setApiData 更新后，aiEnabled 状态即时下传各页
+  }, [modal, settingsRev]); // settingsRev：AI 配置保存后重拉
 
-  // AI 启用状态（Assistant / AiPanel 的单一事实源）：挂载即拉，配置保存（settingsRev）或
-  // store 任何变化（dataRev，含外部改动自动刷新 / refreshData）后重拉——aiEnabled 状态实时
+  // AI 启用状态（Assistant / AiPanel / 设置面板的单一事实源）：挂载即拉，保存 AI 配置后重拉。
+  // 不挂 dataRev——aiInfo 只在保存 AI 配置时才会变，跟随每次 vault 变化重拉是纯浪费，
+  // 还会在设置弹窗开着时连带刷掉正在编辑的表单。
   useEffect(() => {
     if (!live) return;
     let on = true;
     fetch(persist.apiUrl('/api/ai/info')).then(r => r.json()).then(j => { if (on) setAiInfo(j); }).catch(() => {});
     return () => { on = false; };
-  }, [live, settingsRev, dataRev]);
+  }, [live, settingsRev]);
 
   const close = useCallback(() => setModal(null), []);
   const signOut = useCallback(async () => {

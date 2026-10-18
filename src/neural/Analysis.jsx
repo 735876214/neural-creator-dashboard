@@ -86,12 +86,13 @@ function Insights({items}) {
 // note：打标签 + 摘要写回 frontmatter；语义边刷新后重算。
 // personal：调 /api/knowledge/analyze 重跑网页分析（摘要 + 要点 + 标签）。
 function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn}) {
-  // aiEnabled 由调用方传入（App 拉取 /api/ai/info 的单一事实源，配置保存后即时刷新）；
-  // 不再读 store.data.ai——那份数据在设置保存后不会自动更新。
+  // aiEnabled 由调用方传入（App 拉取 /api/ai/info 的单一事实源，配置保存后即时刷新）。
+  // hooks 必须在条件 return 之前：aiEnabled 运行中翻转（开着分析栏去设置里启用 AI）时
+  // 不能改变本组件的 hook 数量，否则 React 抛 hooks 数量不匹配。
+  const [state, setState] = useState({busy: false, msg: '', tags: null, summary: null, related: null});
   const isPersonal = node.kind === 'personal';
   const rel = getFiles()?.[isPersonal ? 'personal:' + node.id.replace(/^personal:/, '') : 'note:' + node.id] || null;
   if (!isLive() || !aiEnabled || (isPersonal ? !rel : false)) return null;
-  const [state, setState] = useState({busy: false, msg: '', tags: null, summary: null, related: null});
   const run = (fn, okMsg) => async () => {
     setState(s => ({...s, busy: true, msg: ''}));
     try { const r = await fn(); setState(s => ({...s, busy: false, ...r, msg: okMsg})); onToast?.(okMsg); }
