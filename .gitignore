@@ -30,3 +30,4 @@ examples/vault/.dashboard/
 # nginx Basic Auth 密码文件（含密码哈希）
 .htpasswd
 neural-note-api-*.tar.gz
+.note-api-local/
