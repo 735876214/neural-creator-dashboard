@@ -1,19 +1,23 @@
 # 部署版：看板 + note-api（本机开发用 docker-compose.dev.yml）
 #
-# 目录要求（build context 默认是 deploy/ 的上一级）：
+# 路径都是相对 compose 文件所在目录解析的。两种放法都支持：
+#
+# 放法 A（推荐，NAS 图形界面常用）：把 docker-compose.yml 放在仓库根目录，
+#   server/ dist/ notes-vault/ 与它并排 —— 默认路径直接可用，无需任何变量：
 #   neural-creator-dashboard/
+#   ├── docker-compose.yml      ← 放这里
+#   ├── .env                    ← 可选，从 deploy/.env.example 复制
 #   ├── server/                 ← 必须上传；缺了会报 lstat .../server: no such file or directory
 #   ├── package.json            ← 必须上传（构建时装 pdfjs-dist）
 #   ├── dist/                   ← 本机构建后上传，nginx 托管
-#   ├── notes-vault/            ← 笔记库
-#   └── deploy/
-#       ├── docker-compose.yml
-#       └── .env                ← 可选，从 .env.example 复制
+#   └── notes-vault/            ← 笔记库
 #
-# NAS 上 compose 与仓库不在一起时，在 .env 里改三个路径变量（都用绝对路径）：
-#   REPO_ROOT=/volume1/docker/neural-creator-dashboard   # 含 server/ 与 package.json
-#   VAULT_DIR=/volume1/docker/notes-vault                # 笔记库
-#   DIST_DIR=/volume1/docker/dist                        # 前端构建产物
+# 放法 B：compose 留在 deploy/ 子目录（和仓库里一致）。此时在 .env 里指定：
+#   REPO_ROOT=..                # 上一级就是仓库根
+#   VAULT_DIR=../notes-vault
+#   DIST_DIR=../dist
+#
+# compose 与仓库彻底分开时，三个变量都可以给绝对路径。
 #
 # 用法：
 #   1. 本机构建前端：npm run build
@@ -36,11 +40,11 @@
 services:
   note-api:
     build:
-      # REPO_ROOT：仓库根目录（含 server/ 与 package.json）。默认 = deploy/ 的上一级；
-      # NAS 上 compose 和仓库不在一起时，在 .env 里指定仓库根的绝对路径，
-      # 如 REPO_ROOT=/volume1/docker/neural-creator-dashboard
-      context: ${REPO_ROOT:-..}
-      dockerfile: ${REPO_ROOT:-..}/server/Dockerfile
+      # REPO_ROOT：仓库根目录（含 server/ 与 package.json）。
+      # 默认 = compose 文件所在目录（放法 A：compose 在仓库根，相对路径 ./ 直接可用）；
+      # compose 在 deploy/ 子目录时在 .env 里设 REPO_ROOT=..
+      context: ${REPO_ROOT:-.}
+      dockerfile: server/Dockerfile
     container_name: neural-note-api
     restart: unless-stopped
     environment:
@@ -85,9 +89,8 @@ services:
       AUTH_FILE: /auth/auth.json
       SESSION_DAYS: ${SESSION_DAYS:-30}
     volumes:
-      # VAULT_DIR：笔记库目录。默认 = deploy/ 的上一级的 notes-vault/；
-      # 笔记在别处时在 .env 里给绝对路径，如 VAULT_DIR=/volume1/docker/notes-vault
-      - ${VAULT_DIR:-../notes-vault}:/vault
+      # VAULT_DIR：笔记库目录。默认 = compose 目录下的 notes-vault/
+      - ${VAULT_DIR:-./notes-vault}:/vault
       - note-api-data:/data
       - dashboard-auth:/auth:ro
     ports:
@@ -146,8 +149,8 @@ services:
     ports:
       - "${WEB_PORT:-8088}:80"   # 局域网入口；外网建议走 Tailscale 直接访问这个端口
     volumes:
-      # DIST_DIR：前端构建产物目录（本机 npm run build 的输出）。默认 = deploy/ 上一级的 dist/
-      - ${DIST_DIR:-../dist}:/usr/share/nginx/html:ro
+      # DIST_DIR：前端构建产物目录（本机 npm run build 的输出）。默认 = compose 目录下的 dist/
+      - ${DIST_DIR:-./dist}:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
 
   # 可选：把 vault 同步到桌面 / 手机 Obsidian
@@ -162,7 +165,7 @@ services:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
     volumes:
-      - ${VAULT_DIR:-../notes-vault}:/var/syncthing/vault   # 同步的就是明文 vault
+      - ${VAULT_DIR:-./notes-vault}:/var/syncthing/vault   # 同步的就是明文 vault
       - syncthing-config:/var/syncthing
     ports:
       # 端口可改：NAS 上已有 Syncthing 时，在 .env 里换一组
