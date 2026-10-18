@@ -27,7 +27,7 @@ import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateId
 import {fetchPage, htmlToText, htmlTitle, FetchError} from './webclip.mjs';
 import {parseUpload, ParseError} from './docparse.mjs';
 import {refreshNews, forceRefresh, startNewsCron, listNews, ideasFromNews} from './news.mjs';
-import {platformInfo, pullAll, pullOne, startPlatformsCron} from './platforms.mjs';
+import {platformInfo, pullAll, pullOne, startPlatformsCron, bindSettingsReader} from './platforms.mjs';
 import {randomBytes, createHmac, timingSafeEqual, randomUUID} from 'node:crypto';
 
 const VAULT = resolve(process.env.VAULT_DIR || '');
@@ -307,9 +307,27 @@ function gitCommitMulti(rels, message) {
 }
 
 // —— 看板设置（vault/.dashboard/settings.json）——
-// 只存少量不属于笔记的看板偏好：月目标、用户选的 AI 模型。
-const SETTINGS_DEFAULTS = {version: 1, goal: 8, aiModel: null};
-const SETTINGS_KEYS = new Set(['goal', 'aiModel']);
+// 只存少量不属于笔记的看板偏好：月目标、用户选的 AI 模型、发布平台凭据与同步时间。
+const SETTINGS_DEFAULTS = {version: 1, goal: 8, aiModel: null, platforms: {}, syncHour: null};
+const SETTINGS_KEYS = new Set(['goal', 'aiModel', 'platforms', 'syncHour']);
+
+// settings.json 里的平台凭据形状：{公众号: {appid, secret, ...}}。
+// 校验白名单：只认公众号，secret 必须是非空字符串；写盘前原样存，读出来给 platforms.mjs 用。
+function cleanPlatforms(raw) {
+  if (raw == null) return {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) fail(400, 'platforms 必须是对象');
+  const out = {};
+  for (const [name, cfg] of Object.entries(raw)) {
+    if (name !== '公众号') fail(400, `不支持的平台：${name}（个人号没有数据接口，指标请在看板手动补填）`);
+    if (cfg == null) continue; // 传 null 清除该平台凭据
+    if (typeof cfg !== 'object') fail(400, '平台配置必须是对象');
+    const appid = typeof cfg.appid === 'string' ? cfg.appid.trim() : '';
+    const secret = typeof cfg.secret === 'string' ? cfg.secret.trim() : '';
+    if (appid && secret) out[name] = {appid, secret};
+    else if (appid || secret) fail(400, '公众号 AppID 和 Secret 要一起填');
+  }
+  return out;
+}
 
 function readSettings() {
   try {
@@ -317,10 +335,23 @@ function readSettings() {
     const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
     const goal = Number.isInteger(raw?.goal) && raw.goal >= 1 && raw.goal <= 100 ? raw.goal : SETTINGS_DEFAULTS.goal;
     const aiModel = typeof raw?.aiModel === 'string' && raw.aiModel ? raw.aiModel : null;
-    return {version: 1, goal, aiModel, ...(raw?.updatedAt ? {updatedAt: String(raw.updatedAt)} : {})};
+    const platforms = cleanPlatforms(raw?.platforms);
+    const syncHour = Number.isInteger(raw?.syncHour) && raw.syncHour >= 0 && raw.syncHour <= 23 ? raw.syncHour : null;
+    return {version: 1, goal, aiModel, platforms, syncHour, ...(raw?.updatedAt ? {updatedAt: String(raw.updatedAt)} : {})};
   } catch {
     return {...SETTINGS_DEFAULTS};
   }
+}
+
+// 给前端的设置视图：secret 一律不回传，只报「已配置」。
+function publicSettings() {
+  const s = readSettings();
+  return {
+    ...s,
+    platforms: Object.fromEntries(Object.entries(s.platforms).map(([k, v]) => [k, {
+      appid: v.appid, configured: true, secretMasked: '••••••'
+    }]))
+  };
 }
 
 function writeSettings(patch) {
@@ -328,6 +359,15 @@ function writeSettings(patch) {
   for (const k of Object.keys(patch)) if (!SETTINGS_KEYS.has(k)) fail(400, `未知设置项：${k}`);
   if ('goal' in patch && !(Number.isInteger(patch.goal) && patch.goal >= 1 && patch.goal <= 100)) fail(400, '目标必须是 1–100 的整数');
   if ('aiModel' in patch && !(patch.aiModel === null || (typeof patch.aiModel === 'string' && patch.aiModel))) fail(400, 'AI 模型必须是字符串或 null');
+  if ('platforms' in patch) {
+    // 前端看不到 secret（只有掩码），只改 AppID 时 secret 不重填：缺 secret 的条目沿用已存的。
+    const cur = readSettings().platforms;
+    const merged = Object.fromEntries(Object.entries(cleanPlatforms(patch.platforms)).map(([k, v]) => [
+      k, v.secret ? v : {appid: v.appid, secret: cur[k]?.secret || ''}
+    ]).filter(([, v]) => v.secret && v.appid));
+    patch = {...patch, platforms: merged};
+  }
+  if ('syncHour' in patch && !(patch.syncHour === null || (Number.isInteger(patch.syncHour) && patch.syncHour >= 0 && patch.syncHour <= 23))) fail(400, '同步时间必须是 0–23 的整数或 null');
   const next = {...readSettings(), ...patch, version: 1, updatedAt: new Date().toISOString()};
   mkdirSync(SETTINGS_DIR, {recursive: true});
   const tmp = join(SETTINGS_DIR, `.settings-${process.pid}-${Date.now()}.tmp`);
@@ -344,6 +384,7 @@ function writeSettings(patch) {
 
 // idea / draft 的 frontmatter 白名单校验：只接受约定字段，非法值直接 400，
 // 避免把前端的临时状态写进笔记文件。
+bindSettingsReader(readSettings);
 function cleanFm(kind, fm) {
   if (fm == null) return {};
   if (typeof fm !== 'object' || Array.isArray(fm)) fail(400, 'fm 必须是对象');
@@ -547,6 +588,14 @@ async function route(req, res, url) {
 
   if (!authed(req)) return json(res, 401, {error: '未登录'});
 
+  // 轻量指纹：外部编辑器改动 vault 后前端轮询这里决定要不要重新拉 /api/data。
+  // v = 各文件 mtime 汇总（+ 条目数），不精确到单文件但足够发现「有变化」。
+  if (p === '/api/version' && req.method === 'GET') {
+    const d = loadData();
+    const v = Object.values(d.mtimes || {}).reduce((a, b) => a + b, 0) + Object.keys(d.mtimes || {}).length;
+    return json(res, 200, {v, generatedAt: d.generatedAt});
+  }
+
   if (p === '/api/data' && req.method === 'GET') {
     const d = loadData(url.searchParams.has('fresh') ? 0 : 1500);
     reindex(d);
@@ -561,7 +610,7 @@ async function route(req, res, url) {
       files: d.files,
       figures: d.figures,
       mtimes: d.mtimes || {},
-      settings: readSettings(),
+      settings: publicSettings(),
       semantic: index.semanticEdges(),
       ai: aiInfo(),
       platforms: platformInfo(),
@@ -569,10 +618,12 @@ async function route(req, res, url) {
     });
   }
 
-  if (p === '/api/settings' && req.method === 'GET') return json(res, 200, readSettings());
+  if (p === '/api/settings' && req.method === 'GET') return json(res, 200, publicSettings());
 
   if (p === '/api/settings' && req.method === 'PUT') {
-    return json(res, 200, writeSettings(await readBody(req)));
+    const next = writeSettings(await readBody(req));
+    // 返回脱敏视图，secret 不回传；与 GET /api/data 的 settings 形状一致。
+    return json(res, 200, {...next, platforms: Object.fromEntries(Object.entries(next.platforms).map(([k, v]) => [k, {appid: v.appid, configured: true, secretMasked: '••••••'}]))});
   }
 
   if (p === '/api/note' && req.method === 'GET') {

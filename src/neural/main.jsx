@@ -10,6 +10,7 @@ import {Cosmos} from './Cosmos';
 import {Library, Drafts, Ideas, Knowledge} from './pages';
 import {PublishDialog} from './PublishDialog';
 import {NewNoteModal, PublishModal} from './NoteModal';
+import {SettingsPanel} from './SettingsPanel';
 import {insertImageAtCursor} from './NoteModal';
 import {Count} from './Analysis';
 import {Icon} from './icons';
@@ -92,11 +93,61 @@ function App() {
   const [editing, setEditing] = useState(null);
   const [goalInput, setGoalInput] = useState(String(goal));
   const [toast, setToast] = useState('');
+  const [settingsLive, setSettingsLive] = useState(null); // /api/settings 的脱敏视图（打开设置时现拉）
+  const [aiInfo, setAiInfo] = useState(null);
   const [dataRev, setDataRev] = useState(0);
   const reduced = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
   const slowDrafts = useDeferredValue(drafts);
-  // 数据仓变化（目前是 AI 语义边写回）时重建图谱，不必刷新页面。
-  useEffect(() => subscribeData(() => setDataRev(v => v + 1)), []);
+  // 数据仓变化（AI 语义边写回、外部改动自动刷新）时重建图谱，不必刷新页面。
+  // 同步把 store 里的选题/草稿搬进本地 state：新增/删除总是跟随；
+  // 已有条目只有在没有未保存编辑（persist.isPending）时才覆盖，正在写的草稿不会被外部刷新冲掉。
+  useEffect(() => subscribeData(() => {
+    setDataRev(v => v + 1);
+    const d = getData();
+    if (isLive()) {
+      if (Array.isArray(d.seedIdeas)) setIdeas(list => {
+        const byId = new Map(list.map(x => [x.id, x]));
+        return (d.seedIdeas || []).map(x => (byId.get(x.id) && persist.isPending(persist.ideaKey(x.id))) ? byId.get(x.id) : x);
+      });
+      if (Array.isArray(d.seedDrafts)) setDrafts(list => {
+        const freshIds = new Set((d.seedDrafts || []).map(x => x.id));
+        const kept = list.filter(x => !freshIds.has(x.id)); // store 里已消失的本地草稿保留（未落盘的新建稿）
+        return [...(d.seedDrafts || []).map(x => {
+          const prev = list.find(y => y.id === x.id);
+          return (prev && persist.isPending(persist.draftKey(x.id))) ? prev : x;
+        }), ...kept];
+      });
+    }
+  }), []);
+  // 外部改动自动刷新：每 5s 轮询 /api/version 的 vault 指纹，变了就 refreshData()。
+  // 自己刚写盘（4s 内）不拉取——数据就是本页刚写的；页面不可见时暂停，回来立即查一次。
+  useEffect(() => {
+    if (!live) return;
+    let stopped = false, lastV = null;
+    let timer;
+    const check = async () => {
+      try {
+        const r = await fetch(persist.apiUrl('/api/version'));
+        if (!r.ok) return;
+        const j = await r.json();
+        if (stopped) return;
+        if (lastV != null && j.v !== lastV) {
+          if (Date.now() - persist.lastSelfWrite() < 4000) { lastV = j.v; return; }
+          lastV = j.v;
+          await persist.refreshData();
+          setToast('笔记库有外部改动，看板已更新 · Vault updated');
+          return;
+        }
+        lastV = j.v;
+      } catch { /* 服务暂不可达，下个周期再试 */ }
+    };
+    const tick = () => { if (!document.hidden) check().finally(() => { if (!stopped) timer = setTimeout(tick, 5000); }); else timer = setTimeout(tick, 5000); };
+    const onVis = () => { if (!document.hidden) check(); };
+    tick();
+    document.addEventListener('visibilitychange', onVis);
+    return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', onVis); };
+  }, [live]);
+
   const graph = useMemo(() => buildGraph({ideas, drafts: slowDrafts}), [ideas, slowDrafts, dataRev]);
   const layout = useMemo(() => forceLayout(graph), [graph]);
   const draftsRef = useRef(drafts);
@@ -138,6 +189,15 @@ function App() {
 
   useEffect(() => { history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page); window.scrollTo({top: 0}); }, [page]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2800); return () => clearTimeout(t); }, [toast]);
+
+  // 打开设置弹窗时现拉一份脱敏设置（公众号是否已配置、同步时间等）与 AI 服务状态
+  useEffect(() => {
+    if (modal !== 'settings') return;
+    let on = true;
+    fetch(persist.apiUrl('/api/settings')).then(r => r.json()).then(j => { if (on) setSettingsLive(j); }).catch(() => {});
+    fetch(persist.apiUrl('/api/ai/info')).then(r => r.json()).then(j => { if (on) setAiInfo(j); }).catch(() => {});
+    return () => { on = false; };
+  }, [modal]);
 
   const close = useCallback(() => setModal(null), []);
   const signOut = useCallback(async () => {
@@ -266,7 +326,7 @@ function App() {
       <div className="top-actions">
         <button className="pill primary" onClick={() => newDraft()} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="plus" size={14}/>新建草稿 <em>New</em></button>
         <button className="pill ghost" onClick={() => setModal('new-note')} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="methods" size={14}/>新建笔记 <em>Note</em></button>
-        <button className="avatar" onClick={() => setModal('about')} aria-label={`${snapshot.account}，查看账号与数据来源`}><img src={asset(CONFIG.avatar)} alt=""/></button>
+        <button className="avatar set-btn" onClick={() => { setSettingsLive(null); setModal('settings'); }} aria-label="打开设置"><Icon name="gear" size={17}/></button>
       </div>
     </header>
 
@@ -337,6 +397,19 @@ function App() {
         <label>目标篇数 <em>Target</em><input autoFocus type="number" min="1" max="100" step="1" required disabled={!live} value={goalInput} onChange={e => setGoalInput(e.target.value)}/></label>
         <div className="form-actions">{live && <SaveBadge state={goalSave}/>}<button type="button" className="pill ghost" onClick={close}>取消 <em>Cancel</em></button><button className="pill primary" disabled={!live}>保存目标 <em>Save</em></button></div>
       </form>
+    </Modal>}
+    {modal === 'settings' && <Modal title="设置" en="Settings" onClose={close} wide>
+      <SettingsPanel
+        settings={settingsLive}
+        ai={aiInfo}
+        goal={goal}
+        monthCount={monthPosts.length}
+        readOnly={!live}
+        onClose={close}
+      />
+      {live && <div className="form-actions signout-row">
+        <button className="pill ghost" onClick={signOut}>退出登录 <em>Sign out</em></button>
+      </div>}
     </Modal>}
     {modal === 'idea' && editing && <Modal title="选题详情" en="Idea" onClose={close}>
       <div className="form">

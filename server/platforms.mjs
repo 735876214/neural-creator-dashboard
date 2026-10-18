@@ -14,38 +14,60 @@ import {readFileSync, existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {parse, pick} from './vault.mjs';
 
-const SYNC_HOUR = Number(process.env.SYNC_HOUR || 21);
-const WECHAT_APPID = process.env.WECHAT_APPID || '';
-const WECHAT_SECRET = process.env.WECHAT_SECRET || '';
+const SYNC_HOUR_DEFAULT = Number(process.env.SYNC_HOUR || 21);
+const WECHAT_APPID_ENV = process.env.WECHAT_APPID || '';
+const WECHAT_SECRET_ENV = process.env.WECHAT_SECRET || '';
+
+// 凭据优先级：环境变量 > vault/.dashboard/settings.json 里的 platforms.wechat。
+// settings 由看板前端「设置」面板写入；这里每次拉取时现读，改完立即生效，不用重启容器。
+export function wechatCreds(readSettings) {
+  if (WECHAT_APPID_ENV && WECHAT_SECRET_ENV) return {appid: WECHAT_APPID_ENV, secret: WECHAT_SECRET_ENV, from: 'env'};
+  const wx = readSettings()?.platforms?.wechat;
+  if (wx?.appid && wx?.secret) return {appid: wx.appid, secret: wx.secret, from: 'settings'};
+  return null;
+}
 
 // 拉取能力注册表：platform 键与前端 publish.js 的 PLATFORMS 名称对齐。
+// 公众号是否可拉取决于「凭据是否配了」（env 或 settings），不能在模块加载时定死。
+const credsRef = {readSettings: () => null};
+export const bindSettingsReader = fn => { credsRef.readSettings = fn; };
+const wxPullable = () => !!wechatCreds(credsRef.readSettings);
+
 export const PLATFORM_PULLABLE = {
-  公众号: {pullable: !!WECHAT_APPID && !!WECHAT_SECRET, note: '需要服务端配置 WECHAT_APPID / WECHAT_SECRET'},
+  公众号: {pullable: true, note: '凭据来自服务端环境变量或设置面板（WECHAT_APPID / WECHAT_SECRET）'},
   小红书: {pullable: false, note: '个人号没有可用的数据接口，请在看板手动补填指标'},
   抖音: {pullable: false, note: '个人号没有可用的数据接口，请在看板手动补填指标'},
   B站: {pullable: false, note: '个人号没有可用的数据接口，请在看板手动补填指标'}
 };
 
 export const platformInfo = () => ({
-  pull: Object.fromEntries(Object.entries(PLATFORM_PULLABLE).map(([k, v]) => [k, {pullable: v.pullable, note: v.note}])),
-  syncHour: SYNC_HOUR
+  pull: Object.fromEntries(Object.entries(PLATFORM_PULLABLE).map(([k, v]) => [k, {
+    pullable: k === '公众号' ? wxPullable() : v.pullable,
+    note: k === '公众号' && !wxPullable() ? '未配置凭据：在设置面板填公众号 AppID / Secret，或配服务端环境变量' : v.note
+  }])),
+  syncHour: syncHour(),
+  configured: {公众号: wxPullable()}
 });
 
-export const pullableOf = name => PLATFORM_PULLABLE[name]?.pullable === true;
+export const pullableOf = name => name === '公众号' ? wxPullable() : PLATFORM_PULLABLE[name]?.pullable === true;
+export const syncHour = () => {
+  const h = credsRef.readSettings()?.syncHour;
+  return Number.isInteger(h) && h >= 0 && h <= 23 ? h : SYNC_HOUR_DEFAULT;
+};
 
 // —— 公众号 stable_token（缓存到过期前 5 分钟） ——
 let wxToken = {token: '', expires: 0};
 async function wechatToken() {
-  if (!WECHAT_APPID || !WECHAT_SECRET) throw new Error('未配置 WECHAT_APPID / WECHAT_SECRET');
-  if (wxToken.token && Date.now() < wxToken.expires) return wxToken.token;
+  const creds = wechatCreds(credsRef.readSettings);
+  if (!creds) throw new Error('未配置公众号凭据：在设置面板填 AppID / Secret，或配服务端环境变量');
+  if (wxToken.token && Date.now() < wxToken.expires && wxToken.appid === creds.appid) return wxToken.token;
   const res = await fetch('https://api.weixin.qq.com/cgi-bin/stable_token', {
     method: 'POST', headers: {'content-type': 'application/json'},
-    body: JSON.stringify({grant_type: 'client_credential', appid: WECHAT_APPID, secret: WECHAT_SECRET})
+    body: JSON.stringify({grant_type: 'client_credential', appid: creds.appid, secret: creds.secret})
   });
   const j = await res.json().catch(() => ({}));
   if (!j.access_token) throw new Error('公众号 token 获取失败：' + (j.errmsg || 'HTTP ' + res.status));
-  wxToken = {token: j.access_token, expires: Date.now() + (Number(j.expires_in) - 300) * 1000};
-  return wxToken.token;
+  wxToken = {token: j.access_token, expires: Date.now() + (Number(j.expires_in) - 300) * 1000, appid: creds.appid};  return wxToken.token;
 }
 
 // 公众号数据统计接口的时间范围是 T-1：查最近 3 天，取「已发表图文」汇总里
@@ -73,7 +95,6 @@ async function fetchWxMetrics({platformId, url}, {fetchImpl = fetch} = {}) {
   }
   return matched;
 }
-
 // 把平台指标写回一篇作品。io 注入 writeExisting / mtimeOf，便于测试与避免与 index.mjs 循环引用。
 export async function pullOne(post, rel, vaultDir, io = {}) {
   const {writeExisting, mtimeOf} = io;
@@ -119,7 +140,7 @@ export function startPlatformsCron(runOnce, {intervalMs = 30 * 60_000} = {}) {
   const tick = async () => {
     if (running) return;
     const now = new Date();
-    if (now.getHours() < SYNC_HOUR) return;
+    if (now.getHours() < syncHour()) return;
     running = true;
     try { await runOnce(); console.error('[platforms] 平台指标同步完成'); }
     catch (e) { console.error('[platforms] 同步失败：', e.message); }
@@ -130,7 +151,7 @@ export function startPlatformsCron(runOnce, {intervalMs = 30 * 60_000} = {}) {
 }
 
 // —— 供路由使用的便捷封装：是否存在可拉取能力（未配凭据时 /api/platforms/pull 返回逐篇 pullable:false） ——
-export const hasPuller = () => !!WECHAT_APPID && !!WECHAT_SECRET;
+export const hasPuller = () => wxPullable();
 
 // 供读取作品 frontmatter 用（pick 透出，与 vault.mjs 同源）
 export {pick};

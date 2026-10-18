@@ -848,3 +848,17 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .pub-metrics label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-2); }
 .pub-metrics input { padding: 5px 8px; }
 @media (max-width: 600px) { .pub-metrics { grid-template-columns: 1fr 1fr; } }
+
+/* —— v7.3 设置面板（右上角齿轮）：AI 配置 / 发布平台 / 月目标，全部写 NAS settings —— */
+.set-btn { display: inline-flex; align-items: center; justify-content: center; color: var(--gold); }
+.set-btn:hover { border-color: var(--gold-line); color: #fff6e2; }
+.set-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.set-tabs button { padding: 7px 14px; border-radius: 999px; border: 1px solid var(--rule-2); background: none; color: var(--ink-2); font-size: 12.5px; cursor: pointer; }
+.set-tabs button em { margin-left: 5px; font-size: 10.5px; }
+.set-tabs button.on { color: #fff6e2; border-color: var(--gold-line); background: rgba(232, 200, 132, .12); }
+.set-section h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--gold); letter-spacing: .16em; }
+.set-section .form-row { margin-bottom: 10px; }
+.set-status { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.set-ok { color: var(--mint, #9fe3c0); }
+.set-off { color: var(--muted); }
+.settings-panel .quiet { font-size: 12px; }

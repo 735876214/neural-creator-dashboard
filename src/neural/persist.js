@@ -207,6 +207,19 @@ export function saveAiModel(id) {
   return queueNow('aiModel', 'settings', {aiModel: id || null});
 }
 
+// 设置面板专用：一次写多个设置项（goal / aiModel / platforms / syncHour 的任意组合）。
+// 平台凭据带 secret 时必须立即落盘（不走防抖 outbox 的重试语义也没有害处，这里直接串行 PUT）。
+export async function saveSettings(patch) {
+  if (!isLive()) return Promise.reject(new Error('未连接 NAS：只读演示'));
+  const res = await fetch(API + '/api/settings', {
+    method: 'PUT', headers: {'content-type': 'application/json'},
+    body: JSON.stringify(patch)
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+  return j;
+}
+
 // —— 串行执行与重试 ——
 
 function enqueue(key, fn) {
@@ -291,6 +304,7 @@ export function flushKey(key) {
 
     const j = await res.json().catch(() => ({}));
     savedSigs.set(key, item.sig);
+    lastSelfWriteAt = Date.now(); // 自动刷新轮询据此忽略自己刚写的变化（4s 宽限）
     attempts.delete(key);
     clearTimeout(retryTimers.get(key)); retryTimers.delete(key);
 
@@ -327,6 +341,12 @@ export function flushNow() {
     return flushKey(key);
   }));
 }
+
+// 最近一次本页写盘成功的时间戳（0 = 没有）；外部改动自动刷新用它区分「自己写的」与「外部改的」。
+let lastSelfWriteAt = 0;
+export const lastSelfWrite = () => lastSelfWriteAt;
+// 有在途/未落盘的写入（outbox 有 key，或状态 pending/error/conflict）——自动刷新不覆盖这些条目。
+export const isPending = key => outbox.has(key) || UNRESOLVED.has(getSaveState(key).state);
 
 export function pendingCount() {
   return [...outbox.keys()].filter(key => ['pending', 'error', 'conflict'].includes(getSaveState(key).state)).length;

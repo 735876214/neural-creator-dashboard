@@ -263,6 +263,18 @@ try {
   assert.equal(upNoName.status, 400);
   ok('上传入库：md / docx / 非法类型 / 缺文件名');
 
+  // 6c2. /api/version：vault 指纹（自动刷新轮询用）——稳定 → 写盘后变化
+  const v1 = await json('/api/version');
+  assert.equal(v1.status, 200);
+  assert.equal(typeof v1.body.v, 'number', 'v 应为数字');
+  const vSame = await json('/api/version');
+  assert.equal(vSame.body.v, v1.body.v, '无写入时指纹应稳定');
+  const cur = await json('/api/note?path=' + encodeURIComponent(rel));
+  await put('/api/note', {path: rel, body: cur.body.text + '\n指纹测试', mtime: cur.body.mtime});
+  const v2 = await json('/api/version');
+  assert.notEqual(v2.body.v, v1.body.v, '写盘后指纹应变化');
+  ok('/api/version 指纹（稳定 / 写后变化）');
+
   // 6d. 独立创作入口：新建方法笔记 / 草稿生成作品 / 附件上传
   const newNote = await json('/api/note-new', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({title: 'e2e 新建笔记', body: 'E2E 独立创建。', fm: {tags: ['e2e']}})});
   assert.equal(newNote.status, 201);
