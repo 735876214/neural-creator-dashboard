@@ -13,17 +13,17 @@
 
 > **使用许可：MIT 开源许可，免费使用。** 详见 [LICENSE](LICENSE)。
 
-把你的作品、笔记、选题和草稿，变成一张会呼吸的神经网络：中心是一颗星核，五簇发光的星团代表五个模块，点开星团，金色星座线像伞一样展开到每一篇内容；点开一篇，右侧弹出它的全部数据和双向链接。
+把你的作品、笔记、选题和草稿，变成一张会呼吸的神经网络：中心是一颗星核，六簇发光的星团代表六个模块（含 AI 热点），点开星团，金色星座线像伞一样展开到每一篇内容；点开一篇，右侧弹出它的全部数据和双向链接。
 
-Turn your works, notes, ideas and drafts into a living neural network — a star core, five glowing clusters, constellation lines spreading to every piece, and a full analysis panel for each one.
+Turn your works, notes, ideas and drafts into a living neural network — a star core, six glowing clusters, constellation lines spreading to every piece, and a full analysis panel for each one.
 
 > 仓库里的账号、作品、笔记、选题、草稿**全部是虚构的示例数据**。
 
 ## 它能做什么
 
-- **工作台**：星核点亮、日冕呼吸，背景星穹从星核蔓延开，五簇星团（作品库、概念网络、方法库、选题池、创作台）围绕星核游动。
-- **三层交互**：点星团 → 星核退到左侧、五簇列队，星座线扇形展开到该模块的每一篇内容；点内容 → 右侧滑出分析栏（指标、收藏率、出链 / 反链 / 双向、话题、二度关联）；Esc 或面包屑逐层返回。
-- **问你的图谱**：底部对话框可以问「最核心的内容」「双向连接有哪些」「下一篇写什么」「未创建的笔记」，按本地规则检索，不调用 AI。
+- **工作台**：星核点亮、日冕呼吸，背景星穹从星核蔓延开，六簇星团（作品库、概念网络、方法库、选题池、创作台、AI 热点）围绕星核游动。
+- **三层交互**：点星团 → 星核退到左侧、六簇列队，星座线扇形展开到该模块的每一篇内容；点内容 → 右侧滑出分析栏（指标、收藏率、出链 / 反链 / 双向、话题、二度关联）；Esc 或面包屑逐层返回。
+- **问你的图谱**：底部对话框可以问「最核心的内容」「双向连接有哪些」「下一篇写什么」「未创建的笔记」，按本地规则检索，不调用 AI；部署模式配好 AI key 后，分析栏另有 AI 问答、打标签与语义关联。
 - **作品库 / 创作台 / 选题池**三个内页：作品卡片与排序、草稿编辑（支持 `[[` 双链补全）、选题转草稿，每个内页顶部带一条星座轨。
 - **深空配色**：深空蓝紫底、金色星座线、星核与星云由代码逐帧自绘，颜色集中在 `src/neural/theme.js` 和 `neural.css` 顶部的 CSS 变量里。
 - **中英双语**界面，尊重系统的「减少动态效果」设置。
@@ -43,6 +43,8 @@ npm run dev
 ```
 
 打开终端里显示的地址（默认 http://127.0.0.1:5173/ ）。
+
+不启动 note-api 时是**纯静态只读模式**：页面的选题、草稿与目标不能编辑。需要在线编辑并写回 NAS，见 **[NAS 部署说明](docs/nas-deployment.md)**（`docker-compose.dev.yml` + `npm run dev` 也可在本机接后端）。
 
 ## 让你的 AI 智能体来装（Claude、Codex、Kimi、Cursor……）
 
@@ -160,8 +162,8 @@ npm run build
 
 ## 关于素材
 
-- 星核、五簇星团与星穹背景**全部由代码在 Canvas 上逐帧自绘**，页面里没有任何图片或视频素材文件，`npm run verify` 会校验这一点。
-- 五个星座的星位取自真实星表（J2000 赤经 / 赤纬 + 经典连线），见 `src/neural/constellations.js`。
+- 星核、六簇星团与星穹背景**全部由代码在 Canvas 上逐帧自绘**，页面里没有任何图片或视频素材文件，`npm run verify` 会校验这一点。
+- 六个星座的星位取自真实星表（J2000 赤经 / 赤纬 + 经典连线），见 `src/neural/constellations.js`；第六个是 AI 热点（仙女座），部署模式下由 note-api 每天生成日报。
 - 仓库里唯一的静态素材是头像 `public/avatar.svg`，它是抽象图形。示例数据全部虚构，与任何真实账号无关。
 
 ## 它是怎么做出来的

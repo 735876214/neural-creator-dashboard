@@ -4,7 +4,7 @@ import {T} from './theme';
 import {paintConstellation, baked, nameOf, countsOf} from './constellations';
 
 // 内页的星座轨（v6.3）：作品库 / 创作台 / 选题池 三个内页各带一条，
-// 五个模块 = 五个星座，与工作台同一套语言（真实星位 + 经典连线 + 骨架星/成员星场）；
+// 六个模块 = 六个星座，与工作台同一套语言（真实星位 + 经典连线 + 骨架星/成员星场）；
 // 本页自己的那一个亮着，其余压暗 —— 也就是「哪一页高亮哪个星座」。
 // v6.4：上下间距尽量拉宽——展示框放大（150×106 → 168×140），星座本身先大一圈；
 //   试过弧线排列，因上下不齐已取消。
@@ -12,8 +12,8 @@ import {paintConstellation, baked, nameOf, countsOf} from './constellations';
 const CW = 168, CH = 140;                                // 每个小星座的展示尺寸（CSS px，按 2× 绘制）
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const cache = new Map();
-// 垂距（px，向下为正）：v6.5 起全部为 0 = 五个星座同一基线、居中排列
-const ARC = [0, 0, 0, 0, 0];
+// 垂距（px，向下为正）：v6.5 起全部为 0 = 六个星座同一基线、居中排列
+const ARC = [0, 0, 0, 0, 0, 0];
 
 // 小尺寸烘焙：与主视图同一份数据、同一套画法，只是整体缩放到展示框里
 function miniOf(id) {
@@ -48,9 +48,9 @@ export function ConstellationBand({page, onGo}) {
       g.drawImage(src, 0, 0);
     }
   }, [figs]);
-  return <section className="const-band glass" aria-label="五个星座 · 五个模块">
+  return <section className="const-band glass" aria-label="六个星座 · 六个模块">
     <div className="cb-copy">
-      <p className="cb-title">五个星座 <em>Five constellations</em></p>
+      <p className="cb-title">六个星座 <em>Six constellations</em></p>
       <p className="cb-note">真实星位与经典连线 · 与工作台同一套<em>Real sky positions, classic lines</em></p>
     </div>
     <div className="cb-figs" role="list">

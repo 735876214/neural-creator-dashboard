@@ -737,13 +737,13 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .an-ask { border-top-color: var(--rule); }
 .chip { border-radius: 7px; }
 
-/* —— v6.3 内页星座轨：五个模块 = 五个星座（与工作台同一套语言），本页的那一个亮着 —— */
+/* —— v6.3 内页星座轨：六个模块 = 六个星座（与工作台同一套语言），本页的那一个亮着 —— */
 .const-band { display: flex; align-items: center; gap: 16px; padding: 12px 16px 14px; margin-bottom: 16px; border-radius: var(--radius); }
 .cb-copy { flex: none; width: 170px; }
 .cb-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--gold); letter-spacing: .16em; }
 .cb-note { margin: 5px 0 0; font-size: 10.5px; color: var(--muted); line-height: 1.5; }
 .cb-note em { display: block; margin: 2px 0 0; font-size: 10px; }
-/* 星座轨：五个星座同一基线、居中排列（v6.5 拉平对齐）
+/* 星座轨：六个星座同一基线、居中排列（v6.5 拉平对齐）
    —— --dy 保留兼容（v6.5 起恒为 0）；窄屏 ≤900px 仍是一行+横滚 */
 .cb-figs { flex: 1; display: flex; align-items: flex-start; gap: 6px; min-width: 0; padding: 0 4px; }
 .cb-fig { flex: 1 1 0; min-width: 0; display: grid; justify-items: center; gap: 1px; padding: 6px 4px 8px; border: 1px solid transparent; border-radius: 12px; background: none; color: var(--text-2); transition: border-color .3s, background .3s; transform: translateY(var(--dy, 0)); }
@@ -758,8 +758,8 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .cb-name em { margin: 0; font-size: 8.5px; letter-spacing: .1em; color: rgba(214, 192, 140, .92); }
 .cb-mod { font-size: 10.5px; white-space: nowrap; }
 @media (max-width: 900px) {
-  /* 窄屏：说明块挪到星座上方，五个星座仍是一行（放不下就横向滚）—— 弧线保留，
-     所以「上下间距」在窄屏也还在；横向间距跟着放宽一档，别让五个挤在一起 */
+  /* 窄屏：说明块挪到星座上方，六个星座仍是一行（放不下就横向滚）—— 弧线保留，
+     所以「上下间距」在窄屏也还在；横向间距跟着放宽一档，别让六个挤在一起 */
   .const-band { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px 14px 16px; }
   .cb-copy { width: auto; }
   .cb-figs { overflow-x: auto; gap: 10px; }

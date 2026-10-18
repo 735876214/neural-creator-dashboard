@@ -61,7 +61,7 @@ function targets(L, t) {
     const s = narrow ? clamp(W * .56, 180, 280) : clamp(Math.min(W, H) * .5, 250, 440);
     const cy = narrow ? H * .47 : H * .53;
     res.core = {x: W / 2, y: cy, s};
-    // 五簇之间留出呼吸：椭圆半径放大、每簇尺寸收紧，团与团之间不再互相挤
+    // 六簇之间留出呼吸：椭圆半径放大、每簇尺寸收紧，团与团之间不再互相挤
     const rx = narrow ? W * .38 : Math.min(W * .345, 566), ry = narrow ? H * .23 : Math.min(H * .365, 300);
     MODULES.forEach((m, i) => {
       const a = (m.angle + swim * 7 * Math.sin(t * .17 + i * 1.7)) * Math.PI / 180;
@@ -120,8 +120,8 @@ const sp = x => ({x, v: 0});
 // 星核向外飘散的星尘（星核本地坐标，画布 1012×1012，中心 506）
 const DUST = Array.from({length: 130}, (_, i) => ({a: i * 2.39996, v: .035 + (i * 37 % 100) / 100 * .06, o: (i * .618034) % 1, w: (i % 2 ? 1 : -1) * (.15 + (i % 7) * .05), s: .7 + (i % 5) * .32, b: .45 + (i % 3) * .25, c: T.dust[i % T.dust.length]}));
 
-// —— 星团 = 五个真实星座（v6.3 落地）——
-// 知识笔记→天蝎 · 概念→双鱼 · 作品→处女 · 选题→射手 · 草稿→水瓶（星座表与坐标口径见 constellations.js）。
+// —— 星团 = 六个真实星座（v6.3 落地）——
+// 知识笔记→天蝎 · 概念→双鱼 · 作品→处女 · 选题→射手 · 草稿→水瓶 · AI 热点→仙女座（星座表与坐标口径见 constellations.js）。
 // 骨架星位、经典连线、星等全部来自真实星表，图形是**静态**的，所以整幅烘焙成一张离屏画布（每簇一张，2×），
 // 逐帧只做一次 drawImage + 主星闪烁 —— 这是 v6.2 定的落地口径（星座层比原来的光球层省 2.8–5.5×）。
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
@@ -175,7 +175,7 @@ function Scene({graph, items, more, onModule, onItem, live, sel}) {
   const clusterRefs = useRef({}), canvasRefs = useRef({}), labelRefs = useRef({}), threadRefs = useRef({}), pulseRefs = useRef({});
   const itemRefs = useRef([]), fanRefs = useRef([]), fanPulseRefs = useRef([]), moreRef = useRef(null);
   const summaries = useMemo(() => Object.fromEntries(MODULES.map(m => [m.id, moduleSummary(graph, m)])), [graph]);
-  // 星座图形（figData）在模块加载时烘焙一次，五簇共用；这里只留每簇的标签数据
+  // 星座图形（figData）在模块加载时烘焙一次，六簇共用；这里只留每簇的标签数据
   const clusterData = figData;
 
   useLayoutEffect(() => { live.current.itemState = items.map(() => null); live.current.moreState = null; live.current.fanStart = performance.now(); }, [items, live]);

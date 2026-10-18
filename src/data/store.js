@@ -3,7 +3,7 @@
 // 为什么要有这一层：src/neural/works.js 在模块顶层就执行 posts.map()，graph.js 的 buildGraph()
 // 也是同步的 —— 数据必须在任何模块被 import 之前就准备好，不能把整条链路改成 async。
 // 所以由 src/neural/boot.js 在挂载 React 之前把数据填进这个仓，src/data/index.js 再同步地导出它，
-// 图谱、星核、五星座那些代码一行都不用改。
+// 图谱、星核、六星座那些代码一行都不用改。
 //
 // 数据来源优先级：
 //   1. note-api 的 /api/data  —— 部署模式，打开即最新（boot.js 负责取）

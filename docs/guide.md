@@ -73,7 +73,7 @@ Obsidian / Syncthing            看板设置 vault/.dashboard/settings.json
 | 导出 | 作用 |
 |---|---|
 | `KINDS` / `LINK_KINDS` / `LINK_EN` | 节点类型与六类连接的标签 |
-| `MODULES` | 五个主模块 + 第六星座「AI 热点」：id、标题、对应 kind、目录节点、角度、内页 |
+| `MODULES` | 六个模块（五个主模块 + AI 热点）：id、标题、对应 kind、目录节点、角度、内页 |
 | `buildGraph({ideas, drafts})` | 由 posts / notes / ideas / drafts / concepts 推导节点、边、度数、双向标记 |
 | `neighbors` / `latent` | 一度 / 二度关联 |
 | `stats` | 内容数、连接数、双向组数、未创建双链数 |
@@ -138,7 +138,8 @@ Obsidian / Syncthing            看板设置 vault/.dashboard/settings.json
 | 路径 | 职责 |
 |---|---|
 | `scripts/import-notes.mjs` | 一次性把 Markdown 笔记文件夹转成 `src/data/my-data.local.js`；只读不联网；`--reset` 切回示例 |
-| `scripts/verify.mjs` | 校验 skill 格式、导入脚本、数据结构、星核/五星座代码仍在、页面无 `<video>`；`--release` 额外检查占位符 |
+| `scripts/verify.mjs` | 校验 skill 格式、导入脚本、数据结构、星核/六星座代码仍在、页面无 `<video>`；`--release` 额外检查占位符 |
+| `scripts/test-api.mjs` | 在临时 vault 上跑 note-api 端到端测试；`npm run test:api`，需要 Node 22.5+ 的 `node:sqlite` |
 | `skills/neural-creator-dashboard/SKILL.md` | 可被 `npx skills add` 安装的通用 Agent Skill |
 | `examples/vault/` | 虚构示例笔记库，演示 frontmatter 格式 |
 | `deploy/docker-compose.dev.yml` | 开发版：只起 note-api 容器 |
@@ -319,7 +320,7 @@ Windows PowerShell 用 `$env:VAULT_DIR='.\examples\vault'; node server/index.mjs
 | 容器里 SQLite 报 disk I/O error | Docker Desktop 挂载卷的已知问题，compose 已用命名卷规避；见 `db.mjs` 头部注释 |
 | 构建产物里有私人数据 | `.gitignore` 只保护源码。公开部署前 `npm run import -- --reset`，并确认无 `config.local.js` |
 
-开发红线（`npm run verify` 会检查）：星核与五星座动效不能删/隐藏/改成静态图；不新增图片或视频素材；`src/data/my-data.local.js` 与示例内容不能混用真实信息；保持 `prefers-reduced-motion` 与中英双语。
+开发红线（`npm run verify` 会检查）：星核与六星座动效不能删/隐藏/改成静态图；不新增图片或视频素材；`src/data/my-data.local.js` 与示例内容不能混用真实信息；保持 `prefers-reduced-motion` 与中英双语。
 
 ---
 
@@ -333,6 +334,10 @@ npm run verify
 npm run build
 ```
 
-再跑 `npm run dev` 打开页面，确认：星核与五星座出现、星穹背景缓慢流动；点「作品库」星团星座线展开到每篇内容；点一篇右侧弹出分析栏；三个内页正常；控制台无报错。
+```bash
+npm run test:api
+```
 
-涉及 note-api 的改动，另用示例库起后端手测：读取 `examples/vault`、编辑草稿/选题落盘、409 行为、`.trash/` 备份与 git commit。
+再跑 `npm run dev` 打开页面，确认：星核与六星座出现、星穹背景缓慢流动；点「作品库」星团星座线展开到每篇内容；点一篇右侧弹出分析栏；三个内页正常；控制台无报错。
+
+涉及 note-api 的改动，`npm run test:api` 已覆盖 `/api/data` 形状、正常写入、409、settings 与删除备份；再按需用示例库手工确认 AI 与热点日报。

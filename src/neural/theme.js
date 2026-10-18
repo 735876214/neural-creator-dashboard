@@ -15,7 +15,7 @@ export const T = {
     news: '#ffc3d2',
     ghost: '#5f6c96'
   },
-  // 五个星团：色温各有微差（蓝紫 / 青白 / 冷蓝 / 淡金 / 青绿白）
+  // 六个星团：色温各有微差（蓝紫 / 青白 / 冷蓝 / 淡金 / 青绿白 / 粉）
   modules: {
     works: {color: '#bda9ff', warm: '#e6ddff', cool: '#8f7bf0'},
     concepts: {color: '#e2eaff', warm: '#fff6e2', cool: '#9fb6e8'},

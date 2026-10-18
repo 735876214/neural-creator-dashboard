@@ -90,8 +90,8 @@ const source = hasLocal ? 'my-data.local.js' : 'sample.js';
   else ok(`src/data/${source} 结构正确${hasLocal ? '（本机导入数据，不入库）' : '（虚构示例，未发现本机数据）'}`);
 }
 
-// 3. 核心动效：星核、五簇星团与活着的星穹背景是这个看板的核心，不能被删掉或改成静态
-console.log('核心动效（星核与五簇星团）');
+// 3. 核心动效：星核、六簇星团与活着的星穹背景是这个看板的核心，不能被删掉或改成静态
+console.log('核心动效（星核与六簇星团）');
 const home = readFileSync(join(ROOT, 'src/neural/Home.jsx'), 'utf8');
 const graphSrc = readFileSync(join(ROOT, 'src/neural/graph.js'), 'utf8');
 const cosmosSrc = readFileSync(join(ROOT, 'src/neural/Cosmos.jsx'), 'utf8');
@@ -125,8 +125,8 @@ const modules = (graphSrc.match(/export const MODULES = \[([\s\S]*?)\n\];/) || [
 if ((modules.match(/\{id: '/g) || []).length !== 6) fail('graph.js 的 MODULES 应为 6 个模块（6 个星团）');
 else ok('6 个模块 → 6 个星团');
 
-// 3b. 五星座（v6.3）：五个模块 = 五个真实星座，图形来自真实星表，逐帧只做贴图 + 主星闪烁
-console.log('五星座（v6.3）');
+// 3b. 六星座（v6.3）：六个模块 = 六个真实星座，图形来自真实星表，逐帧只做贴图 + 主星闪烁
+console.log('六星座（v6.3）');
 const consSrc = readFileSync(join(ROOT, 'src/neural/constellations.js'), 'utf8');
 const figs = [
   ['真实星座骨架表（d3-celestial · J2000 赤经赤纬）', /constellations\.lines\.json/],
@@ -145,7 +145,7 @@ for (const f of ['src/neural/pages.jsx']) {
   else ok('作品库 / 创作台 / 选题池 三个内页都带星座轨');
 }
 if (!/from '\.\/constellations'/.test(home) || !/figData/.test(home) || !/drawCluster\(canvasRefs/.test(home)) fail('Home.jsx 没有用星座层渲染星团');
-else ok('主视图星团层 = 五星座（烘焙 + 主星闪烁）');
+else ok('主视图星团层 = 六星座（烘焙 + 主星闪烁）');
 for (const f of ['media/orb.mp4', 'media/jellyfish.mp4']) if (existsSync(join(ROOT, 'public', f))) warnings.push(`public/${f} 已不再被引用，可以删除（保留不影响）`);
 
 // 4. 页面与素材
