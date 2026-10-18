@@ -860,6 +860,14 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .set-section h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--gold); letter-spacing: .16em; }
 .set-section .form-row { margin-bottom: 10px; }
 .set-status { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+/* 设置面板的输入控件不在 .form 容器里，需要单独给深色皮肤（否则是浏览器原生白底） */
+.set-section input, .set-section select, .set-section textarea {
+  width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--rule-2);
+  background: rgba(255, 255, 255, .04); color: var(--text); outline: none;
+}
+.set-section select option { background: #161717; }
+.set-section input:focus, .set-section select:focus, .set-section textarea:focus { border-color: rgba(240, 210, 150, .5); }
+.set-section input::placeholder { color: var(--muted); }
 .set-ok { color: var(--mint, #9fe3c0); }
 .set-off { color: var(--muted); }
 .settings-panel .quiet { font-size: 12px; }
