@@ -85,12 +85,12 @@ function Insights({items}) {
 // AI 区块：方法笔记与个人知识库（网页剪藏）显示。
 // note：打标签 + 摘要写回 frontmatter；语义边刷新后重算。
 // personal：调 /api/knowledge/analyze 重跑网页分析（摘要 + 要点 + 标签）。
-function AiPanel({graph, node, onGo, onToast}) {
-  const meta = getMeta();
-  const ai = meta ? meta.ai : null;
+function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn}) {
+  // aiEnabled 由调用方传入（App 拉取 /api/ai/info 的单一事实源，配置保存后即时刷新）；
+  // 不再读 store.data.ai——那份数据在设置保存后不会自动更新。
   const isPersonal = node.kind === 'personal';
   const rel = getFiles()?.[isPersonal ? 'personal:' + node.id.replace(/^personal:/, '') : 'note:' + node.id] || null;
-  if (!isLive() || !ai?.enabled || (isPersonal ? !rel : false)) return null;
+  if (!isLive() || !aiEnabled || (isPersonal ? !rel : false)) return null;
   const [state, setState] = useState({busy: false, msg: '', tags: null, summary: null, related: null});
   const run = (fn, okMsg) => async () => {
     setState(s => ({...s, busy: true, msg: ''}));
@@ -118,7 +118,7 @@ function AiPanel({graph, node, onGo, onToast}) {
         const one = r.result?.find(x => x.id === 'note:' + node.id);
         return one ? {tags: one.tags, summary: one.summary} : {};
       }, '标签与摘要已写入笔记')}>打标签 + 摘要 <em>Tag &amp; summarize</em></button>
-      {ai.embed?.enabled && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
+      {embedOn && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
         const job = await aiRelate();
         const r = await pollJob(job.job.id);
         const edges = r.result?.edges || [];
@@ -150,13 +150,13 @@ function ModelPicker({models, value, onChange}) {
   </select>;
 }
 
-function AskBox({graph, node, onGo}) {
+function AskBox({graph, node, onGo, aiEnabled}) {
   const [q, setQ] = useState('');
   const [res, setRes] = useState(null);
   const [busy, setBusy] = useState(false);
   const [models, setModels] = useState([]);
   const [model, setModel] = useState(pickedModel());
-  const ai = isLive() && getMeta()?.ai?.enabled;
+  const ai = isLive() && !!aiEnabled;
   // 只在第一次挂 AI 时拉一次模型列表
   useEffect(() => { if (ai) aiModels().then(setModels); }, [ai]);
   const choose = id => { setModel(id); setPickedModel(id); };
@@ -449,7 +449,7 @@ function MetricsEditor({node}) {
   </section>;
 }
 
-export function Analysis({graph, node, module, onGo, onAction, onClose}) {
+export function Analysis({graph, node, module, onGo, onAction, onClose, aiEnabled, embedEnabled}) {
   const a = useMemo(() => analyze(graph, node), [graph, node]);
   const color = KINDS[node.kind].color;
   return <div className="analysis glass" style={{'--kc': color}} role="region" aria-label={`${node.title} 的分析`}>
@@ -482,9 +482,9 @@ export function Analysis({graph, node, module, onGo, onAction, onClose}) {
       <Insights items={a.insights}/>
       {node.tags?.length > 0 && <section className="an-section"><h3>话题标签 <em>Topics</em></h3><div className="chip-row">{node.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div></section>}
       {node.kind === 'post' && <MetricsEditor node={node}/>}
-      {(node.kind === 'note' || node.kind === 'personal') && <AiPanel graph={graph} node={node} onGo={onGo}/>}
+      {(node.kind === 'note' || node.kind === 'personal') && <AiPanel graph={graph} node={node} onGo={onGo} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/>}
       <Links graph={graph} node={node} onGo={onGo}/>
     </div>
-    <AskBox graph={graph} node={node} onGo={onGo}/>
+    <AskBox graph={graph} node={node} onGo={onGo} aiEnabled={aiEnabled}/>
   </div>;
 }

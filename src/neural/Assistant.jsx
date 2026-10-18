@@ -1,7 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {askGraph} from './graph';
 import {Icon} from './icons';
-import {isLive, getMeta} from '../data/store';
+import {isLive} from '../data/store';
 import {apiUrl, refreshData} from './persist';
 
 // —— AI 助手（创作台 / 知识库右下角的浮动抽屉）——
@@ -9,7 +9,7 @@ import {apiUrl, refreshData} from './persist';
 // （部署模式 + 配了 AI key 走 /api/ai/ask 的 RAG 带引用；否则回退本地 askGraph 规则检索）。
 const CATS = ['灵感', '制度', '推文'];
 
-export function Assistant({graph, readOnly, showToast, defaultCategory = '制度', goNote}) {
+export function Assistant({graph, readOnly, showToast, defaultCategory = '制度', goNote, aiEnabled: aiProp}) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState('ask'); // ask | upload
   const [q, setQ] = useState('');
@@ -18,8 +18,9 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
   const [cat, setCat] = useState(defaultCategory);
   const [upBusy, setUpBusy] = useState(false);
   const [note, setNote] = useState('');
-  const ai = isLive() && getMeta()?.ai?.enabled;
-  const fileRef = useRef(null);
+  // AI 启用状态单一事实源：由调用方（App）传入——设置面板保存后 onRefresh 已让它即时刷新，
+  // 这里不再各自订阅 store（三份来源会各自陈旧）。
+  const ai = isLive() && !!aiProp;
   const scrollRef = useRef(null);
   useEffect(() => { scrollRef.current?.scrollTo({top: 1e9}); }, [thread, open]);
 
@@ -84,7 +85,7 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
         <div className="as-thread" ref={scrollRef}>
           {!thread.length && <p className="as-hint">{ai
             ? '问任何和笔记库有关的问题：制度、检查结果、灵感、剪藏都可以检索。'
-            : '当前未启用 AI，这里提供本地规则检索；部署模式配置 AI_API_KEY 后可整库问答带引用。'}</p>}
+            : '当前未启用 AI，本地规则检索中。到右上角 ⚙ 设置 → AI 配置里填接口地址与 Key，保存后这里自动切换为整库问答带引用。'}</p>}
           {thread.map((m, i) => m.role === 'q'
             ? <p key={i} className="as-q">{m.text}</p>
             : <div key={i} className="as-a">

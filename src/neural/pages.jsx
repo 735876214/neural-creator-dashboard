@@ -22,7 +22,7 @@ export function PageHead({zh, en, sub, subEn, children}) {
 }
 
 // —— 作品库 Works ——
-export function Library({graph, selected, setSelected, onGo, onAction, onModule}) {
+export function Library({graph, selected, setSelected, onGo, onAction, onModule, aiEnabled, embedEnabled}) {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState('date');
   const rate = p => p.views ? p.saves / p.views : -1;
@@ -61,7 +61,7 @@ export function Library({graph, selected, setSelected, onGo, onAction, onModule}
           : <div className="empty"><Icon name="works" size={30}/><p>作品库还是空的 <em>No works yet</em></p><p className="quiet">把作品笔记放进名字包含「作品 / works」的文件夹，或用 <code>--works</code> 指定 <em>Add work notes to a folder named 作品 / works</em></p></div>)}
         {posts.length > 0 && <p className="source-line"><Icon name="info" size={13}/>{posts.length} 篇作品均为{snapshot.source}；「—」表示未提供 <em>Not provided</em>。</p>}
       </section>
-      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES[0]} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)}/></aside>}
+      {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES[0]} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/></aside>}
     </div>
   </div>;
 }
@@ -88,7 +88,7 @@ function MiniGraph({graph, node}) {
   </svg>;
 }
 
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule, onPublish, onToPost}) {
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule, onPublish, onToPost, aiEnabled}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const [suggest, setSuggest] = useState(null);
@@ -195,7 +195,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         {!node.deg && <p className="empty-line">写下内容或 [[链接]] 后，这里会长出连接。<em>Links appear as you write.</em></p>}
       </aside>}
     </div>
-    <Assistant graph={graph} readOnly={readOnly} showToast={msg => console.info('[assistant]', msg)} goNote={onGo}/>
+    <Assistant graph={graph} readOnly={readOnly} aiEnabled={aiEnabled} showToast={msg => console.info('[assistant]', msg)} goNote={onGo}/>
   </div>;
 }
 
@@ -239,7 +239,7 @@ export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule, readOnly}
 // —— 知识库 Knowledge（个人知识库：灵感 / 制度 / 推文剪藏）——
 const CATS = [['灵感', 'Sparks'], ['制度', 'Policies'], ['推文', 'Clips']];
 
-export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDraft, onEditIdea, showToast}) {
+export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDraft, onEditIdea, showToast, aiEnabled}) {
   const items = useMemo(() => graph.nodes.filter(n => n.kind === 'personal')
     .sort((a, b) => String(b.personal?.clipped || '').localeCompare(String(a.personal?.clipped || ''))), [graph]);
   const [cat, setCat] = useState('灵感');
@@ -362,13 +362,13 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
         </div>
       </section>
     </div>}
-    <Assistant graph={graph} readOnly={readOnly} showToast={showToast} defaultCategory="制度" goNote={onGraph}/>
+    <Assistant graph={graph} readOnly={readOnly} aiEnabled={aiEnabled} showToast={showToast} defaultCategory="制度" goNote={onGraph}/>
   </div>;
 }
 
 
 // —— 方法库 Methods（kind: note 的内页；新建笔记入口在这里）——
-export function Methods({graph, readOnly, onGo, onAction, onModule, showToast, onNew}) {
+export function Methods({graph, readOnly, onGo, onAction, onModule, showToast, onNew, aiEnabled, embedEnabled}) {
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(null);
   const items = useMemo(() => graph.nodes.filter(n => n.kind === 'note')
@@ -422,8 +422,9 @@ export function Methods({graph, readOnly, onGo, onAction, onModule, showToast, o
         </div>
       </section>
       {node && <aside className="library-analysis" key={node.id}>
-        <Analysis graph={graph} node={node} module={mod} onGo={onGo} onAction={onAction} onClose={() => setSel(null)}/>
+        <Analysis graph={graph} node={node} module={mod} onGo={onGo} onAction={onAction} onClose={() => setSel(null)} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/>
       </aside>}
     </div>
+    <Assistant graph={graph} readOnly={readOnly} aiEnabled={aiEnabled} showToast={showToast} defaultCategory="灵感" goNote={onGo}/>
   </div>;
 }

@@ -7,7 +7,7 @@
 //
 // 数据规矩（与 AGENTS.md 一致）：全部经 /api/settings 写 NAS 的 vault/.dashboard/settings.json，
 // 浏览器不持久化；secret 永不回传前端（服务端 GET 时抹掉，只报 configured）。
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {aiModels} from './sync.js';
 import {saveSettings, apiUrl, saveGoal} from './persist';
@@ -28,9 +28,12 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
     try {
       const j = await aiModels();
       setModels(j.map(m => m.id || m).filter(Boolean));
-    } catch { setModelsErr('拉不到模型列表：请检查接口地址与 key'); setModels([]); }
+      return j;
+    } catch { setModelsErr('拉不到模型列表：请检查接口地址与 key'); setModels([]); return []; }
   };
-  useEffect(() => { if (ai?.enabled) loadModels(); }, [ai?.enabled, settings?.aiBaseUrl, settings?.aiKeyConfigured]);
+  // 连接刚保存时 connect 自己拉列表并提示，effect 跳过一次，避免两路并发竞态覆盖
+  const skipEffect = useRef(false);
+  useEffect(() => { if (ai?.enabled) { if (skipEffect.current) { skipEffect.current = false; return; } loadModels(); } }, [ai?.enabled, settings?.aiBaseUrl, settings?.aiKeyConfigured]);
 
   // 第一段：保存接口地址 + key（key 留空 = 不改动）
   const connect = async () => {
@@ -40,12 +43,12 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
       if (key.trim()) patch.aiApiKey = key.trim();
       const next = await saveSettings(patch);
       setKey('');
+      skipEffect.current = true; // onRefresh 会让 settings 变化触发 effect，这次由本函数自己拉
       onRefresh?.(next);
       // 当场重拉模型列表，按结果提示——不要依赖间接刷新链路（时序不可靠，文案会先于事实）
-      const j = await aiModels().catch(() => []);
-      setModels(j.map(m => m.id || m).filter(Boolean));
+      const j = await loadModels();
       if (j.length) setMsg('已连接，模型列表已拉到——选一个作为全局默认模型 · Connected');
-      else { setModelsErr('拉不到模型列表：请检查接口地址与 key'); setMsg('已保存连接，但拉不到模型列表'); }
+      else setMsg('已保存连接，但拉不到模型列表');
     } catch (e) { setMsg('保存失败：' + e.message); }
     finally { setBusy(false); }
   };
@@ -190,7 +193,12 @@ export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose
   const [tab, setTab] = useState('ai');
   // settings 是异步拉取的（打开弹窗时可能还没回来）：回值到位后同步全局模型下拉，
   // 否则下拉显示为空、动一下就会把 null 存回去覆盖 NAS 上已配置的模型。
-  useEffect(() => setModel(settings?.aiModel || ''), [settings?.aiModel]);
+  // 用户在本地已保存过（savedModelRef）时以本地为准，避免回流把刚保存的值打回旧值。
+  const savedModelRef = useRef(undefined);
+  useEffect(() => {
+    const sv = settings?.aiModel || '';
+    if (savedModelRef.current === undefined) setModel(sv);
+  }, [settings?.aiModel]);
 
   const tabs = [
     ['ai', 'AI 配置', 'AI'],
@@ -201,8 +209,9 @@ export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose
   const saveModel = async id => {
     const prev = model;
     setModel(id); setModelMsg('');
+    savedModelRef.current = id; // 本地已保存的值：settings 回流同步时不要覆盖它
     try { await saveSettings({aiModel: id || null}); }
-    catch (e) { setModel(prev); setModelMsg('模型保存失败：' + e.message); } // 回滚 UI 并展示错误
+    catch (e) { setModel(prev); savedModelRef.current = prev; setModelMsg('模型保存失败：' + e.message); } // 回滚 UI 并展示错误
   };
 
   return <div className="settings-panel">

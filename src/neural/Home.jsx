@@ -466,7 +466,7 @@ function Dock({graph, onGo}) {
   </div>;
 }
 
-export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced}) {
+export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced, aiEnabled, embedEnabled}) {
   const stageRef = useRef(null);
   const [size, setSize] = useState({w: 1280, h: 760});
   const [paused, setPaused] = useState(false);
@@ -568,7 +568,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
     {stage === 'module' && <p className="module-hint">选择一颗恒星查看全部分析 · <em>Select a star to see its full analysis</em></p>}
 
     {node && <aside className="analysis-wrap" key={sel}>
-      <Analysis graph={graph} node={node} module={m} onGo={go} onAction={onAction} onClose={() => setFocus({mod, sel: null})}/>
+      <Analysis graph={graph} node={node} module={m} onGo={go} onAction={onAction} onClose={() => setFocus({mod, sel: null})} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/>
     </aside>}
   </section>;
 }

@@ -201,7 +201,16 @@ function App() {
     fetch(persist.apiUrl('/api/settings')).then(r => r.json()).then(j => { if (on) setSettingsLive(j); }).catch(() => {});
     fetch(persist.apiUrl('/api/ai/info')).then(r => r.json()).then(j => { if (on) setAiInfo(j); }).catch(() => {});
     return () => { on = false; };
-  }, [modal, settingsRev]);
+  }, [modal, settingsRev, dataRev]); // dataRev：AI 配置经 setApiData 更新后，aiEnabled 状态即时下传各页
+
+  // AI 启用状态（Assistant / AiPanel 的单一事实源）：挂载即拉，配置保存（settingsRev）或
+  // store 任何变化（dataRev，含外部改动自动刷新 / refreshData）后重拉——aiEnabled 状态实时
+  useEffect(() => {
+    if (!live) return;
+    let on = true;
+    fetch(persist.apiUrl('/api/ai/info')).then(r => r.json()).then(j => { if (on) setAiInfo(j); }).catch(() => {});
+    return () => { on = false; };
+  }, [live, settingsRev, dataRev]);
 
   const close = useCallback(() => setModal(null), []);
   const signOut = useCallback(async () => {
@@ -340,14 +349,14 @@ function App() {
 
     <main>
       {page === 'home' && <>
-        <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced}/>
+        <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled}/>
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} monthCount={monthPosts.length}/>
       </>}
-      {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule}/>}
-      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost}/>}
+      {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled}/>}
+      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost} aiEnabled={aiInfo?.enabled}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onModule={goModule} readOnly={!live} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
-      {page === 'methods' && <Methods graph={graph} readOnly={!live} onGo={openInGraph} onAction={onAction} onModule={goModule} showToast={setToast} onNew={() => setModal('new-note')}/>}
-      {page === 'knowledge' && <Knowledge graph={graph} readOnly={!live} onGraph={openInGraph} onModule={goModule} onAction={onAction} onNewDraft={newDraft} onEditIdea={editIdea} ideas={ideas} drafts={drafts} onDeleteDraft={deleteDraft} showToast={setToast}/>}
+      {page === 'methods' && <Methods graph={graph} readOnly={!live} onGo={openInGraph} onAction={onAction} onModule={goModule} showToast={setToast} onNew={() => setModal('new-note')} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled}/>}
+      {page === 'knowledge' && <Knowledge graph={graph} readOnly={!live} onGraph={openInGraph} onModule={goModule} onAction={onAction} onNewDraft={newDraft} onEditIdea={editIdea} ideas={ideas} drafts={drafts} onDeleteDraft={deleteDraft} showToast={setToast} aiEnabled={aiInfo?.enabled}/>}
     </main>
 
     <footer className="site-foot">
@@ -408,7 +417,12 @@ function App() {
         monthCount={monthPosts.length}
         readOnly={!live}
         onClose={close}
-        onRefresh={() => setSettingsRev(v => v + 1)}
+        onRefresh={() => {
+          setSettingsRev(v => v + 1);
+          // store.data.ai（Assistant / AiPanel 读的那份）只随 setApiData 更新；
+          // .dashboard 在 vault 指纹之外、轮询不会自动触发，这里必须显式重拉。
+          persist.refreshData().catch(() => {});
+        }}
       />
       {live && <div className="form-actions signout-row">
         <button className="pill ghost" onClick={signOut}>退出登录 <em>Sign out</em></button>
