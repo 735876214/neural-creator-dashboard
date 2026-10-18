@@ -89,7 +89,7 @@ function App() {
   const [drafts, setDrafts] = useState(seedDrafts);
   const [active, setActive] = useState(() => drafts[0]?.id);
   const [focus, setFocus] = useState({mod: null, sel: null});
-  const [libSel, setLibSel] = useState(posts[1].id);
+  const [libSel, setLibSel] = useState(posts[1]?.id ?? null);
   const [modal, setModal] = useState(null);
   const [editing, setEditing] = useState(null);
   const [goalInput, setGoalInput] = useState(String(goal));
