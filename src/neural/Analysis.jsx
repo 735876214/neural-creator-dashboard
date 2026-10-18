@@ -124,8 +124,9 @@ function AiPanel({graph, node, onGo, onToast}) {
         const edges = r.result?.edges || [];
         // 写入运行时仓：主图谱立即重建，语义边不用刷新页面才出现。
         setSemantic(edges);
-        const mine = edges.filter(e => e.a === 'note:' + node.id || e.b === 'note:' + node.id);
-        return {related: mine.map(e => ({id: e.a === 'note:' + node.id ? e.b : e.a, sim: e.sim}))};
+        // 语义边已覆盖全部内容类型：node.id 就是图谱完整 id（post:/note:/idea:/draft:/personal:）
+        const mine = edges.filter(e => e.a === node.id || e.b === node.id);
+        return {related: mine.map(e => ({id: e.a === node.id ? e.b : e.a, sim: e.sim}))};
       }, '语义关联已更新')}>语义关联 <em>Semantic links</em></button>}
       <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
         const r = await aiIdeas([rel]);

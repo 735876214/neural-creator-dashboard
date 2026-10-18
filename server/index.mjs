@@ -848,15 +848,22 @@ async function route(req, res, url) {
     if (!embedEnabled()) return json(res, 501, {error: 'embedding 未启用：请设置 EMBED_API_KEY 与 EMBED_MODEL（DeepSeek 没有 embedding 接口）'});
     const {threshold = 0.82} = await readBody(req);
     const d = loadData(0);
-    const items = d.notes;
+    // 语义边覆盖全部内容（obsidian-independence P1）：方法笔记 / 日报 / 个人知识库 /
+    // 作品 / 选题 / 草稿，id 前缀与前端图谱一致——跨星团的「灵感↔作品」「制度↔通报」都能连上。
+    const items = [
+      ...d.notes.map(n => ({id: noteNodeId(n), title: n.title, text: n.title + '\n' + n.body, kind: n.kind})),
+      ...d.works.map(w => ({id: 'post:' + w.post.id, title: w.post.title, text: w.post.title + '\n' + (w.content?.body || ''), kind: 'post'})),
+      ...d.ideas.map(i => ({id: 'idea:' + i.id, title: i.title, text: (i.title || '') + '\n' + (i.note || ''), kind: 'idea'})),
+      ...d.drafts.map(x => ({id: 'draft:' + x.id, title: x.title, text: (x.title || '') + '\n' + (x.body || ''), kind: 'draft'}))
+    ];
     const cached = index.aiCache();
     const job = runJob('relate', items.length, async progress => {
       const model = process.env.EMBED_MODEL;
       const have = new Map(index.embeddings(model).map(e => [e.id, e]));
       for (const n of items) {
-        const id = noteNodeId(n), h = hashOf(n.body);
+        const id = n.id, h = hashOf(n.text);
         if (have.get(id)?.hash !== h) {
-          const [vec] = await embed([n.title + '\n' + n.body.slice(0, 2000)]);
+          const [vec] = await embed([n.text.slice(0, 2000)]);
           index.putEmbedding(id, model, vec, h);
         }
         progress();
@@ -868,7 +875,7 @@ async function route(req, res, url) {
         if (sim >= threshold) edges.push({a: vecs[i].id, b: vecs[j].id, sim: Math.round(sim * 1000) / 1000});
       }
       edges.sort((x, y) => y.sim - x.sim);
-      return {edges: edges.slice(0, 200), threshold};
+      return {edges: edges.slice(0, 400), threshold};
     }, {cache: true});
     return json(res, 202, {job});
   }
