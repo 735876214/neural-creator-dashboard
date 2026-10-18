@@ -24,4 +24,8 @@ notes-vault/
 
 # 服务端 .trash 留底（端到端测试对示例库跑写路径时产生）
 examples/vault/.trash/
+examples/vault/.dashboard/
 .note-api.env
+
+# nginx Basic Auth 密码文件（含密码哈希）
+.htpasswd

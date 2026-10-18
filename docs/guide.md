@@ -226,14 +226,14 @@ notes-vault/
 | `DATA_DIR` | `.note-api` | SQLite 与运行时数据目录（可删可重建；看板设置不在里面，见 `vault/.dashboard/settings.json`） |
 | `PORT` / `HOST` | `8787` / `0.0.0.0` | 监听地址 |
 | `STATIC_DIR` | 无 | 同时托管 `dist/`，省掉 nginx |
-| `API_TOKEN` | 无 | 设置后所有 `/api` 需 `Authorization: Bearer <token>` |
+| `API_TOKEN` | 无 | 仅用于 curl / 脚本等非浏览器客户端；浏览器看板不携带，填了会导致看板请求 401。看板部署用 nginx Basic Auth |
 | `VAULT_GIT` | 开 | vault 是 git 仓库时每次写入自动 commit；`0` 关闭 |
-| `MAX_BODY` | 2 MB | 请求体上限 |
+| `MAX_BODY` | 2 MB | 请求体上限（字节）；compose 部署版设为 4 MB，与 nginx `client_max_body_size 4m` 对齐 |
 | `AI_PROTOCOL` | `openai` | 或 `anthropic` |
 | `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` | DeepSeek | chat 网关与默认模型 |
 | `AI_MODEL_ASK/ANALYZE/IDEAS/NEWS` | 回落 `AI_MODEL` | 任务级模型覆盖 |
-| `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_MODEL` / `EMBED_PROTOCOL` | 跟随 chat | embedding（DeepSeek 无 embedding，需另配，如硅基流动 bge-m3） |
-| `AI_TIMEOUT` | 60s | 单次 AI 调用超时 |
+| `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_MODEL` / `EMBED_PROTOCOL` | 跟随 chat | embedding（DeepSeek 无 embedding，需另配，如硅基流动 bge-m3）；Cloudflare 方案还需 `CF_ACCOUNT_ID` |
+| `AI_TIMEOUT` / `AI_CONCURRENCY` | 60s / 4 | 单次 AI 调用超时（毫秒）与并发上限 |
 | `NEWS_SOURCE` / `NEWS_HOUR` / `NEWS_CRON` | 见上 | 热点日报 |
 
 ### 6.2 前端变量

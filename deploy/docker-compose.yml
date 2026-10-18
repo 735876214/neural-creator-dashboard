@@ -2,10 +2,13 @@
 #
 # 用法：
 #   1. 本机构建前端：npm run build
-#   2. 把整个项目目录 + notes-vault/ 放到 NAS，进入 deploy/ 目录：docker compose up -d
+#   2. 把整个项目目录 + notes-vault/ 放到 NAS，进入 deploy/ 目录：
+#        cp .env.example .env
+#        htpasswd -bc .htpasswd 用户名
+#        docker compose up -d
 #   3. 打开 http://<NAS-IP>:8088
 #
-# 首次使用前：复制 .env.example 为 .env 并填写 AI_API_KEY 等。
+# .env 会整体注入 note-api；AI、热点、embedding 等变量都从这里读。
 services:
   note-api:
     build:
@@ -13,26 +16,23 @@ services:
       dockerfile: server/Dockerfile
     container_name: neural-note-api
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
+      # 容器内固定路径与端口；其余变量（AI / NEWS / EMBED / MAX_BODY…）来自 .env
       VAULT_DIR: /vault
       DATA_DIR: /data
       PORT: "8787"
-      # —— AI（可选）：不填也能用，看板只是没有 AI 区块 ——
-      AI_API_KEY: ${AI_API_KEY:-}
-      AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com/v1}
-      AI_MODEL: ${AI_MODEL:-deepseek-chat}
-      EMBED_API_KEY: ${EMBED_API_KEY:-}
-      EMBED_BASE_URL: ${EMBED_BASE_URL:-https://api.siliconflow.cn/v1}
-      EMBED_MODEL: ${EMBED_MODEL:-}
-      # —— 访问控制：强烈建议设置（内网也一样）——
-      API_TOKEN: ${API_TOKEN:-}
-      # vault 是 git 仓库时每次写入自动提交（误写可回滚）
-      VAULT_GIT: "1"
+      HOST: 0.0.0.0
+      # vault 是 git 仓库时每次写入自动提交（误写可回滚）；0 关闭
+      VAULT_GIT: ${VAULT_GIT:-1}
+      # 与 nginx 的 client_max_body_size 4m 对齐（单位：字节）
+      MAX_BODY: ${MAX_BODY:-4194304}
+      # .env 是共享的；不把 Tailscale 凭据带进 API 容器
+      TS_AUTHKEY: ""
     volumes:
       - ../notes-vault:/vault
       - note-api-data:/data
-      # 托管前端构建产物（先在本机 npm run build 再传上来）
-      - ../dist:/app/dist:ro
     ports:
       - "127.0.0.1:8787:8787"   # 只绑本机回环，外部一律走 web 反代
 

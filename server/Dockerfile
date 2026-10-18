@@ -7,7 +7,7 @@ FROM node:24-alpine
 # 需要 Node 22.5+ 才有 node:sqlite；24 起不用加 --experimental-sqlite
 WORKDIR /app
 
-# 只拷服务端：前端是构建好之后单独挂进来的静态文件
+# 只拷服务端：前端默认由 nginx 托管；需要让 note-api 直接托管时设置 STATIC_DIR 并挂载 dist。
 COPY server ./server
 COPY package.json ./
 

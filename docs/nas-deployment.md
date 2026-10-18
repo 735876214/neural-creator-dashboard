@@ -80,6 +80,8 @@ docker compose up -d
 ```
 
 > 极空间的 Container Manager 也可以图形化导入这个 compose 文件。
+>
+> `.env` 会整体注入 note-api，AI / 热点 / embedding 等变量都不用改 compose。看板本身用 nginx Basic Auth 认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
 
 浏览器打开 `http://<NAS-IP>:8088`，输入刚设的 Basic Auth 密码，星核亮起来就是成功了。
 
