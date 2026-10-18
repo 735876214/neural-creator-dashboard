@@ -2,15 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "dev8788",
+      "name": "web-temp",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["--env-file-if-exists=.env.dev8788", "node_modules/vite/bin/vite.js", "--port", "5177"],
+      "runtimeArgs": ["node_modules/vite/bin/vite.js", "--port", "5177", "--strictPort"],
       "port": 5177
-    },
-    {
-      "name": "api8788",
-      "url": "http://127.0.0.1:8788",
-      "port": 8788
     }
   ]
 }

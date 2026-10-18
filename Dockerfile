@@ -1,7 +1,19 @@
-# note-api：读写笔记库的 HTTP 服务，同时可以托管前端构建产物 dist/。
+# note-api：读写笔记库的 HTTP 服务，同时托管看板前端（多阶段构建，NAS 上一键 compose up）。
 #
-# 服务端只用 Node 自带模块，唯一的运行时依赖是 pdfjs-dist（上传 PDF 的文本提取，
-# 纯 JS 无原生编译）。npm install --omit=dev 只装它，镜像仍然很小。
+# 阶段一在容器里 npm install + vite build 出 dist/——NAS 上 git clone 后不需要本机装
+# Node、也不需要手动上传构建产物，docker compose up -d --build 一步到位。
+# 阶段二只装运行时依赖（pdfjs-dist，纯 JS 无原生编译），镜像仍然很小。
+# 前端由 note-api 以 STATIC_DIR 自托管（登录走 auth_request 同一套会话，未登录 401，
+# 由前端 boot.js 跳 login.html），不再需要单独的 nginx 容器。
+FROM node:24-alpine AS web
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm install --no-audit --no-fund
+COPY index.html vite.config.js ./
+COPY public ./public
+COPY src ./src
+RUN npm run build
+
 FROM node:24-alpine
 
 # VAULT_GIT=1 时 note-api 会调用 git 做自动提交；alpine 基础镜像不自带 git。
@@ -15,17 +27,18 @@ RUN apk add --no-cache git \
 # 需要 Node 22.5+ 才有 node:sqlite；24 起不用加 --experimental-sqlite
 WORKDIR /app
 
-# 只拷服务端：前端默认由 nginx 托管；需要让 note-api 直接托管时设置 STATIC_DIR 并挂载 dist。
+# 只拷服务端与构建好的前端
 COPY server ./server
 COPY package.json ./
-# 运行时依赖只有 pdfjs-dist（react / vite 都在 devDependencies，不会被装进镜像）
 RUN npm install --omit=dev --no-audit --no-fund
+COPY --from=web /build/dist ./dist
 
 ENV NODE_ENV=production \
     PORT=8787 \
     HOST=0.0.0.0 \
     VAULT_DIR=/vault \
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    STATIC_DIR=/app/dist
 
 EXPOSE 8787
 

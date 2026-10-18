@@ -173,12 +173,34 @@ for (const [label, re] of [
   ['HttpOnly 会话 Cookie', /HttpOnly; SameSite=Lax/],
   ['登录失败限流', /LOGIN_MAX/]
 ]) { if (!re.test(serverSrc)) fail(`note-api 缺少：${label}`); else ok(label); }
-const nginxSrc = readFileSync(join(ROOT, 'nginx.conf'), 'utf8');
-if (!/auth_request \/_auth/.test(nginxSrc) || !/location = \/login\.html/.test(nginxSrc)) fail('部署版 nginx 必须用 auth_request 保护静态资源，并放行 login.html');
-else ok('nginx auth_request 保护静态资源、放行登录页');
+if (!/function bootstrapAuth/.test(serverSrc) || !/bootstrapAuth\(\)/.test(serverSrc)) fail('note-api 缺少 auth 自举（随机密码生成）');
+else ok('note-api auth 自举（无 DASHBOARD_PASSWORD 时生成随机密码）');
 const bootSrc = readFileSync(join(ROOT, 'src/neural/boot.js'), 'utf8');
 if (!/\/api\/session/.test(bootSrc)) fail('boot.js 没有在取数前检查 /api/session');
 else ok('boot.js 取数前检查登录状态');
+
+// 3d. 一键部署：compose 引用的文件都在，Dockerfile 是多阶段构建
+console.log('一键部署');
+const composeSrc = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8');
+const composeNeeds = ['Dockerfile', 'server', 'src', 'public', 'package.json', 'notes-vault'];
+for (const f of composeNeeds) {
+  const p = join(ROOT, f);
+  if (!existsSync(p)) fail(`compose 部署缺文件：${f}`);
+}
+const dockerfileSrc = readFileSync(join(ROOT, 'Dockerfile'), 'utf8');
+if (!/FROM .* AS web/.test(dockerfileSrc) || !/npm run build/.test(dockerfileSrc) || !/COPY --from=web/.test(dockerfileSrc)) {
+  fail('根 Dockerfile 不是多阶段构建（缺 web 阶段 / npm run build / COPY --from=web）');
+} else ok('Dockerfile 多阶段：镜像内构建前端');
+if (!/STATIC_DIR=\/app\/dist/.test(dockerfileSrc)) fail('Dockerfile 未设置 STATIC_DIR=（note-api 自托管前端）');
+else ok('note-api STATIC_DIR 自托管前端');
+if (/neural-auth|nginx\.conf/.test(composeSrc)) fail('compose 仍引用已移除的 auth 容器或 nginx.conf');
+else ok('compose 无 auth 容器 / nginx 残留引用');
+for (const f of ['deploy/.env.example', 'deploy/docker-compose.dev.yml']) {
+  if (!existsSync(join(ROOT, f))) fail(`缺少 ${f}`);
+}
+const envSrc = readFileSync(join(ROOT, 'deploy/.env.example'), 'utf8');
+if (/logs auth/.test(envSrc)) fail('.env.example 仍在引导查看已删除的 auth 容器日志');
+else ok('.env.example 与单容器 compose 一致');
 
 // 4. 页面与素材
 console.log('页面与素材');

@@ -1,13 +1,16 @@
 import React, {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {seedIdeas, seedDrafts, snapshot, settings, isLive} from '../data';
-import {subscribe as subscribeData} from '../data/store.js';
+import {subscribe as subscribeData, getFiles} from '../data/store.js';
 import {posts, monthPosts} from './works';
 import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, MODULES} from './graph';
 import {Home} from './Home';
 import {Cosmos} from './Cosmos';
 import {Library, Drafts, Ideas, Knowledge} from './pages';
+import {PublishDialog} from './PublishDialog';
+import {NewNoteModal, PublishModal} from './NoteModal';
+import {insertImageAtCursor} from './NoteModal';
 import {Count} from './Analysis';
 import {Icon} from './icons';
 import {T} from './theme';
@@ -215,7 +218,35 @@ function App() {
     if (a.type === 'ideaToDraft') toDraft(a.idea);
     if (a.type === 'url') window.open(a.url, '_blank', 'noopener');
     if (a.type === 'snapshot') window.open(persist.apiUrl('/api/knowledge/snapshot?path=' + encodeURIComponent(a.path)), '_blank', 'noopener');
+    if (a.type === 'publish') publishDraft(a.draftId, a.platform);
   }, [graph, drafts, ideas]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 半自动发布：补全正文（看板缓存截断过）→ 打开发布对话框
+  function publishDraft(draftId, platform) {
+    if (!live) { setToast('未连接 NAS，当前为只读演示 · Read-only (no NAS)'); return; }
+    const draft = draftsRef.current.find(x => x.id === draftId);
+    if (!draft) return;
+    setModal({publish: {draftId, platform}});
+    persist.hydrateDraft(draftId).then(full => {
+      if (!full) return;
+      setDrafts(list => list.map(x => x.id === draftId && (x.body ?? '') === draft.body ? {...x, body: full.body} : x));
+    }).catch(() => {});
+  }
+  // 草稿 → 作品：打开发布表单（移动文件 + 可选指标），作品唯一的创建入口。
+  // 路径从 /api/data 的 files 映射反查（draft:<id> → vault 相对路径），未落盘的草稿没有 path。
+  function toPost(draft) {
+    if (!live) { setToast('未连接 NAS，当前为只读演示 · Read-only (no NAS)'); return; }
+    const path = getFiles()['draft:' + draft.id] || null;
+    if (!path) { setToast('草稿还没同步到 NAS，等保存完成后再发布 · Not synced yet'); return; }
+    setModal({toPost: {path, title: draft.title}});
+  }
+  // 回填保存：更新草稿对象并走同一条防抖保存管线（platform/url/platformId/syncedAt 随 fm 落盘）
+  function savePublishBack(published) {
+    setDrafts(list => list.map(x => x.id === published.id ? published : x));
+    onDraftDirty(published);
+    setToast('发布来源已写入草稿，发布后同名作品会自动带上 · Source saved');
+    setModal(null);
+  }
   // 内页星座轨 / 标签的点击：本模块有内页就直接切页，没有就回工作台并展开该星座
   const goModule = useCallback(id => {
     const m = MODULES.find(x => x.id === id);
@@ -234,6 +265,7 @@ function App() {
       <nav aria-label="主导航">{navs.map(([id, zh, en]) => <button key={id} className={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}>{zh}<em>{en}</em></button>)}</nav>
       <div className="top-actions">
         <button className="pill primary" onClick={() => newDraft()} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="plus" size={14}/>新建草稿 <em>New</em></button>
+        <button className="pill ghost" onClick={() => setModal('new-note')} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="methods" size={14}/>新建笔记 <em>Note</em></button>
         <button className="avatar" onClick={() => setModal('about')} aria-label={`${snapshot.account}，查看账号与数据来源`}><img src={asset(CONFIG.avatar)} alt=""/></button>
       </div>
     </header>
@@ -251,7 +283,7 @@ function App() {
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }}/>
       </>}
       {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule}/>}
-      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule}/>}
+      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onModule={goModule} readOnly={!live} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
       {page === 'knowledge' && <Knowledge graph={graph} readOnly={!live} onGraph={openInGraph} onModule={goModule} onAction={onAction} onNewDraft={newDraft} onEditIdea={editIdea} ideas={ideas} drafts={drafts} onDeleteDraft={deleteDraft} showToast={setToast}/>}
     </main>
@@ -323,6 +355,22 @@ function App() {
       </div>
     </Modal>}
     {modal?.read && <ReadModal node={modal.read} onClose={close} editable={live}/>}
+    {modal === 'new-note' && <NewNoteModal onClose={close} onDone={path => { setModal(null); setToast('方法笔记已创建（05-方法库/），刷新后进图谱 · Note created'); location.reload(); }}/>}
+    {modal?.toPost && (() => {
+      const draft = drafts.find(x => x.title === modal.toPost.title);
+      if (!draft) return null;
+      return <PublishModal draft={{...draft, path: modal.toPost.path}} onClose={close}
+        onDone={path => { setModal(null); setToast('作品已生成（02-作品库/），正在刷新 · Post created'); location.reload(); }}/>;
+    })()}
+    {modal?.publish && (() => {
+      const draft = drafts.find(x => x.id === modal.publish.draftId);
+      if (!draft) return null;
+      return <Modal title="发布此稿" en="Publish" onClose={close} wide>
+        <PublishDialog draft={draft} defaultPlatform={modal.publish.platform}
+          sourcePlatform={ideas.find(i => i.id === draft.source)?.platform}
+          onClose={close} onSave={savePublishBack}/>
+      </Modal>;
+    })()}
   </div>;
 }
 
@@ -348,6 +396,7 @@ function renderNewsBody(body) {
 // 方法笔记 / 个人知识库 / 作品的阅读弹窗。部署模式下提供「编辑正文」：拉原文 → textarea → 保存落盘。
 function ReadModal({node, onClose, editable}) {
   const isNote = node.kind === 'note' || node.kind === 'personal';
+  const editArea = React.useRef(null);
   const personal = node.kind === 'personal' ? node.personal || {} : null;
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(node.body || '');
@@ -403,7 +452,18 @@ function ReadModal({node, onClose, editable}) {
         </div>
       : <div className="reader">
           <p className="quiet">{node.path} · 保存前会比对修改时间，不会静默覆盖别人的改动 <em>Conflict-safe</em></p>
-          <textarea className="reader-edit" value={text} onChange={e => setText(e.target.value)} rows={16} aria-label="编辑笔记正文" autoFocus/>
+          <div className="reader-edit-row">
+            <textarea ref={editArea} className="reader-edit" value={text} onChange={e => setText(e.target.value)} rows={16} aria-label="编辑笔记正文" autoFocus/>
+            {editable && <label className="img-insert" title="上传图片并插入 ![[ ]]">
+              <input type="file" accept="image/*" className="visually-hidden" onChange={async e => {
+                const f = e.target.files?.[0]; e.target.value = '';
+                if (!f) return;
+                const err = await insertImageAtCursor(editArea, f, setText);
+                if (err) setErr(err);
+              }}/>
+              <button type="button" className="icon-btn" onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片"><Icon name="save" size={14}/></button>
+            </label>}
+          </div>
           {err && <p className="quiet" role="alert">{err}</p>}
           <div className="form-actions">
             <button className="pill ghost" onClick={() => { setEditing(false); setErr(''); }} disabled={busy}>取消 <em>Cancel</em></button>

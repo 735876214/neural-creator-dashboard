@@ -5,19 +5,19 @@
 #   终端 2：npm run dev                                               # 前端 :5173，/api 自动代理到 8787
 #
 # 与部署版（docker-compose.yml）的区别：
-#   * 只有 note-api，没有 nginx / syncthing / tailscale——开发时不需要它们；
+#   * 只有 note-api——开发时不需要 NAS 上的登录自举与静态托管之外的东西；
 #   * 前端不进容器：vite 的热更新在容器里没法用；
 #   * 索引用命名卷（见下方 volume 说明）；裸进程 npm run api 才用仓库里的 .note-api/。
 #
 # AI / 热点 / embedding 变量放 ../.note-api.env（已在 .gitignore，不会提交）：
-#   cp deploy/.env.example .note-api.env   # 再删掉 TS_AUTHKEY 等部署专用项
+#   cp deploy/.env.example .note-api.env   # 再删掉部署专用项
 # 注意：env 里的地址如果写 127.0.0.1，在容器里指的是容器自己——
 # 指向宿主机服务时要用 host.docker.internal，局域网设备（如 192.168.0.95）不受影响。
 services:
   note-api:
     build:
       context: ..
-      dockerfile: server/Dockerfile
+      dockerfile: Dockerfile
     container_name: neural-note-api-dev
     restart: unless-stopped
     env_file:
@@ -28,6 +28,8 @@ services:
       PORT: "8787"
       HOST: 0.0.0.0
       VAULT_GIT: "1"
+      # 开发时由 npm run dev 提供前端（热更新），关闭镜像内静态托管
+      STATIC_DIR: ""
     volumes:
       - ../notes-vault:/vault
       # 索引用命名卷而不是挂载仓库目录：Docker Desktop 的 Windows 挂载卷（gRPC-FUSE）

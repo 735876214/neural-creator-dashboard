@@ -6,7 +6,7 @@
 
 创作神经网络看板：React 19 + Vite 7 的纯前端页面，把作品、方法笔记、选题、草稿推导成一张神经网络图谱。纯静态模式不联网、不调用 AI；部署模式由 note-api 读写 NAS 上的 vault，业务数据不保存在浏览器。
 
-> **部署模式（deploy）**：项目有两种运行类型——部署（后端 note-api 读写 vault，见 `docs/nas-deployment.md` 与仓库根的 `docker-compose.yml` / `nginx.conf`，环境变量模板 `deploy/.env.example`）和开发（本机 `docker-compose.dev.yml` + `npm run dev`）。部署模式引入 note-api 服务（`server/`）与可选的 AI 能力（`server/ai.mjs`，OpenAI 兼容接口）。纯静态行为保留：`src/neural/boot.js` 先尝试 `fetch('/api/data')`，取不到就回退本地数据（示例或 `npm run import` 的快照）。AI key 只存在于服务端环境变量，绝不进前端 bundle。
+> **部署模式（deploy）**：项目有两种运行类型——部署（note-api 单容器读写 vault，见 `docs/nas-deployment.md` 与仓库根的 `docker-compose.yml` + 多阶段 `Dockerfile`，环境变量模板 `deploy/.env.example`）和开发（本机 `deploy/docker-compose.dev.yml` + `npm run dev`）。部署模式引入 note-api 服务（`server/`）与可选的 AI 能力（`server/ai.mjs`，OpenAI 兼容接口）。数据全部保存在 NAS 本地，修改入口统一为看板前端，不提供外网访问与多设备同步。纯静态行为保留：`src/neural/boot.js` 先尝试 `fetch('/api/data')`，取不到就回退本地数据（示例或 `npm run import` 的快照）。AI key 只存在于服务端环境变量，绝不进前端 bundle。
 
 ## 命令
 
@@ -37,7 +37,7 @@
 ## 数据字段（`src/data/*.js` 的导出）
 
 - `snapshot`：`account`、`followers`、`capturedAt`、`publishedFrom`、`publishedTo`、`source`
-- `posts`：`id`、`title`、`date`（`YYYY-MM-DD HH:mm`）、`views`（数字，缺失写 0）、`likes`、`comments`、`saves`、`shares`、`follows`、`impressions`、`ctr`、`duration`（缺失写 `null`）
+- `posts`：`id`、`title`、`date`（`YYYY-MM-DD HH:mm`）、`views`（数字，缺失写 0）、`likes`、`comments`、`saves`、`shares`、`follows`、`impressions`、`ctr`、`duration`（缺失写 `null`）、`platform` / `url` / `platformId` / `syncedAt`（发布来源，半自动发布回填，均可选）
 - `postContent`：与 `posts` 按 `title` 对应，`body`、`tags`、`media`（`images` / `video`）
 - `notes`：`id`、`title`、`path`（方法笔记形如 `05-方法库 methods/<子目录>/<文件名>.md`；AI 热点日报形如 `00-AI热点/YYYY-MM-DD.md` 并带 `kind: 'news'`）、`body`、`tags`（可选，frontmatter 与正文话题）；个人知识库条目形如 `06-个人知识库/<文件名>.md` 并带 `kind: 'personal'`，可选 `category`（灵感/制度/推文）、`url`、`domain`、`author`、`clipped`、`summary`、`keyPoints`、`snapshot`
 - `seedIdeas`：`id`（数字）、`title`、`platform`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note`、`sourceNews`（可选，自动生成时的来源日报日期 `YYYY-MM-DD`）

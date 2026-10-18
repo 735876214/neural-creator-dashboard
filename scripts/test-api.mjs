@@ -133,6 +133,25 @@ try {
   assert.equal(bad.status, 400);
   ok('非法选题状态返回 400');
 
+  // 6a. 发布来源字段：草稿 fm 白名单放行 platform/url/platformId/syncedAt；非法类型 400
+  const pub = await put('/api/draft', {title: 'e2e-pub', body: 'x', fm: {platform: '小红书', url: 'https://example.com/x', syncedAt: '手动 2026-10-18'}});
+  assert.equal(pub.status, 201);
+  const pubText = readFileSync(join(vault, pub.body.path), 'utf8');
+  assert.match(pubText, /platform: 小红书/, 'platform 未写入');
+  assert.match(pubText, /url: "https:\/\/example.com\/x"|url: https:\/\/example.com\/x/, 'url 未写入');
+  const pubPut = await put('/api/note', {path: pub.body.path, fm: {platformId: 'abc123', syncedAt: '手动 2026-10-18'}, mtime: pub.body.mtime});
+  assert.equal(pubPut.status, 200);
+  assert.match(readFileSync(join(vault, pub.body.path), 'utf8'), /platformId: abc123/, 'platformId 未写入');
+  const badSync = await put('/api/draft', {path: pub.body.path, fm: {url: 123}});
+  assert.equal(badSync.status, 400);
+  const badKey = await put('/api/note', {path: pub.body.path, fm: {任意键: 'x'}});
+  assert.equal(badKey.status, 400);
+  // /api/platforms/pull：未配凭据时应逐篇 pullable:false，不报错
+  const pull = await json('/api/platforms/pull', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
+  assert.equal(pull.status, 200);
+  assert.ok(Array.isArray(pull.body.results));
+  ok('发布来源字段与 /api/platforms/pull（未配凭据 pullable:false）');
+
   // 6b. 个人知识库：本地 HTTP 服务当网页源 → 剪藏 → 快照 → /api/data → 删除备份
   const clipPage = await new Promise(ok2 => {
     const s = createServer((req, res) => {
@@ -243,6 +262,51 @@ try {
   const upNoName = await fetch(base + '/api/knowledge/upload', {method: 'POST', headers: {'content-type': 'application/octet-stream'}, body: 'x'});
   assert.equal(upNoName.status, 400);
   ok('上传入库：md / docx / 非法类型 / 缺文件名');
+
+  // 6d. 独立创作入口：新建方法笔记 / 草稿生成作品 / 附件上传
+  const newNote = await json('/api/note-new', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({title: 'e2e 新建笔记', body: 'E2E 独立创建。', fm: {tags: ['e2e']}})});
+  assert.equal(newNote.status, 201);
+  assert.match(newNote.body.path, /^05-方法库\//);
+  const badPostNew = await json('/api/note-new', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({title: 'x', kind: 'post'})});
+  assert.equal(badPostNew.status, 400, 'note-new 不开放 post');
+  ok('新建方法笔记（/api/note-new）');
+
+  // 发布：建一篇草稿 → 移入 02-作品库 + 指标（createNote 的 draft 落在 03-创作台/ 根目录）
+  const pubDraft = await put('/api/draft', {title: 'e2e 发布稿', body: '发布链路验证'});
+  assert.equal(pubDraft.status, 201);
+  const pubRes = await json('/api/publish', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({path: pubDraft.body.path, metrics: {views: 100, likes: 10}})});
+  assert.equal(pubRes.status, 201, '发布应 201：' + JSON.stringify(pubRes.body));
+  assert.match(pubRes.body.path, /^02-作品库\//);
+  assert.ok(!existsSync(join(vault, pubDraft.body.path)), '原草稿应已移走');
+  const pubMd = readFileSync(join(vault, pubRes.body.path), 'utf8');
+  assert.match(pubMd, /views: 100/, '指标应写入 frontmatter');
+  assert.match(pubMd, /date: \d{4}-\d{2}-\d{2}/, '发布日期应写入');
+  // 非 03-创作台 的文件不能发布
+  const pubBad = await json('/api/publish', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({path: newNote.body.path})});
+  assert.equal(pubBad.status, 400);
+  // 发布后 /api/data 的 posts 应含它（同名 → 与选题回连靠标题，不在此断言）
+  const d3 = await json('/api/data?fresh');
+  assert.ok(d3.body.posts.some(p => p.title === 'e2e 发布稿'), '/api/data posts 应包含新作品');
+  ok('草稿发布为作品（/api/publish：移动 + 指标 + 白名单）');
+
+  // 附件：png 上传 → 读取 → 非法扩展拒绝
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // PNG magic
+  const upImg = await fetch(base + '/api/attachment', {method: 'POST',
+    headers: {'x-filename': encodeURIComponent('截图.png'), 'content-type': 'application/octet-stream'}, body: png});
+  assert.equal(upImg.status, 201);
+  const imgPath = (await upImg.json()).path;
+  assert.match(imgPath, /^99-附件\//);
+  const getImg = await fetch(base + '/api/attachment?path=' + encodeURIComponent(imgPath));
+  assert.equal(getImg.status, 200);
+  assert.equal(getImg.headers.get('content-type'), 'image/png');
+  const upSvg = await fetch(base + '/api/attachment', {method: 'POST',
+    headers: {'x-filename': encodeURIComponent('evil.exe'), 'content-type': 'application/octet-stream'}, body: png});
+  assert.equal(upSvg.status, 400);
+  const upTraversal = await json('/api/attachment?path=' + encodeURIComponent('05-方法库 methods/流程/观察记录方法.md'));
+  assert.equal(upTraversal.status, 400);
+  ok('附件上传与读取（/api/attachment：白名单 + 目录钉死）');
 
   // 7. 登录：未登录 401 → /api/login 换 Cookie → 带 Cookie 可读 → auth-check 204
   const authPort = await freePort();

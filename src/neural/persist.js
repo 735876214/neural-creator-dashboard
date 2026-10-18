@@ -103,6 +103,11 @@ export function usePendingSaves() {
 const draftPayload = (draft, sourceTitle) => {
   const fm = {};
   if (sourceTitle) fm.source = sourceTitle;
+  // 发布来源（半自动发布回填）：非空才写，避免把空键刷进文件
+  for (const k of ['platform', 'url', 'platformId', 'syncedAt']) {
+    const v = String(draft[k] ?? '').trim();
+    if (v) fm[k] = v;
+  }
   return {title: String(draft.title || '').trim() || '未命名草稿', body: draft.body || '', fm};
 };
 

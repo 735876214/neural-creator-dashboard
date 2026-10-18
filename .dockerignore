@@ -1,6 +1,13 @@
-# note-api 镜像只需要 server/ 与 package.json。
+# 构建上下文白名单：镜像构建只需要这些。
 # 其余内容（尤其是 notes-vault/、node_modules/、dist/）不要送进构建上下文：
 # 既慢，也会把私人笔记带进 Docker daemon / 构建缓存。
 *
+!Dockerfile
+!docker-compose.yml
 !server/
+!src/
+!public/
+!index.html
+!vite.config.js
 !package.json
+!package-lock.json

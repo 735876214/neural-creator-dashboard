@@ -20,13 +20,14 @@ import {createServer} from 'node:http';
 import {readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, renameSync} from 'node:fs';
 import {join, resolve, sep, dirname, extname, posix} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {readVault, parse} from './vault.mjs';
+import {readVault, parse, ATTACHMENTS_DIR} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
 import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateIdeas, answer, embed, listModels, validModel, TASK_MODELS} from './ai.mjs';
 import {fetchPage, htmlToText, htmlTitle, FetchError} from './webclip.mjs';
 import {parseUpload, ParseError} from './docparse.mjs';
 import {refreshNews, forceRefresh, startNewsCron, listNews, ideasFromNews} from './news.mjs';
+import {platformInfo, pullAll, pullOne, startPlatformsCron} from './platforms.mjs';
 import {randomBytes, createHmac, timingSafeEqual, randomUUID} from 'node:crypto';
 
 const VAULT = resolve(process.env.VAULT_DIR || '');
@@ -122,6 +123,29 @@ function currentAuth() {
     if (!raw?.password) return null;
     return {user: String(raw.user || DASHBOARD_USER), password: String(raw.password)};
   } catch { return null; }
+}
+
+// auth 自举：设置了 DASHBOARD_PASSWORD 用它；否则若指定了 AUTH_FILE 且文件不存在，
+// 首次启动生成随机密码写入并打印到日志（替代旧的独立 auth 一次性容器，
+// 少拉一个镜像；文件已在卷里时沿用原密码，重启不会换密码）。
+function bootstrapAuth() {
+  if (DASHBOARD_PASSWORD || !AUTH_FILE) return;
+  try {
+    if (existsSync(AUTH_FILE) && statSync(AUTH_FILE).size > 0) return;
+    mkdirSync(dirname(AUTH_FILE), {recursive: true});
+    const password = randomBytes(9).toString('base64url');
+    const body = JSON.stringify({user: DASHBOARD_USER, password, createdAt: new Date().toISOString()}, null, 2) + '\n';
+    writeFileSync(AUTH_FILE, body, {mode: 0o600});
+    console.error('');
+    console.error('========== 看板登录 ==========');
+    console.error('用户名：' + DASHBOARD_USER);
+    console.error('密码：  ' + password);
+    console.error('固定密码：在 .env 设置 DASHBOARD_PASSWORD=你的密码');
+    console.error('==============================');
+    console.error('');
+  } catch (e) {
+    console.error('[note-api] 生成登录密码失败（不开启登录）：', e.message);
+  }
 }
 
 function sessionKey() {
@@ -337,6 +361,12 @@ function cleanFm(kind, fm) {
       if (!(typeof fm.source === 'string' || typeof fm.source === 'number')) fail(400, 'source 必须是选题标题');
       out.source = String(fm.source);
     }
+    // 草稿 / 作品的发布来源字段（半自动发布回填；作品走 /api/note 的 fm 白名单之外另行处理）
+    for (const k of ['platform', 'url', 'platformId', 'syncedAt']) {
+      if (!(k in fm)) continue;
+      if (typeof fm[k] !== 'string') fail(400, `发布来源 ${k} 必须是字符串`);
+      out[k] = fm[k];
+    }
   }
   return out;
 }
@@ -534,6 +564,7 @@ async function route(req, res, url) {
       settings: readSettings(),
       semantic: index.semanticEdges(),
       ai: aiInfo(),
+      platforms: platformInfo(),
       meta: {vault: VAULT, counts: d.counts, generatedAt: d.generatedAt, indexed: index.count()}
     });
   }
@@ -555,6 +586,13 @@ async function route(req, res, url) {
   if (p === '/api/note' && req.method === 'PUT') {
     const {path, id, body, fm, mtime} = await readBody(req);
     if (body === undefined && (!fm || !Object.keys(fm).length)) fail(400, '没有要写入的内容');
+    // 手动补填作品指标走这条路由：只放行指标键与发布来源键，防止任意键写入。
+    if (fm && typeof fm === 'object' && !Array.isArray(fm)) {
+      const allowed = new Set(['views', 'likes', 'comments', 'saves', 'shares', 'follows', 'impressions', 'ctr', 'duration', 'platform', 'url', 'platformId', 'syncedAt', 'tags', 'summary']);
+      for (const k of Object.keys(fm)) if (!allowed.has(k)) fail(400, `不允许写入的键：${k}`);
+      if ('url' in fm && typeof fm.url !== 'string') fail(400, 'url 必须是字符串');
+      if ('platform' in fm && typeof fm.platform !== 'string') fail(400, 'platform 必须是字符串');
+    }
     const r = writeExisting(target({path, id}), {body, fm, mtime});
     return json(res, 200, {path: r.path, mtime: r.mtime, changed: r.changed, hash: hashOf(r.text)});
   }
@@ -592,6 +630,111 @@ async function route(req, res, url) {
     if (!title) fail(400, '新建需要一个标题');
     const r = createNote(kind, {title, body, fm: cleanFm(kind, fm)});
     return json(res, 201, {path: r.path, mtime: r.mtime, created: true});
+  }
+
+  // 新建方法笔记（脱离编辑器独立创作）：作品不在这里建——作品的唯一入口是草稿发布。
+  if (p === '/api/note-new' && req.method === 'POST') {
+    const {kind, title, body, fm} = await readBody(req);
+    if (kind && kind !== 'note') fail(400, 'note-new 只支持新建方法笔记（kind: note）；作品请从草稿发布');
+    if (typeof title !== 'string' || !title.trim()) fail(400, '需要一个标题');
+    if (fm != null && (typeof fm !== 'object' || Array.isArray(fm))) fail(400, 'fm 必须是对象');
+    const clean = {};
+    if (fm) {
+      for (const k of ['tags', 'summary']) if (fm[k] != null && fm[k] !== '') {
+        if (k === 'tags') {
+          if (!Array.isArray(fm.tags)) fail(400, 'tags 必须是数组');
+          clean.tags = fm.tags.map(String).filter(Boolean);
+        } else clean[k] = String(fm[k]);
+      }
+    }
+    const r = createNote('note', {title: title.trim(), body: String(body || ''), fm: clean});
+    gitCommit(r.path, `新建方法笔记 ${r.path}`);
+    invalidate();
+    return json(res, 201, {path: r.path, mtime: r.mtime, created: true});
+  }
+
+  // 草稿发布为作品：把 03-创作台/ 下的 .md 移到 02-作品库/ 并写入指标 frontmatter。
+  // 这是作品的唯一创建入口（脱离外部编辑器的独立生产链）。
+  if (p === '/api/publish' && req.method === 'POST') {
+    const {path, id, title, metrics} = await readBody(req);
+    const from = target({path, id});
+    if (!from.startsWith('03-创作台/')) fail(400, '只能发布 03-创作台/ 下的草稿');
+    const fromAbs = join(VAULT, from);
+    if (!existsSync(fromAbs)) fail(404, `草稿不存在：${from}`);
+
+    if (metrics != null && (typeof metrics !== 'object' || Array.isArray(metrics))) fail(400, 'metrics 必须是对象');
+    const METRIC_KEYS = ['views', 'likes', 'comments', 'saves', 'shares', 'follows', 'impressions', 'ctr', 'duration'];
+    const fm = {date: new Date().toISOString().slice(0, 10)};
+    if (metrics) for (const k of METRIC_KEYS) {
+      if (metrics[k] == null || metrics[k] === '') continue;
+      const n = Number(String(metrics[k]).replace(/[,，\s]/g, ''));
+      if (!Number.isFinite(n)) fail(400, `指标 ${k} 不是数字`);
+      fm[k] = n;
+    }
+
+    // 目标文件名：显式 title > 草稿现有文件名；重名加序号（与 createNote 同规则）
+    const baseName = safeName(title || from.slice('03-创作台/'.length).replace(/\.md$/i, ''));
+    let destRel = posix.join('02-作品库', baseName + '.md');
+    for (let i = 2; existsSync(join(VAULT, destRel)); i++) destRel = posix.join('02-作品库', `${baseName} ${i}.md`);
+    const destAbs = join(VAULT, destRel);
+
+    // 移动 + 写 frontmatter：先移动，再在最终位置用乐观锁写指标（writeExisting 负责备份/提交）
+    mkdirSync(dirname(destAbs), {recursive: true});
+    renameSync(fromAbs, destAbs);
+    const movedRel = destAbs.slice(VAULT.length + 1).split(sep).join('/');
+    gitCommitMulti([from, movedRel], `发布为作品 ${from} → ${movedRel}`);
+    try {
+      writeExisting(movedRel, {fm, mtime: null}); // 刚移动完，无并发风险
+    } catch (e) { console.error('[note-api] 发布写指标失败：', e.message); }
+    invalidate();
+    return json(res, 201, {path: movedRel, from, metricsWritten: Object.keys(fm).length > 1});
+  }
+
+  // —— 附件（99-附件/）：图片 / 视频上传与读取，供编辑器插图与预览 ——
+  const ATTACH_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.mp4', '.mov', '.mp3', '.pdf']);
+  const ATTACH_MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.mp3': 'audio/mpeg', '.pdf': 'application/pdf'};
+  function insideAttachment(rel) {
+    const raw = String(rel || '').replace(/\\/g, '/').trim();
+    if (!raw || raw.includes('\0')) fail(400, '缺少路径');
+    const ext = extname(raw).toLowerCase();
+    if (!ATTACH_EXT.has(ext)) fail(400, `不支持的附件类型：${ext || '（无扩展名）'}`);
+    const p = resolve(VAULT, raw);
+    const expected = join(VAULT, ATTACHMENTS_DIR + sep);
+    if (!p.startsWith(expected)) fail(400, '附件必须位于 ' + ATTACHMENTS_DIR + '/ 下');
+    return {abs: p, rel: p.slice(VAULT.length + 1).split(sep).join('/')};
+  }
+
+  if (p === '/api/attachment' && req.method === 'POST') {
+    const filename = (() => { try { return decodeURIComponent(req.headers['x-filename'] || ''); } catch { return ''; } })();
+    if (!filename) fail(400, '缺少 x-filename 头');
+    const buf = await readRaw(req);
+    if (!buf.length) fail(400, '文件是空的');
+    // 统一重命名：安全名 + 时间戳，避免覆盖与路径注入；扩展名按原文件
+    const dot = filename.lastIndexOf('.');
+    const stem = safeName(dot > 0 ? filename.slice(0, dot) : filename).slice(0, 50).replace(/\s+/g, '-') || 'attachment';
+    const ext = extname(filename).toLowerCase();
+    const rel = posix.join(ATTACHMENTS_DIR, `${stem}-${Date.now()}${ext}`);
+    insideAttachment(rel); // 白名单兜底校验（正常必过）
+    mkdirSync(join(VAULT, ATTACHMENTS_DIR), {recursive: true});
+    writeFileSync(join(VAULT, rel), buf);
+    gitCommit(rel, `上传附件 ${rel}`);
+    invalidate();
+    const finalName = `${stem}-${Date.now()}${ext}`;
+    return json(res, 201, {path: rel, name: finalName});
+  }
+
+  if (p === '/api/attachment' && req.method === 'GET') {
+    const {abs, rel} = insideAttachment(url.searchParams.get('path'));
+    if (!existsSync(abs)) return json(res, 404, {error: '附件不存在', path: rel});
+    const body = readFileSync(abs);
+    res.writeHead(200, {
+      'content-type': ATTACH_MIME[extname(rel).toLowerCase()] || 'application/octet-stream',
+      'content-length': body.length,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline';",
+      'cache-control': 'private, max-age=3600'
+    });
+    return res.end(body);
   }
 
   if (p === '/api/search' && req.method === 'GET') {
@@ -902,6 +1045,19 @@ async function route(req, res, url) {
     return json(res, 200, r);
   }
 
+  // 平台指标同步：逐篇尝试拉取（未配凭据/平台不支持时逐篇返回 pullable:false，不报错）。
+  // body: {path?} —— 传 path 只拉这一篇；不传则遍历所有有 platform + url 的作品。
+  if (p === '/api/platforms/pull' && req.method === 'POST') {
+    const {path} = await readBody(req).catch(() => ({}));
+    const d = loadData(0);
+    let works = d.works.filter(w => w.post.platform && w.post.url);
+    if (path) works = works.filter(w => w.rel === path);
+    const results = [];
+    for (const w of works) results.push({path: w.rel, title: w.post.title, platform: w.post.platform, ...(await pullOne(w.post, w.rel, VAULT, {writeExisting, mtimeOf}))});
+    if (results.some(r => r.updated)) reindex();
+    return json(res, 200, {results, info: platformInfo()});
+  }
+
   if (p.startsWith('/api/ai/jobs/') && req.method === 'GET') {
     const job = index.job(p.slice('/api/ai/jobs/'.length));
     if (!job) return json(res, 404, {error: '没有这个任务'});
@@ -983,6 +1139,15 @@ const server = createServer(async (req, res) => {
   }
 });
 
+// auth 自举：没有 DASHBOARD_PASSWORD 时生成随机密码写进 AUTH_FILE 并打印（首次启动）
+bootstrapAuth();
+
+// vault 子目录自动创建：git clone 后直接 compose up 时挂载进来的 vault 是空的，
+// 按看板的目录约定建出标准结构，用户把笔记放进来就能用（已存在的不动）。
+for (const dir of [...new Set(Object.values(KIND_DIR))]) {
+  try { mkdirSync(join(VAULT, dir), {recursive: true}); } catch {}
+}
+
 // 启动时先把索引建好，第一次打开页面就不用等
 try { console.error(`[note-api] 索引 ${reindex()} 条，共 ${index.count()} 条`); }
 catch (e) { console.error('[note-api] 首次索引失败：', e.message); }
@@ -997,6 +1162,15 @@ if (process.env.NEWS_CRON !== '0') {
       reindex();
       console.error(`[news] 已从热点自动筛出 ${ideas.written.length} 个选题进 04-选题池`);
     } catch (e) { console.error('[news] 自动筛选题失败：', e.message); }
+  });
+}
+
+// 平台指标同步的定时任务（PLATFORM_SYNC_CRON=0 关闭）：每天 SYNC_HOUR 点后拉公众号数据回写 vault。
+if (process.env.PLATFORM_SYNC_CRON !== '0') {
+  startPlatformsCron(async () => {
+    const results = await pullAll(loadData(), VAULT, {writeExisting, mtimeOf});
+    const ok = results.filter(r => r.updated).length;
+    if (results.length) console.error(`[platforms] ${results.length} 篇有平台来源，${ok} 篇更新了指标`);
   });
 }
 

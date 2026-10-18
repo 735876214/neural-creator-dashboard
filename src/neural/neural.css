@@ -817,3 +817,34 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
   .cb-figs { overflow-x: auto; gap: 10px; }
   .cb-fig { min-width: 156px; }
 }
+
+/* —— 半自动发布：编辑器发布入口 + 发布对话框 —— */
+.pub-entry { display: flex; align-items: center; gap: 7px; }
+.pub-entry select { height: 28px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .05); color: var(--text); font-size: 12px; }
+.pub-dialog { display: grid; gap: 12px; }
+.pub-dialog label { display: grid; gap: 5px; font-size: 12px; color: var(--text-2); }
+.pub-dialog select, .pub-dialog input { height: 32px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .05); color: var(--text); font-size: 13px; }
+.pub-hint { margin: 0; }
+.pub-preview { border: 1px solid var(--line-2); border-radius: 12px; background: rgba(0, 0, 0, .25); padding: 10px 12px; max-height: 200px; overflow: auto; }
+.pub-preview pre { margin: 0; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: var(--text); font-family: inherit; }
+.pub-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.metrics-edit .me-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 9px; }
+.metrics-edit .me-grid label { display: grid; gap: 4px; font-size: 11.5px; color: var(--text-2); }
+.metrics-edit .me-grid input { height: 30px; padding: 0 9px; border-radius: 8px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, .05); color: var(--text); font-size: 13px; width: 100%; }
+.metrics-edit .me-grid .form-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+@media (max-width: 640px) { .metrics-edit .me-grid { grid-template-columns: 1fr 1fr; } }
+@media (prefers-reduced-motion: reduce) {
+  .pub-dialog, .pub-preview, .metrics-edit { animation: none; transition: none; }
+}
+
+/* —— v7.2 独立创作入口（新建笔记 / 生成作品 / 插图）—— */
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.editor-tools { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.img-insert { display: inline-flex; }
+.img-insert .icon-btn { cursor: pointer; }
+.reader-edit-row { display: flex; align-items: flex-start; gap: 6px; }
+.reader-edit-row .reader-edit { flex: 1; }
+.pub-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 12px; }
+.pub-metrics label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-2); }
+.pub-metrics input { padding: 5px 8px; }
+@media (max-width: 600px) { .pub-metrics { grid-template-columns: 1fr 1fr; } }

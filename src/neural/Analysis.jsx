@@ -238,14 +238,17 @@ function analyze(graph, node) {
     const ideas = latent(graph, node.id).filter(x => graph.index.get(x.id).kind === 'idea');
     const fromDraft = [...nb.out, ...nb.back, ...nb.mutual].filter(x => graph.index.get(x.id).kind === 'draft').map(x => graph.index.get(x.id));
     return {
-      badge: ['已发布', 'Published'], status: `首发 First published ${p.date} · ${node.tags.length} 个话题 topics`,
+      badge: p.platform ? [`已发布 · ${p.platform}`, p.url ? 'Published · linked' : 'Published'] : ['已发布', 'Published'],
+      status: `首发 First published ${p.date} · ${node.tags.length} 个话题 topics`,
       action: ['查看作品', 'Open in Works', {type: 'page', page: 'library', id: p.id}],
+      action2: p.url ? ['打开原文', 'Open post', {type: 'url', url: p.url}] : null,
       metric: {label: '收藏率', en: 'Save rate', value: r, level: r >= 6 ? ['高', 'High', 'high'] : r >= 3 ? ['中', 'Moderate', 'mid'] : ['低', 'Low', 'low'],
         delta: `${r - avg >= 0 ? '+' : ''}${(r - avg).toFixed(1)}%`, deltaEn: 'vs. other works', bars: P.map(x => ({v: rate(x), on: x === node, label: x.short}))},
       tiles: [['eye', p.views, '观看', 'Views'], ['save', p.saves, '收藏', 'Saves'], ['user', p.follows ?? '—', '涨粉', 'Follows'], ['link', d.both, '双向共振', 'Mutual']],
       all: [['曝光', 'Impressions', fmt(p.impressions)], ['封面点击率', 'CTR', p.ctr == null ? '—' : p.ctr + '%'], ['平均观看', 'Avg. watch', p.duration == null ? '—' : p.duration + 's'], ['点赞', 'Likes', fmt(p.likes)], ['评论', 'Comments', fmt(p.comments)], ['分享', 'Shares', fmt(p.shares)], ['互动率', 'Engagement', engage == null ? '—' : engage.toFixed(1) + '%'], ['涨粉转化', 'Follow rate', p.follows == null || !p.views ? '—' : (p.follows / p.views * 1000).toFixed(1) + '‰']],
       insights: [
         ['表现排名', 'Ranking', `观看第 ${rank}/${P.length} 名；收藏率${r >= avg ? '高于' : '低于'}其他作品均值 ${Math.abs(r - avg).toFixed(1)} 个百分点。`, r >= avg ? 'gold' : 'info'],
+        ...(p.platform ? [['发布来源', 'Source', `${p.platform}${p.url ? ' · ' + String(p.url).replace(/^https?:\/\/(www\.)?/, '').slice(0, 48) : ''}${p.syncedAt ? `（指标 ${p.syncedAt}）` : ''}`, p.url ? 'gold' : 'info']] : []),
         ...(fromDraft.length ? [['来自草稿', 'From draft', `同名草稿「${fromDraft.slice(0, 3).map(x => x.short || x.title).join('、')}」已进入作品库。`, 'gold']] : []),
         ...resonance,
         ...(ideas.length ? [['可延伸选题', 'Next ideas', ideas.slice(0, 2).map(x => `「${graph.index.get(x.id).short}」（共享：${x.via.join('、')}）`).join('；'), 'info']] : []),
@@ -294,6 +297,7 @@ function analyze(graph, node) {
     return {
       badge: ['正在写', 'Writing'], status: src ? `来自选题「${graph.index.get(src.id).short}」` : published.length ? `已发布为「${published[0].short || published[0].title}」` : '独立草稿 · Standalone',
       action: ['继续写作', 'Continue', {type: 'page', page: 'drafts', id: node.draft.id}],
+      action2: ['发布此稿', 'Publish', {type: 'publish', draftId: node.draft.id}],
       metric: connectivity(),
       tiles: [['file', (node.body || '').length, '字数', 'Chars'], ['idea', src ? 1 : 0, '来源选题', 'Source'], ['concept', node.shared.length, '提及概念', 'Concepts'], ['link', graph.links.filter(l => l.kind === 'wiki' && l.s === node.id).length, '双链', 'Wikilinks']],
       insights: [
@@ -395,6 +399,55 @@ function Transect({graph}) {
   </section>;
 }
 
+// 作品指标手动补填：平台数据接口个人号拿不到（仅公众号可自动拉），这里手动写回 frontmatter。
+function MetricsEditor({node}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [values, setValues] = useState(() => Object.fromEntries(['views', 'likes', 'comments', 'saves', 'shares', 'follows', 'impressions', 'ctr', 'duration'].map(k => [k, node.post[k] ?? ''])));
+  if (!isLive() || !getFiles()?.['post:' + node.post.id]) return null;
+  const fields = [['views', '观看', 'Views'], ['likes', '点赞', 'Likes'], ['comments', '评论', 'Comments'], ['saves', '收藏', 'Saves'], ['shares', '分享', 'Shares'], ['follows', '涨粉', 'Follows'], ['impressions', '曝光', 'Impr.'], ['ctr', '点击率%', 'CTR'], ['duration', '时长s', 'Dur.']];
+  const save = async () => {
+    setBusy(true); setMsg('');
+    try {
+      // 先拉原文拿 mtime 做乐观锁；正文不动，只写 frontmatter
+      const rel = getFiles()['post:' + node.post.id];
+      const cur = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(rel))).then(r => r.json());
+      const fm = {syncedAt: `手动 ${new Date().toISOString().slice(0, 10)}`};
+      for (const [k] of fields) {
+        const v = String(values[k]).trim();
+        if (v === '') continue;
+        const n = Number(v.replace(/[,，%]/g, ''));
+        if (isNaN(n)) { setMsg(`「${k}」不是数字，已跳过`); continue; }
+        fm[k] = n;
+      }
+      const res = await fetch(apiUrl('/api/note'), {
+        method: 'PUT', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({path: rel, fm, mtime: cur.mtime})
+      });
+      if (res.status === 409) { setMsg('文件已被其他编辑器改动，未覆盖 · Conflict'); setBusy(false); return; }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      setMsg('已写入，刷新数据…');
+      setTimeout(() => location.reload(), 800);
+    } catch (e) { setMsg('保存失败：' + e.message); setBusy(false); }
+  };
+  return <section className="an-section metrics-edit">
+    <h3><Icon name="save" size={14}/>平台指标 <em>Platform metrics</em></h3>
+    {!open
+      ? <button className="pill ghost" onClick={() => setOpen(true)}><Icon name="user" size={13}/>补填指标 <em>Edit metrics</em></button>
+      : <div className="me-grid">
+          {fields.map(([k, zh, en]) => <label key={k}>{zh} <em>{en}</em>
+            <input value={values[k] ?? ''} onChange={e => setValues(v => ({...v, [k]: e.target.value}))} inputMode="decimal" aria-label={zh}/>
+          </label>)}
+          <div className="form-actions">
+            <button className="pill ghost" onClick={() => { setOpen(false); setMsg(''); }} disabled={busy}>取消 <em>Cancel</em></button>
+            <button className="pill primary" onClick={save} disabled={busy}>{busy ? '保存中…' : '写回笔记' } <em>Save</em></button>
+          </div>
+          {msg && <p className="quiet" role="status">{msg}</p>}
+        </div>}
+  </section>;
+}
+
 export function Analysis({graph, node, module, onGo, onAction, onClose}) {
   const a = useMemo(() => analyze(graph, node), [graph, node]);
   const color = KINDS[node.kind].color;
@@ -427,6 +480,7 @@ export function Analysis({graph, node, module, onGo, onAction, onClose}) {
       {a.all && <section className="an-section"><h3>全部指标 <em>All metrics</em></h3><div className="an-all">{a.all.map(([zh, en, v]) => <div key={zh}><span>{zh}<em>{en}</em></span><b>{v}</b></div>)}</div></section>}
       <Insights items={a.insights}/>
       {node.tags?.length > 0 && <section className="an-section"><h3>话题标签 <em>Topics</em></h3><div className="chip-row">{node.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div></section>}
+      {node.kind === 'post' && <MetricsEditor node={node}/>}
       {(node.kind === 'note' || node.kind === 'personal') && <AiPanel graph={graph} node={node} onGo={onGo}/>}
       <Links graph={graph} node={node} onGo={onGo}/>
     </div>

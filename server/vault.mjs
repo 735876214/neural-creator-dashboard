@@ -8,6 +8,9 @@ import {join, relative, basename, sep} from 'node:path';
 
 export const SKIP = new Set(['.obsidian', '.trash', '.git', 'node_modules', '.DS_Store']);
 
+// 附件目录（看板上传的图片 / 视频等，顶层 99-附件/）：不进图谱、不参与分类。
+export const ATTACHMENTS_DIR = '99-附件';
+
 // —— 读取 Markdown ——
 export function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -112,7 +115,10 @@ export function readVault(opts = {}) {
   // personal（个人知识库：灵感 / 制度 / 推文剪藏）同样保留自己的 kind。
   const bucket = {works: [], methods: [], ideas: [], drafts: [], news: [], personal: []};
   for (const file of walk(vault)) {
-    const rel = relative(vault, file), c = classify(rel, dirs, !!opts.allAsNotes);
+    const rel = relative(vault, file);
+    // 附件目录（99-附件/）里的任何文件都不进图谱
+    if (norm(rel).startsWith(ATTACHMENTS_DIR + '/')) continue;
+    const c = classify(rel, dirs, !!opts.allAsNotes);
     if (!c) continue;
     const {fm, body} = parse(readFileSync(file, 'utf8'));
     const title = String(pick(fm, ['title', '标题', 'name']) || basename(file).replace(/\.md$/i, '')).trim();
@@ -132,7 +138,12 @@ export function readVault(opts = {}) {
       shares: num(pick(x.fm, ['shares', '分享', '转发'])) ?? 0,
       impressions: num(pick(x.fm, ['impressions', '曝光'])),
       ctr: num(pick(x.fm, ['ctr', '点击率', '封面点击率'])),
-      duration: num(pick(x.fm, ['duration', '平均观看', '平均观看时长', '时长']))
+      duration: num(pick(x.fm, ['duration', '平均观看', '平均观看时长', '时长'])),
+      // 发布来源：发在哪个平台、原文链接、平台内容 ID 与最近一次指标同步时点（半自动发布回填）
+      platform: String(pick(x.fm, ['platform', '平台']) || '').trim() || undefined,
+      url: String(pick(x.fm, ['url', 'link', '链接']) || '').trim() || undefined,
+      platformId: String(pick(x.fm, ['platformId', '平台ID', '平台id']) || '').trim() || undefined,
+      syncedAt: String(pick(x.fm, ['syncedAt', '同步时间']) || '').trim() || undefined
     };
     return {post: p, content: {title: x.title, body: clean(x.body), tags: tagsOf(x.fm, x.body), media}, rel: norm(x.rel)};
   }).sort((a, b) => b.post.date.localeCompare(a.post.date)).slice(0, maxWorks)
@@ -180,7 +191,8 @@ export function readVault(opts = {}) {
   const drafts = bucket.drafts.map((x, i) => {
     const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
     const idea = ideas.find(d => d.title === src);
-    return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null, rel: norm(x.rel)};
+    return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null,
+      platform: String(pick(x.fm, ['platform', '平台']) || '').trim() || undefined, rel: norm(x.rel)};
   });
 
   // 概念词：至少在两条内容里出现的话题标签，取出现最多的 20 个。

@@ -21,7 +21,10 @@ export const posts = [
     "shares": 8,
     "impressions": 9000,
     "ctr": 8,
-    "duration": 20
+    "duration": 20,
+    "platform": "小红书",
+    "url": "https://www.xiaohongshu.com/explore/demo-sijiguanca",
+    "syncedAt": "手动 2026-06-29"
   },
   {
     "id": "w19",
@@ -35,7 +38,8 @@ export const posts = [
     "shares": 9,
     "impressions": 9511,
     "ctr": 8.2,
-    "duration": 20.7
+    "duration": 20.7,
+    "platform": "公众号"
   },
   {
     "id": "w18",

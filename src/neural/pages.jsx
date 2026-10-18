@@ -9,6 +9,7 @@ import {T} from './theme';
 import {useSaveState, draftKey, apiUrl, refreshData} from './persist';
 import {SaveBadge} from './SaveStatus';
 import {Assistant} from './Assistant';
+import {PublishModal, insertImageAtCursor} from './NoteModal';
 
 const fmt = v => v == null ? '—' : Number(v).toLocaleString('zh-CN');
 
@@ -86,7 +87,7 @@ function MiniGraph({graph, node}) {
   </svg>;
 }
 
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule}) {
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule, onPublish, onToPost}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const [suggest, setSuggest] = useState(null);
@@ -117,6 +118,10 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const node = draft && graph.index.get('draft:' + draft.id);
   const nb = node ? neighbors(graph, node.id) : null;
   const wiki = node ? graph.links.filter(l => l.kind === 'wiki' && l.s === node.id).map(l => graph.index.get(l.t)) : [];
+  // 发布默认平台：草稿自己记的 > 来源选题的 > 小红书
+  const sourceIdea = draft?.source != null ? graph.nodes.find(n => n.kind === 'idea' && n.idea?.id === draft.source)?.idea : null;
+  const [pubPlatform, setPubPlatform] = useState(null);
+  const pubDefault = pubPlatform || draft?.platform || sourceIdea?.platform || '小红书';
   return <div className="page page-drafts">
     <PageHead zh="创作台" en="Drafts" sub="把灵感，写成下一篇。" subEn="Write with [[links]] — every link grows a backlink.">
       <button className="pill primary" onClick={() => onNew()} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="plus" size={15}/>新建草稿 <em>New draft</em></button>
@@ -131,7 +136,20 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         {!drafts.length && <p className="empty-line">还没有草稿 <em>No drafts yet</em></p>}
       </aside>
       {draft ? <section className="editor glass">
-        <div className="editor-meta"><span>03-创作台 / 正在写 <em>Writing</em></span>{readOnly ? <span><Icon name="info" size={13}/>只读演示 · Read-only</span> : <SaveBadge state={saveState}/>}</div>
+        <div className="editor-meta"><span>03-创作台 / 正在写 <em>Writing</em></span>
+          <span className="editor-tools">
+            <label className="img-insert" title="上传图片并插入 ![[ ]]">
+              <input type="file" accept="image/*" className="visually-hidden" disabled={readOnly} onChange={async e => {
+                const f = e.target.files?.[0]; e.target.value = '';
+                if (!f) return;
+                const err = await insertImageAtCursor(area, f, v => change('body', v));
+                if (err) console.error('[attachment]', err);
+              }}/>
+              <button type="button" className="icon-btn" disabled={readOnly} onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片"><Icon name="save" size={14}/></button>
+            </label>
+          </span>
+          {readOnly ? <span><Icon name="info" size={13}/>只读演示 · Read-only</span> : <SaveBadge state={saveState}/>}
+        </div>
         <input className="editor-title" readOnly={readOnly} value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题"/>
         <div className="editor-area">
           <textarea ref={area} readOnly={readOnly} value={draft.body} aria-label="草稿正文" placeholder="开始写… 输入 [[ 链接到其他笔记 Type [[ to link a note"
@@ -151,7 +169,18 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         </div>
         <footer className="editor-foot">
           <span>{(draft.body || '').length} 字 <em>chars</em> · {wiki.length} 个双链 <em>wikilinks</em></span>
-          <button className="pill ghost danger" onClick={() => onDelete(draft.id)} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="trash" size={14}/>删除 <em>Delete</em></button>
+          <span className="pub-entry">
+            <select value={pubDefault} onChange={e => setPubPlatform(e.target.value)} aria-label="发布平台" title="发布平台">
+              {['小红书', '抖音', 'B站', '公众号'].map(k => <option key={k}>{k}</option>)}
+            </select>
+            <button className="pill" onClick={() => onPublish?.(draft.id, pubDefault)} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : '生成发布包，去平台手动发布'}>
+              <Icon name="outlink" size={14}/>发布 <em>Publish</em>
+            </button>
+            <button className="pill ghost" onClick={() => onToPost?.(draft)} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : '移入 02-作品库，成为作品（可填指标）'}>
+              <Icon name="works" size={14}/>生成作品 <em>To post</em>
+            </button>
+            <button className="pill ghost danger" onClick={() => onDelete(draft.id)} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="trash" size={14}/>删除 <em>Delete</em></button>
+          </span>
         </footer>
       </section> : <section className="editor glass empty"><p>新建一篇草稿开始写作 <em>Create a draft to begin</em></p></section>}
       {node && <aside className="draft-links glass">

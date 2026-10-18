@@ -6,17 +6,15 @@
 
 ```
 极空间 NAS（Docker）
-├── notes-vault/          明文 .md —— Obsidian 和看板共用，唯一真相
-├── note-api              读写笔记 + AI 编排 + 索引（本仓库 server/）
-├── web (nginx)           托管看板与登录页 + auth_request 会话校验
-├── syncthing             把 vault 同步到桌面 / 手机 Obsidian（可选，profile sync）
-└── tailscale             外网访问（可选，profile vpn，不开放公网端口）
+├── notes-vault/          明文 .md —— 笔记库，唯一真相，全部保存在 NAS 本地
+└── note-api              单容器：读写笔记 + AI 编排 + 索引 + 托管看板与登录页（本仓库）
 ```
+
+数据不出 NAS：vault `.md` 与索引卷都在本地，修改入口就是看板前端（局域网内访问），不提供外网访问与多设备同步——需要备份时用 NAS 自带快照即可。
 
 ## 0. 前置条件
 
 - 极空间有 Container Manager（Docker）功能
-- 一台能跑 `npm run build` 的电脑（Node.js 20.19+ / 22.12+）
 - （可选，用 AI 时）DeepSeek / 硅基流动等任一家的 API key
 
 ## 1. 准备笔记库
@@ -58,72 +56,41 @@ tags: [笔记系统, 新手教程]
 
 > 没有作品笔记也完全可以——作品库会是空的，其余照常。
 
-## 2. 构建前端并上传
+## 2. 上传仓库到 NAS（不用本机构建）
 
-在本机：
-
-```bash
-git clone <这个仓库> && cd neural-creator-dashboard
-npm install
-npm run build          # 产物在 dist/
-```
-
-把整个项目（含 `dist/`）传到 NAS，比如放在 `docker/neural-dashboard/`。
+前端在镜像构建阶段自己产出（Dockerfile 多阶段：容器里 `npm install` + `vite build`），
+本机不需要装 Node，也不需要手动 `npm run build`。把整个仓库传到 NAS
+（git clone 或上传整个文件夹，比如放在 `docker/neural-dashboard/`）——
+至少要含 `docker-compose.yml`、`Dockerfile`、`server/`、`src/`、`public/`、`package.json`。
 
 ## 3. 起 Docker Compose
 
 ```bash
-cd deploy
-cp .env.example .env       # 可选：填 AI_API_KEY、DASHBOARD_PASSWORD 等
+cd docker/neural-dashboard        # compose 文件所在目录（仓库根）
+cp deploy/.env.example .env       # 可选：填 AI_API_KEY、DASHBOARD_PASSWORD 等
 docker compose up -d --build
 ```
 
-登录密码由 compose 里的 `auth` 容器生成在容器卷里，note-api 只读它；**不需要**宿主机安装 `htpasswd`，也不需要手动创建 `.htpasswd`。两种用法：
+登录密码由 note-api 首次启动自举生成，写在容器卷的 `auth.json` 里（重启沿用，不会换密码）；**不需要**宿主机安装 `htpasswd`。两种用法：
 
 - `.env` 里设置了 `DASHBOARD_PASSWORD`：直接用它；
 - 留空：首次启动随机生成，执行下面这条命令查看（同时确认用户名）：
 
 ```bash
-docker compose logs auth
+docker compose logs note-api
 ```
 
 登录状态保存在 HttpOnly 会话 Cookie 里，默认 30 天（`SESSION_DAYS` 可改）。未登录访问任何页面都会先跳到 `login.html`，登录成功后回到看板；退出登录可调用 `POST /api/logout`。
 
-> 极空间的 Container Manager 也可以图形化导入这个 compose 文件。
+> 极空间的 Container Manager 也可以图形化导入这个 compose 文件（项目指向仓库根目录）。
 >
 > `.env` 是可选的：复制 `deploy/.env.example` 到**仓库根目录**（与 `docker-compose.yml` 同目录）为 `.env`；不填也能启动，只是 AI / 热点关闭。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
 
 浏览器打开 `http://<NAS-IP>:8088`，会先看到登录页；输入用户名和密码后进入看板，星核亮起来就是成功了。8088 被占用时在 `.env` 里改 `WEB_PORT`。
 
-> Syncthing 与 Tailscale 默认**不启动**，避免和 NAS 上已有的同类服务抢端口。需要时用后面对应的 `--profile` 命令。
+> **访问范围**：看板只在局域网内提供访问，没有外网入口、也没有多设备同步——数据全部在 NAS 本地，修改入口统一是看板前端。笔记是明文，请不要把端口转发到公网。
 
-## 4. 多端同步（Syncthing，可选）
-
-```bash
-docker compose --profile sync up -d
-```
-
-1. 打开 Syncthing 管理界面（NAS 上 `127.0.0.1:8384`，用 SSH 隧道 `ssh -L 8384:127.0.0.1:8384 <NAS>` 打开；端口被占用时在 `.env` 里改 `SYNCTHING_GUI_PORT`）；
-2. 添加共享文件夹，路径 `/var/syncthing/vault`，这就是 NAS 侧的 vault；
-3. 桌面 / 手机的 Syncthing 客户端扫码配对，指向你的 Obsidian vault 本地目录；
-4. Obsidian 打开这个 vault，正常写、正常贴图——图片存在 vault 里，看板会识别并显示「N 张图」角标。
-
-**注意**：看板和 Obsidian 写的是同一批文件。看板的写入带冲突检测（mtime 不一致返回 409，不覆盖），但偶尔仍可能在 Syncthing 里出现 `.sync-conflict-` 文件——那是双端几乎同时写入的漏网信号，定期看一眼即可。
-
-## 5. 外网访问（Tailscale，可选）
-
-```bash
-# .env 里先填 TS_AUTHKEY（在 login.tailscale.com/admin/authkeys 生成）
-docker compose --profile vpn up -d
-```
-
-设备自动入网后，手机 / 电脑装 Tailscale 客户端登录同一账号，浏览器访问 `http://<Tailscale IP 或主机名>:8088`。默认主机名是 `neural-dashboard`，可用 `TS_HOSTNAME` 改。
-
-> 普通 auth key 不要带 `TS_EXTRA_ARGS=--advertise-tags=...`，除非你已经在 Tailnet ACL 里建好对应 tag 并授权；否则 tailscaled 会一直登录失败。需要排查时看 `docker compose logs tailscale`。
-
-不想用 Tailscale 的替代：Cloudflare Tunnel + Access（需要域名，自带登录）；极空间自带的远程访问功能能否转发 Docker 容器端口、是否有认证，请在你的 ZOS 版本上确认后再用——**笔记是明文，没有任何认证的公网暴露绝对不行**。
-
-## 6. AI 功能（可选）
+## 4. AI 功能（可选）
 
 `.env` 里填：
 
@@ -142,7 +109,7 @@ docker compose --profile vpn up -d
 
 > **模型质量提示**：多模型网关上部分模型实测存在响应质量问题（返回无关内容或纯思考无输出）。建议用 glm / deepseek 系；思考型模型在列表里标了「（思考型）」，问答可用但较慢。
 
-## 6.5 AI 热点（第六星座）
+## 4.5 AI 热点（第六星座）
 
 > 另有第七星座「个人知识库」：`06-个人知识库/` 下的 `kind: personal` 笔记（灵感 / 制度 / 推文剪藏）。
 > 在看板「知识库」页粘贴链接即可由 note-api 抓取网页、保存 HTML 快照到 `06-个人知识库/.snapshots/`，
@@ -158,10 +125,9 @@ docker compose --profile vpn up -d
 - 每小时整点检查（当天过了 `NEWS_HOUR` 默认 8 点还没生成就补），`POST /api/news/refresh` 手动触发，`{"force": true}` 强制重做当天；
 - `NEWS_CRON=0` 关闭整个定时任务。
 
-## 7. 日常使用
+## 5. 日常使用
 
-- **Obsidian 里写**（长文、图片、整理），等 Syncthing 同步，看板刷新即见；
-- **看板里速记**：新建/改名/删除草稿、编辑选题、修改月目标，全部直接写回 NAS——草稿与选题落成 `.md`，月目标与 AI 模型选择写在 `vault/.dashboard/settings.json`。浏览器不保存这些业务数据；
+- **看板里写**：长文、图片、整理都在看板完成——新建/改名/删除草稿、编辑选题、修改月目标，全部直接写回 NAS——草稿与选题落成 `.md`，月目标与 AI 模型选择写在 `vault/.dashboard/settings.json`。浏览器不保存这些业务数据；
 - **离线时**：改动暂存在当前页面的内存里，恢复网络后自动补传；刷新或关闭页面会丢失未落盘的改动（页面会提示），所以断网时请保持标签页打开；
 - **备份**：vault 建议 `git init` 一次（note-api 每次写入自动 commit，AI 误写可回滚）+ 极空间自身的快照。`vault/.dashboard/settings.json` 属于用户数据，会随 vault 一起备份；`index.sqlite` 是索引，删了会自动重建，不用备份。
 
@@ -169,18 +135,14 @@ docker compose --profile vpn up -d
 
 | 现象 | 原因与处理 |
 |---|---|
-| build 报 `lstat .../server: no such file or directory` | 只上传了 `deploy/`，构建上下文里没有 `server/`。把整个仓库放到 NAS（compose 已在仓库根目录），至少含 `server/`、`package.json`、`dist/`、`notes-vault/`、`nginx.conf` |
+| build 报 `lstat .../server: no such file or directory` | 只上传了 `deploy/`，构建上下文里没有 `server/`。把整个仓库放到 NAS（compose 已在仓库根目录），至少含 `docker-compose.yml`、`Dockerfile`、`server/`、`src/`、`public/`、`package.json` |
 | 旧版报 `env file .../deploy/.env not found` | 早期 compose 硬依赖 `.env` 且放在 `deploy/`。更新到当前版本后 `.env` 放仓库根目录、可选；需要 AI 时再 `cp deploy/.env.example .env` |
-| 不知道登录密码 | `.env` 没设 `DASHBOARD_PASSWORD` 时首次启动随机生成：`docker compose logs auth` |
-| 登录后又跳回登录页 | 会话 Cookie 丢了或密码改过。检查浏览器是否禁用 Cookie；改密码后执行 `docker compose up -d --force-recreate auth note-api` 重新登录 |
-| 登录页一直提示「连不上笔记库服务」 | note-api 没起来或 `/api` 反代不通：`docker compose logs note-api`，并确认 nginx 的 `proxy_pass http://note-api:8787` 可用 |
-| `neural-auth` 显示 `Exited (0)` | 正常：它是一次性任务，只负责生成认证文件，跑完就退出 |
-| `ports are not available ... 8384/22000` | NAS 上已有 Syncthing 在跑。在 `.env` 改 `SYNCTHING_GUI_PORT` / `SYNCTHING_SYNC_PORT`，或不用 `--profile sync` |
-| Tailscale 一直登录失败 | 检查 `TS_AUTHKEY` 是否过期；普通 key 不要带 `TS_EXTRA_ARGS=--advertise-tags=...` |
+| 不知道登录密码 | `.env` 没设 `DASHBOARD_PASSWORD` 时首次启动随机生成：`docker compose logs note-api` |
+| 登录后又跳回登录页 | 会话 Cookie 丢了或密码改过。检查浏览器是否禁用 Cookie；改密码后执行 `docker compose up -d --force-recreate note-api` 重新登录 |
+| 登录页一直提示「连不上笔记库服务」 | note-api 没起来：`docker compose logs note-api`，确认容器健康（`docker compose ps`） |
 | 页面显示「正在读取笔记库…」不动 | note-api 没起来：`docker compose logs note-api`；常见是 VAULT_DIR 挂载路径不对 |
-| 保存提示「文件已被其他编辑器改动」 | Obsidian 或另一台设备刚改过这篇。看板没有覆盖，重新打开比对后再存 |
+| 保存提示「文件已被其他编辑器改动」 | 同一篇刚在别的标签页改过。看板没有覆盖，重新打开比对后再存 |
 | 作品库是空的 | 还没有作品笔记——正常现象；或目录名不含「作品 / works」，用导入脚本时 `--works` 指定 |
 | AI 区块不出现 | 服务端没配 `AI_API_KEY`，或配完没重启 note-api |
 | 语义关联按钮报「embedding 未启用」 | 只配了 DeepSeek（它没有 embedding 接口），补配 `EMBED_*` 三项 |
-| Syncthing 出现 `.sync-conflict-` 文件 | 双端同时写过同一个文件，内容都保留了，手工合并后删掉冲突副本 |
 | 星座 / 星核不动了 | 浏览器开了「减少动态效果」；这是无障碍特性，不是故障 |
