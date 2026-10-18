@@ -23,7 +23,7 @@ import {execFileSync} from 'node:child_process';
 import {readVault, parse, ATTACHMENTS_DIR} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
-import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateIdeas, answer, embed, listModels, validModel, TASK_MODELS} from './ai.mjs';
+import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateIdeas, answer, embed, listModels, validModel, taskModel, taskModelsSnapshot} from './ai.mjs';
 import {setAiRuntime} from './ai.mjs';
 import {fetchPage, htmlToText, htmlTitle, FetchError} from './webclip.mjs';
 import {parseUpload, ParseError} from './docparse.mjs';
@@ -331,7 +331,7 @@ function saveAiSecret(key) {
 try {
   const s0 = readSettings();
   setAiRuntime({baseUrl: s0.aiBaseUrl || null, apiKey: loadAiSecret() || null, model: s0.aiModel || null});
-} catch {}
+} catch (e) { console.error('[note-api] 启动应用 AI 运行时配置失败（沿用 env 缺省）：', e.message); }
 
 // settings.json 里的平台凭据形状：{公众号: {appid, secret, ...}}。
 // 校验白名单：只认公众号，secret 必须是非空字符串；写盘前原样存，读出来给 platforms.mjs 用。
@@ -664,10 +664,14 @@ async function route(req, res, url) {
       delete body.aiApiKey; // aiApiKey 不在 SETTINGS_KEYS，writeSettings 会拒绝未知键
     }
     const next = writeSettings(body);
-    if (keyToApply != null) {
-      saveAiSecret(keyToApply);
-      setAiRuntime({apiKey: keyToApply, baseUrl: next.aiBaseUrl || '', model: next.aiModel || ''});
-    }
+    // 运行时应用不依赖是否带了 key：只改模型/接口地址也要即时生效（否则保存成功但仍在用旧配置）。
+    // key：本次带 aiApiKey 才落秘密文件；'' 表示清除（恢复 env 缺省）。
+    if (keyToApply != null) saveAiSecret(keyToApply);
+    setAiRuntime({
+      baseUrl: next.aiBaseUrl || '',
+      apiKey: keyToApply != null ? keyToApply : (loadAiSecret() || ''),
+      model: next.aiModel || ''
+    });
     // 返回脱敏视图，secret 不回传；与 GET /api/data 的 settings 形状一致。
     return json(res, 200, {...next, aiKeyConfigured: !!loadAiSecret(), platforms: Object.fromEntries(Object.entries(next.platforms).map(([k, v]) => [k, {appid: v.appid, configured: true, secretMasked: '••••••'}]))});
   }
@@ -846,11 +850,11 @@ async function route(req, res, url) {
   // —— AI：未配 key 时全部 501，前端据此隐藏 AI 区块 ——
   if (p === '/api/ai/info' && req.method === 'GET') return json(res, 200, aiInfo());
 
-  if (p === '/api/ai/models' && req.method === 'GET') return json(res, 200, {models: await listModels(), taskModels: TASK_MODELS});
+  if (p === '/api/ai/models' && req.method === 'GET') return json(res, 200, {models: await listModels(), taskModels: taskModelsSnapshot()});
 
   // 请求里带的 model 覆盖：白名单校验（只允许网关 /v1/models 里的 id），缺省用任务配置
   async function pickModel(requested, task) {
-    if (!requested) return TASK_MODELS[task];
+    if (!requested) return taskModel(task);
     if (!aiEnabled()) return requested;
     if (!await validModel(requested)) fail(400, `未知模型：${requested}（GET /api/ai/models 查看可用列表）`);
     return requested;

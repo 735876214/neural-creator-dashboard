@@ -1399,11 +1399,13 @@ export function createCore({w, h, dpr = 1, params = {}, bands, outerN = 0} = {})
       const fr2 = (() => { const u = k - Math.floor(k); return u * u * (3 - 2 * u); })();
       const x0 = core.x - PB / 2, y0 = core.y - PB / 2;
       ctx.save();
-      // ① 核体：source-over（远半环被它挡住 = 遮挡顺序的第一半）；互补 alpha = 真线性插值
-      ctx.globalAlpha = 1 - fr2;
+      // ① 核体：source-over（远半环被它挡住 = 遮挡顺序的第一半）。
+      //    source-over 下 i0 全量 + i1 叠 fr2 恰好是真线性插值（out = i1·fr2 + i0·(1−fr2)），
+      //    不要改成互补 alpha——那会让中点变暗并让底下的环带透过核体渗出。
+      ctx.globalAlpha = 1;
       ctx.drawImage(bodyPhases[i0], x0, y0, PB, PB);
       if (fr2 > .002) { ctx.globalAlpha = fr2; ctx.drawImage(bodyPhases[i1], x0, y0, PB, PB); }
-      // ② 等离子 + 耀斑：lighter（纯加色，不遮任何东西）。加色下也必须互补 alpha：
+      // ② 等离子 + 耀斑：lighter（纯加色，不遮任何东西）。加色下必须互补 alpha：
       //    若 i0 恒为 1、再叠 fr2·i1，过渡中途会亮过两个相位本身再骤降，呼吸看起来像闪烁。
       ctx.globalAlpha = 1 - fr2;
       ctx.globalCompositeOperation = 'lighter';

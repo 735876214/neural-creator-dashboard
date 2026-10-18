@@ -27,11 +27,12 @@ let CHAT_BASE = (process.env.AI_BASE_URL || 'https://api.deepseek.com/v1').repla
 let CHAT_KEY = process.env.AI_API_KEY || '';
 let CHAT_MODEL = process.env.AI_MODEL || 'deepseek-chat';
 
-// 设置面板保存后即时生效：覆盖 baseUrl / key / 全局默认模型；传 '' 恢复 env 缺省，null 忽略。
+// 设置面板保存后即时生效：覆盖 baseUrl / key / 全局默认模型。
+// 传 '' 恢复 env 缺省（key 恢复 = AI_API_KEY，可能为空即禁用）；null 忽略该项。
 let modelCacheRef = null; // 由下方 modelCache 声明回填
 export function setAiRuntime({baseUrl, apiKey, model} = {}) {
   if (baseUrl != null) CHAT_BASE = String(baseUrl).trim() ? String(baseUrl).trim().replace(/\/+$/, '') : (process.env.AI_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
-  if (apiKey != null) CHAT_KEY = String(apiKey);
+  if (apiKey != null) CHAT_KEY = String(apiKey).trim() ? String(apiKey) : (process.env.AI_API_KEY || '');
   if (model != null) CHAT_MODEL = String(model).trim() || (process.env.AI_MODEL || 'deepseek-chat');
   if (modelCacheRef) modelCacheRef.at = 0; // base/key/model 变更后强制重拉模型列表
 }
@@ -39,8 +40,10 @@ export function setAiRuntime({baseUrl, apiKey, model} = {}) {
 const TASK_ENV = {ask: 'AI_MODEL_ASK', analyze: 'AI_MODEL_ANALYZE', ideas: 'AI_MODEL_IDEAS', news: 'AI_MODEL_NEWS', web: 'AI_MODEL_WEB'};
 // 任务级模型：env 显式设置优先；未设则跟随运行时全局模型（设置面板可改）
 export const taskModel = task => process.env[TASK_ENV[task]] || CHAT_MODEL;
-// 兼容旧引用（/api/ai/models 的 taskModels 字段）
+// 兼容旧引用（/api/ai/models 的 taskModels 字段）。JSON 响应需要普通对象：
+// Proxy 的 ownKeys 对 JSON.stringify 不生效（序列化结果是 {}），所以这里显式物化。
 export const TASK_MODELS = new Proxy({}, {get: (_, task) => taskModel(task), has: (_, task) => task in TASK_ENV, ownKeys: () => Object.keys(TASK_ENV)});
+export const taskModelsSnapshot = () => Object.fromEntries(Object.keys(TASK_ENV).map(t => [t, taskModel(t)]));
 const EMBED_BASE_ENV = process.env.EMBED_BASE_URL || '';
 const EMBED_KEY_ENV = process.env.EMBED_API_KEY || '';
 const EMBED_MODEL = process.env.EMBED_MODEL || '';
@@ -50,7 +53,7 @@ export const aiEnabled = () => PROTOCOL === 'anthropic' ? !!CHAT_BASE : !!CHAT_K
 export const embedEnabled = () => !!(EMBED_KEY_ENV || CHAT_KEY) && !!EMBED_MODEL;
 export const aiInfo = () => ({
   enabled: aiEnabled(), model: CHAT_MODEL, protocol: PROTOCOL,
-  taskModels: TASK_MODELS,
+  taskModels: taskModelsSnapshot(),
   embed: embedEnabled() ? {model: EMBED_MODEL, sameBase: (EMBED_BASE_ENV || CHAT_BASE) === CHAT_BASE} : {enabled: false}
 });
 

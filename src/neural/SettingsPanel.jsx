@@ -12,7 +12,7 @@ import {Icon} from './icons';
 import {aiModels} from './sync.js';
 import {saveSettings, apiUrl, saveGoal} from './persist';
 
-function AiSection({ai, settings, model, onModel, readOnly, onRefresh}) {
+function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}) {
   const keyConfigured = !!settings?.aiKeyConfigured;
   const [baseUrl, setBaseUrl] = useState(settings?.aiBaseUrl || '');
   const [key, setKey] = useState('');
@@ -40,8 +40,12 @@ function AiSection({ai, settings, model, onModel, readOnly, onRefresh}) {
       if (key.trim()) patch.aiApiKey = key.trim();
       const next = await saveSettings(patch);
       setKey('');
-      setMsg('已连接，模型列表已刷新——选一个作为全局默认模型 · Connected');
-      onRefresh?.(next); // settings/aiKeyConfigured 变化触发下方 effect 重新拉模型列表（只拉一次）
+      onRefresh?.(next);
+      // 当场重拉模型列表，按结果提示——不要依赖间接刷新链路（时序不可靠，文案会先于事实）
+      const j = await aiModels().catch(() => []);
+      setModels(j.map(m => m.id || m).filter(Boolean));
+      if (j.length) setMsg('已连接，模型列表已拉到——选一个作为全局默认模型 · Connected');
+      else { setModelsErr('拉不到模型列表：请检查接口地址与 key'); setMsg('已保存连接，但拉不到模型列表'); }
     } catch (e) { setMsg('保存失败：' + e.message); }
     finally { setBusy(false); }
   };
@@ -73,6 +77,7 @@ function AiSection({ai, settings, model, onModel, readOnly, onRefresh}) {
     </label>
     {modelsErr && <p className="quiet" role="status">{modelsErr}——也可以在上方直接手动输入模型 id</p>}
     {model && <div className="form-actions"><button className="pill ghost" onClick={() => onModel('')} disabled={readOnly}>清除全局模型 <em>Clear</em></button></div>}
+    {modelMsg && <p className="quiet" role="alert">{modelMsg}</p>}
     <p className="quiet">全局模型对所有 AI 任务生效（问答 / 分析 / 剪藏 / 日报）；选择写入 NAS 设置 <em>Applies to all AI tasks</em></p>
     {ai?.embed?.enabled && <p className="quiet">语义边：已启用 embedding（{ai.embed.model}） <em>Semantic edges on</em></p>}
   </section>;
@@ -181,7 +186,11 @@ function GoalSection({goal, monthCount, onGoal}) {
 // 弹窗主体。settings 用 /api/settings 的脱敏视图；ai 是 /api/data 的 ai 信息。
 export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose, onRefresh}) {
   const [model, setModel] = useState(settings?.aiModel || '');
+  const [modelMsg, setModelMsg] = useState('');
   const [tab, setTab] = useState('ai');
+  // settings 是异步拉取的（打开弹窗时可能还没回来）：回值到位后同步全局模型下拉，
+  // 否则下拉显示为空、动一下就会把 null 存回去覆盖 NAS 上已配置的模型。
+  useEffect(() => setModel(settings?.aiModel || ''), [settings?.aiModel]);
 
   const tabs = [
     ['ai', 'AI 配置', 'AI'],
@@ -190,15 +199,17 @@ export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose
   ];
 
   const saveModel = async id => {
-    setModel(id);
-    try { await saveSettings({aiModel: id || null}); } catch {} // 失败静默：下拉选择本身可重试
+    const prev = model;
+    setModel(id); setModelMsg('');
+    try { await saveSettings({aiModel: id || null}); }
+    catch (e) { setModel(prev); setModelMsg('模型保存失败：' + e.message); } // 回滚 UI 并展示错误
   };
 
   return <div className="settings-panel">
     <nav className="set-tabs" role="tablist" aria-label="设置分类">
       {tabs.map(([id, zh, en]) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>{zh}<em>{en}</em></button>)}
     </nav>
-    {tab === 'ai' && <AiSection ai={ai} settings={settings} model={model} onModel={saveModel} readOnly={readOnly} onRefresh={onRefresh}/>}
+    {tab === 'ai' && <AiSection ai={ai} settings={settings} model={model} modelMsg={modelMsg} onModel={saveModel} readOnly={readOnly} onRefresh={onRefresh}/>}
     {tab === 'platform' && <PlatformSection settings={settings} onSaved={() => {}} readOnly={readOnly}/>}
     {tab === 'goal' && <GoalSection goal={goal} monthCount={monthCount} readOnly={readOnly} onGoal={async n => {
       await saveGoal(n);
