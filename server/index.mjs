@@ -23,7 +23,9 @@ import {execFileSync} from 'node:child_process';
 import {readVault, parse} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
-import {aiEnabled, embedEnabled, aiInfo, analyzeNote, generateIdeas, answer, embed, listModels, validModel, TASK_MODELS} from './ai.mjs';
+import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateIdeas, answer, embed, listModels, validModel, TASK_MODELS} from './ai.mjs';
+import {fetchPage, htmlToText, htmlTitle, FetchError} from './webclip.mjs';
+import {parseUpload, ParseError} from './docparse.mjs';
 import {refreshNews, forceRefresh, startNewsCron, listNews, ideasFromNews} from './news.mjs';
 import {randomBytes, createHmac, timingSafeEqual, randomUUID} from 'node:crypto';
 
@@ -48,7 +50,8 @@ const SESSION_ENV_DAYS = Number(process.env.SESSION_DAYS || 30);
 const SESSION_DAYS = Number.isFinite(SESSION_ENV_DAYS) && SESSION_ENV_DAYS >= 1
   ? Math.min(365, Math.floor(SESSION_ENV_DAYS)) : 30;
 const SESSION_KEY_FILE = join(DATA_DIR, 'session.key');
-const KIND_DIR = {idea: '04-选题池', draft: '03-创作台', note: '05-方法库', post: '02-作品库', news: '00-AI热点'};
+const KIND_DIR = {idea: '04-选题池', draft: '03-创作台', note: '05-方法库', post: '02-作品库', news: '00-AI热点', personal: '06-个人知识库'};
+const SNAPSHOTS_DIR = '06-个人知识库/.snapshots';
 
 if (!process.env.VAULT_DIR) {
   console.error('请用 VAULT_DIR 指定笔记库目录，例如：VAULT_DIR=./examples/vault node server/index.mjs');
@@ -84,6 +87,18 @@ async function readBody(req) {
   if (!chunks.length) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { fail(400, '请求体不是合法 JSON'); }
+}
+
+// 原始二进制请求体（文件上传用，同样受 MAX_BODY 约束）
+async function readRaw(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > MAX_BODY) fail(413, '文件过大（上限 ' + Math.round(MAX_BODY / 1024 / 1024) + ' MB）');
+    chunks.push(c);
+  }
+  return Buffer.concat(chunks);
 }
 
 // —— 登录与会话 ——
@@ -187,6 +202,17 @@ function inside(rel) {
   return {abs: p, rel: p.slice(VAULT.length + 1).split(sep).join('/')};
 }
 
+// 网页快照路径：只允许 06-个人知识库/.snapshots/ 下的 .html（剪藏 HTML 不可信，读取时由路由加 CSP）。
+function insideHtml(rel) {
+  const raw = String(rel || '').replace(/\\/g, '/').trim();
+  if (!raw || raw.includes('\0')) fail(400, '缺少路径');
+  if (!raw.toLowerCase().endsWith('.html')) fail(400, '只允许 .html 快照');
+  const p = resolve(VAULT, raw);
+  const expected = join(VAULT, SNAPSHOTS_DIR + sep);
+  if (!p.startsWith(expected)) fail(400, '快照必须位于 ' + SNAPSHOTS_DIR + '/ 下');
+  return {abs: p, rel: p.slice(VAULT.length + 1).split(sep).join('/')};
+}
+
 const mtimeOf = abs => statSync(abs).mtimeMs;
 
 // —— 笔记库读取（带短缓存；写操作会立即失效）——
@@ -195,8 +221,10 @@ function loadData(maxAge = 1500) {
   if (cache.data && Date.now() - cache.at < maxAge) return cache.data;
   const data = readVault({vault: VAULT});
   const files = {};
+  let personalSeq = 0;
   for (const w of data.works) files['post:' + w.post.id] = w.rel;
-  for (const n of data.notes) files['note:' + n.id] = n.rel;
+  // personal 用自己的前缀（与前端图谱节点 id 一致）；news 沿用 note: 前缀（历史语义边依赖它）。
+  for (const n of data.notes) files[(n.kind === 'personal' ? 'personal:p' + (++personalSeq) : 'note:' + n.id)] = n.rel;
   for (const i of data.ideas) files['idea:' + i.id] = i.rel;
   for (const d of data.drafts) files['draft:' + d.id] = d.rel;
   const figures = {};
@@ -237,6 +265,16 @@ function gitCommit(rel, message) {
   try {
     execFileSync('git', ['add', '--', rel], {cwd: VAULT, stdio: 'ignore'});
     execFileSync('git', ['commit', '-m', message, '--', rel], {cwd: VAULT, stdio: 'ignore'});
+    return true;
+  } catch { return false; }
+}
+
+// 多文件提交（网页剪藏：md + 快照一起进版本库）。路径已由调用方各自校验。
+function gitCommitMulti(rels, message) {
+  if (!VAULT_GIT || !existsSync(join(VAULT, '.git'))) return false;
+  try {
+    execFileSync('git', ['add', '--', ...rels], {cwd: VAULT, stdio: 'ignore'});
+    execFileSync('git', ['commit', '-m', message, '--', ...rels], {cwd: VAULT, stdio: 'ignore'});
     return true;
   } catch { return false; }
 }
@@ -385,7 +423,8 @@ function reindex(data = loadData()) {
   const at = rel => new Date(statSync(join(VAULT, rel)).mtimeMs).toISOString();
   const push = (id, rel, title, kind, body) => rows.push({id, path: rel, title, kind, body, hash: hashOf(body), mtime: at(rel)});
   for (const w of data.works) push('post:' + w.post.id, w.rel, w.post.title, 'post', w.content.body);
-  for (const n of data.notes) push('note:' + n.id, n.rel, n.title, 'note', n.body);
+  let personalSeq = 0;
+  for (const n of data.notes) push(n.kind === 'personal' ? 'personal:p' + (++personalSeq) : 'note:' + n.id, n.rel, n.title, n.kind, n.body);
   for (const i of data.ideas) push('idea:' + i.id, i.rel, i.title, 'idea', i.note || '');
   for (const d of data.drafts) push('draft:' + d.id, d.rel, d.title, 'draft', d.body);
   return index.syncNotes(rows);
@@ -518,7 +557,19 @@ async function route(req, res, url) {
   }
 
   if (p === '/api/note' && req.method === 'DELETE') {
-    return json(res, 200, removeNote(target({path: url.searchParams.get('path'), id: url.searchParams.get('id')})));
+    const rel = target({path: url.searchParams.get('path'), id: url.searchParams.get('id')});
+    // 个人知识库的剪藏：顺带删掉快照文件（尽力而为，失败不阻塞删除）
+    let snapRel = null;
+    try {
+      const n = loadData().notes.find(x => x.kind === 'personal' && x.rel === rel);
+      if (n?.snapshot) {
+        const {abs} = insideHtml(n.snapshot);
+        if (existsSync(abs)) { rmSync(abs); snapRel = n.snapshot; }
+      }
+    } catch {}
+    const r = removeNote(rel);
+    if (snapRel) gitCommitMulti([rel, snapRel], `删除 ${rel}（已备份到 .trash/）`);
+    return json(res, 200, r);
   }
 
   if ((p === '/api/idea' || p === '/api/draft') && req.method === 'PUT') {
@@ -677,6 +728,155 @@ async function route(req, res, url) {
     const byId = new Map([...d.works.map(w => ['post:' + w.post.id, w.rel]), ...d.notes.map(n => ['note:' + n.id, n.rel]), ...d.ideas.map(i => ['idea:' + i.id, i.rel]), ...d.drafts.map(x => ['draft:' + x.id, x.rel])]);
     const refs = contexts.map(c => ({id: c.id, title: c.title, path: byId.get(c.id) || null}));
     return json(res, 200, {answer: text, refs, model: useModel});
+  }
+
+  // —— 个人知识库（第七星座）：灵感 / 制度 / 推文剪藏 ——
+  // personal 的 frontmatter 白名单：category/url/domain/author/clipped/summary/keyPoints/snapshot
+  function cleanPersonalFm(fm) {
+    if (fm == null || typeof fm !== 'object' || Array.isArray(fm)) fail(400, 'fm 必须是对象');
+    const out = {};
+    if ('category' in fm && !(typeof fm.category === 'string' && ['灵感', '制度', '推文'].includes(fm.category))) fail(400, 'category 必须是 灵感/制度/推文');
+    for (const k of ['category', 'url', 'domain', 'author', 'clipped', 'summary', 'snapshot', 'sourceFile', 'uploaded']) {
+      if (fm[k] == null || fm[k] === '') continue;
+      if (typeof fm[k] !== 'string') fail(400, `${k} 必须是字符串`);
+      out[k] = fm[k];
+    }
+    if (fm.keyPoints != null) {
+      if (!Array.isArray(fm.keyPoints) || fm.keyPoints.some(p => typeof p !== 'string')) fail(400, 'keyPoints 必须是字符串数组');
+      out.keyPoints = fm.keyPoints.filter(Boolean);
+    }
+    return out;
+  }
+
+  // personal 的 files key 是按 notes 顺序生成的 p1/p2…：用 path 精确定位，不猜 id。
+  function personalByPath(rel) {
+    const d = loadData();
+    const hit = d.notes.find(n => n.kind === 'personal' && n.rel === rel);
+    if (!hit) fail(404, `个人知识库里没有这篇笔记：${rel}`);
+    return hit;
+  }
+
+  // 从笔记读出抓取正文：有快照读快照，否则重新抓取。
+  async function clipTextOf(n) {
+    if (n.snapshot) {
+      const {abs} = insideHtml(n.snapshot);
+      if (existsSync(abs)) {
+        const html = readFileSync(abs, 'utf8');
+        return {text: htmlToText(html), title: htmlTitle(html) || n.title, url: n.url, fromSnapshot: true};
+      }
+    }
+    if (!n.url) return {text: n.body, title: n.title, url: null, fromSnapshot: false};
+    const {url, html} = await fetchPage(n.url);
+    return {text: htmlToText(html), title: htmlTitle(html) || n.title, url, fromSnapshot: false};
+  }
+
+  if (p === '/api/knowledge' && req.method === 'POST') {
+    const {url, title, note, category, tags, analyze} = await readBody(req);
+    const hasUrl = typeof url === 'string' && /^https?:\/\//i.test(url.trim());
+    const cat = category ? String(category) : hasUrl ? '推文' : '灵感';
+    if (!hasUrl && (typeof title !== 'string' || !title.trim())) fail(400, '需要一个标题（或先填 URL，由网页标题生成）');
+    let page = null;
+    if (hasUrl) {
+      try { page = await fetchPage(url.trim()); }
+      catch (e) { fail(e instanceof FetchError ? 400 : 502, e.message); }
+    }
+    const finalTitle = (page && htmlTitle(page.html)) || String(title || '').trim();
+    if (!finalTitle) fail(400, '网页没有标题，请补一个 title');
+    const text = page ? htmlToText(page.html) : String(note || '');
+    const domain = page ? new URL(page.url).hostname : undefined;
+
+    // AI 分析：未启用/失败都不丢剪藏，只带 analysisError
+    let analysis = null, analysisError = null;
+    if (page && analyze !== false && aiEnabled()) {
+      try { analysis = await analyzeWebPage({url: page.url, title: finalTitle, text}); }
+      catch (e) { analysisError = e.message; }
+    }
+
+    // 快照：抓取成功就存一份 HTML 原文（.snapshots/ 点目录，不会进图谱）
+    let snapshotRel = null;
+    if (page) {
+      const slug = safeName(finalTitle).slice(0, 50).replace(/\s+/g, '-').toLowerCase() || 'page';
+      snapshotRel = posix.join(SNAPSHOTS_DIR, `${slug}-${Date.now()}.html`);
+      mkdirSync(join(VAULT, SNAPSHOTS_DIR), {recursive: true});
+      writeFileSync(join(VAULT, snapshotRel), page.html, 'utf8');
+    }
+
+    const fm = cleanPersonalFm({
+      category: cat,
+      ...(page ? {url: page.url, domain, clipped: new Date().toISOString().slice(0, 10)} : {}),
+      ...(analysis?.summary ? {summary: analysis.summary} : {}),
+      ...(analysis?.keyPoints?.length ? {keyPoints: analysis.keyPoints} : {}),
+      ...(snapshotRel ? {snapshot: snapshotRel} : {}),
+      ...(Array.isArray(tags) ? {tags: tags.map(String).filter(Boolean)} : {})
+    });
+    const body = page
+      ? `> [!info] 网页剪藏\n> 来源：${page.url}${analysis ? `\n\n${analysis.summary}\n${(analysis.keyPoints || []).map(k => '- ' + k).join('\n')}` : ''}\n\n---\n\n${text}`
+      : String(note || '');
+    const r = createNote('personal', {title: finalTitle, body, fm});
+    const commitPaths = snapshotRel ? [r.path, snapshotRel] : [r.path];
+    gitCommitMulti(commitPaths, `剪藏 ${r.path}`);
+    invalidate();
+    return json(res, 201, {path: r.path, mtime: r.mtime, created: true, snapshot: snapshotRel, analysis, analysisError});
+  }
+
+  // 重新分析已有剪藏：读快照（或重新抓取）→ AI → 写回 frontmatter（乐观锁）
+  if (p === '/api/knowledge/analyze' && req.method === 'POST') {
+    const {path, id} = await readBody(req);
+    const rel = target({path, id});
+    const n = personalByPath(rel);
+    if (!aiEnabled()) return json(res, 501, {error: 'AI 未启用：服务端未配置 AI_API_KEY'});
+    let page;
+    try { page = await clipTextOf(n); }
+    catch (e) { fail(e instanceof FetchError ? 400 : 502, e.message); }
+    const analysis = await analyzeWebPage({url: n.url, title: n.title, text: page.text});
+    const cur = readFileSync(join(VAULT, rel), 'utf8');
+    const oldTags = parseFrontmatter(cur);
+    writeExisting(rel, {
+      fm: {summary: analysis.summary, ...(analysis.keyPoints.length ? {keyPoints: analysis.keyPoints} : {}),
+        tags: [...new Set([...(oldTags.tags || []), ...analysis.tags])].slice(0, 12)},
+      mtime: mtimeOf(join(VAULT, rel))
+    });
+    return json(res, 200, {path: rel, analysis});
+  }
+
+  // 快照原文：剪藏 HTML 不可信，CSP 封死脚本
+  if (p === '/api/knowledge/snapshot' && req.method === 'GET') {
+    const {abs, rel} = insideHtml(url.searchParams.get('path'));
+    if (!existsSync(abs)) return json(res, 404, {error: '快照不存在', path: rel});
+    const body = readFileSync(abs);
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-length': body.length,
+      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src * data:; font-src *;",
+      'x-content-type-options': 'nosniff',
+      'cache-control': 'no-store'
+    });
+    return res.end(body);
+  }
+
+  // 上传文件入库（个人知识库）：原始 body + x-filename 头。md/txt 直读，
+  // docx 手写 zip 解析，PDF 走 pdfjs-dist。提取文本写成 kind: personal 的 md。
+  if (p === '/api/knowledge/upload' && req.method === 'POST') {
+    const filename = (() => {
+      try { return decodeURIComponent(req.headers['x-filename'] || ''); } catch { return ''; }
+    })();
+    if (!filename) fail(400, '缺少 x-filename 头');
+    const category = (() => {
+      try { return decodeURIComponent(req.headers['x-category'] || ''); } catch { return ''; }
+    })();
+    const buf = await readRaw(req);
+    if (!buf.length) fail(400, '文件是空的');
+    let parsed;
+    try { parsed = await parseUpload(filename, buf); }
+    catch (e) { fail(e instanceof ParseError ? 400 : 500, e.message); }
+    const r = createNote('personal', {
+      title: parsed.title,
+      body: parsed.text,
+      fm: cleanPersonalFm({category: ['灵感', '制度', '推文'].includes(category) ? category : '制度', sourceFile: filename, uploaded: new Date().toISOString().slice(0, 10)})
+    });
+    gitCommit(r.path, `上传 ${r.path}`);
+    invalidate();
+    return json(res, 201, {path: r.path, chars: parsed.text.length});
   }
 
   // —— AI 热点（第六星座的数据）——

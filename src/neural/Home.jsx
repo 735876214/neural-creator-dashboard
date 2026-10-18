@@ -30,7 +30,8 @@ function moduleSummary(graph, m) {
     methods: () => [graph.links.filter(l => l.kind === 'wiki').length, '双链', 'wikilinks'],
     ideas: () => [items.filter(n => n.idea.status !== '已转草稿').length, '待写', 'to write'],
     drafts: () => [fmt(items.reduce((s, n) => s + (n.body || '').length, 0)), '字', 'chars'],
-    news: () => [items.length, '份日报', 'digests']
+    news: () => [items.length, '份日报', 'digests'],
+    personal: () => [items.filter(n => n.personal?.url).length, '条剪藏', 'clips']
   }[m.id]?.() || [items.length, '条', 'items'];
   return {count: items.length, sub};
 }
@@ -43,6 +44,7 @@ function itemMeta(n) {
     case 'idea': return [[n.idea.priority, 'Priority', ''], [n.idea.status, '', ''], ['↔', '', d.both]];
     case 'draft': return [['字', 'Chars', fmt((n.body || '').length)], ['↔', '', d.both]];
     case 'concept': return [['提及', 'Mentions', n.in], ['↔', '', d.both]];
+    case 'personal': return [[n.personal?.category || '笔记', '', ''], [n.personal?.domain || (n.personal?.url ? '链接' : '本地'), '', ''], ['↔', '', d.both]];
     default: return [];
   }
 }
@@ -70,9 +72,10 @@ function targets(L, t) {
     });
   } else if (narrow) {
     res.core = {x: 40, y: 156, s: 86};
+    const slotN = MODULES.length - 1, clS = MODULES.length > 6 ? 110 : 120;
     MODULES.forEach((m, i) => {
       const sel = m.id === L.mod, k = slotOf(L.mod, m.id);
-      res.cluster[m.id] = {x: 104 + k * (W - 136) / 4, y: 152 + swim * 4 * Math.sin(t * .9 + i * 2), s: sel ? 168 : 120, o: sel ? 1 : .55};
+      res.cluster[m.id] = {x: 104 + k * (W - 136) / slotN, y: 152 + swim * 4 * Math.sin(t * .9 + i * 2), s: sel ? 150 : clS, o: sel ? 1 : .55};
     });
     const n = L.fanRows || L.items.length, gap = clamp((H - 330) / Math.max(n - 1, 1), 22, 54);
     res.fan = {x: 34, y0: 286, gap};
@@ -80,13 +83,15 @@ function targets(L, t) {
     const ox = Math.max(124, W * .09), cy = H * .53;
     res.core = {x: ox, y: cy, s: 178};
     // v6.4：五卡片用足整列高度（旧式 122 行距下卡片只差几像素就贴住，选中卡甚至压住下一张）——
-    // 上避面包屑（下沿 ~130）、下避底部提示条（上沿 ~H-70），单卡高约 119，上下各留 ≥16 净空
+    // 上避面包屑（下沿 ~130）、下避底部提示条（上沿 ~H-70），单卡高约 119，上下各留 ≥16 净空；
+    // v7.0 起模块数到 7：行距下限与簇尺寸各收一档，否则整列溢出。
+    const seven = MODULES.length > 6;
     const colX = ox + 158, cardH = 119, topY = 150, botY = H - 73;
-    const gap = clamp((Math.min(cy - topY, botY - cy) - cardH / 2) / 2, 122, 200);
-    const mid = (MODULES.length - 1) / 2;   // 5 模块 = 2（居中一格），6 模块 = 2.5
+    const gap = clamp((Math.min(cy - topY, botY - cy) - cardH / 2) / 2, seven ? 74 : 122, 200);
+    const mid = (MODULES.length - 1) / 2;
     MODULES.forEach((m, i) => {
       const sel = m.id === L.mod, k = slotOf(L.mod, m.id);
-      res.cluster[m.id] = {x: colX + (sel ? 16 : 0), y: cy + (k - mid) * gap + swim * 5 * Math.sin(t * .9 + i * 2), s: sel ? 300 : 220, o: sel ? 1 : .6};
+      res.cluster[m.id] = {x: colX + (sel ? 16 : 0), y: cy + (k - mid) * gap + swim * 5 * Math.sin(t * .9 + i * 2), s: sel ? (seven ? 252 : 300) : (seven ? 184 : 220), o: sel ? 1 : .6};
     });
     // 条目以右侧星系仪为基准排在它左边约 90px 处（条目最宽约 270px），星座线拉长、画面左右均衡；
     // 模块层和打开笔记后位置相同，右侧栏滑入时队列不跳动
@@ -120,8 +125,8 @@ const sp = x => ({x, v: 0});
 // 星核向外飘散的星尘（星核本地坐标，画布 1012×1012，中心 506）
 const DUST = Array.from({length: 130}, (_, i) => ({a: i * 2.39996, v: .035 + (i * 37 % 100) / 100 * .06, o: (i * .618034) % 1, w: (i % 2 ? 1 : -1) * (.15 + (i % 7) * .05), s: .7 + (i % 5) * .32, b: .45 + (i % 3) * .25, c: T.dust[i % T.dust.length]}));
 
-// —— 星团 = 六个真实星座（v6.3 落地）——
-// 知识笔记→天蝎 · 概念→双鱼 · 作品→处女 · 选题→射手 · 草稿→水瓶 · AI 热点→仙女座（星座表与坐标口径见 constellations.js）。
+// —— 星团 = 七个真实星座（v7.0 落地第 7 个）——
+// 知识笔记→天蝎 · 概念→双鱼 · 作品→处女 · 选题→射手 · 草稿→水瓶 · AI 热点→仙女 · 个人知识库→猎户（星座表与坐标口径见 constellations.js）。
 // 骨架星位、经典连线、星等全部来自真实星表，图形是**静态**的，所以整幅烘焙成一张离屏画布（每簇一张，2×），
 // 逐帧只做一次 drawImage + 主星闪烁 —— 这是 v6.2 定的落地口径（星座层比原来的光球层省 2.8–5.5×）。
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
@@ -555,7 +560,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
 
     {stage === 'hub' && <div className="legend glass" aria-label="图例">
       <h3>图例 <em>Legend</em></h3>
-      {['post', 'note', 'idea', 'draft', 'concept', 'tag', 'ghost'].map(k => <div key={k}><i style={{'--kc': KINDS[k].color}} className={k === 'ghost' ? 'ghost' : ''}/>{KINDS[k].label} <em>{KINDS[k].en}</em><b className="mono">{graph.nodes.filter(n => n.kind === k).length}</b></div>)}
+      {['post', 'note', 'personal', 'idea', 'draft', 'concept', 'tag', 'ghost'].map(k => <div key={k}><i style={{'--kc': KINDS[k].color}} className={k === 'ghost' ? 'ghost' : ''}/>{KINDS[k].label} <em>{KINDS[k].en}</em><b className="mono">{graph.nodes.filter(n => n.kind === k).length}</b></div>)}
       <div className="legend-lines"><span><i className="ln mutual"/>双向 <em>Mutual</em></span><span><i className="ln one"/>单向 <em>One-way</em></span></div>
       <p className="legend-foot">环带宽度 = 节点数 · 外圈 = 概念 <em>Ring width = count</em></p>
     </div>}

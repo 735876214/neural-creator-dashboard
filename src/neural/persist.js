@@ -9,7 +9,7 @@
 // 写入调度：1.2s 防抖、同一 key 串行、失败进内存 outbox 并按指数退避重试。
 // 按「数据不保存在浏览器」的要求，outbox 只在内存里；刷新/关闭页面前会提示。
 import {useSyncExternalStore} from 'react';
-import {getMeta, getFiles, getMtimes, getSettings} from '../data/store.js';
+import {getMeta, getFiles, getMtimes, getSettings, setApiData} from '../data/store.js';
 
 export const isLive = () => !!getMeta();
 
@@ -376,6 +376,13 @@ export async function deleteDraft(id) {
 }
 
 // —— 完整正文读取（/api/data 的正文被 clean() 截断到 6000 字）——
+
+// 重新拉全量数据（知识库新增剪藏 / 删除后调用）：setApiData 触发订阅者，图谱与列表即时重建。
+export async function refreshData() {
+  const res = await fetch(API + '/api/data?fresh');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  setApiData(await res.json());
+}
 
 const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 

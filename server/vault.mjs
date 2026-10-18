@@ -65,6 +65,8 @@ export function tagsOf(fm, body) {
 export const clean = body => body.replace(/\r/g, '').trim().slice(0, 6000);
 
 // —— 分类 ——
+// 个人知识库（06-个人知识库）要在 methods 之前判断：methods 规则里有「知识」二字，会先吞掉它。
+export const RULES_PERSONAL = ['personal', /(个人知识库|个人库|knowledge[ _-]?base|personal)/i];
 export const RULES = [
   ['works', /(作品|works?$|published|已发布)/i],
   ['drafts', /(草稿|创作台|drafts?$|正在写|写作中)/i],
@@ -85,6 +87,7 @@ export function classify(rel, dirs, allAsNotes = false) {
     const prefix = norm(f);
     if (norm(rel).startsWith(prefix + '/')) return {kind, root: prefix.split('/').length};
   }
+  for (let i = 0; i < names.length; i++) if (RULES_PERSONAL[1].test(names[i])) return {kind: 'personal', root: i + 1};
   for (let i = 0; i < names.length; i++) for (const [kind, re] of RULES) {
     if ((d[kind] || []).length) continue;
     if (re.test(names[i])) return {kind, root: i + 1};
@@ -105,8 +108,9 @@ export function readVault(opts = {}) {
   const dirs = {works: opts.works || [], methods: opts.methods || [], ideas: opts.ideas || [], drafts: opts.drafts || []};
   const maxWorks = opts.maxWorks || 30, maxNotes = opts.maxNotes || 40;
 
-  // news（AI 热点日报）与 methods 同一条通道进图谱，但保留自己的 kind
-  const bucket = {works: [], methods: [], ideas: [], drafts: [], news: []};
+  // news（AI 热点日报）与 methods 同一条通道进图谱，但保留自己的 kind；
+  // personal（个人知识库：灵感 / 制度 / 推文剪藏）同样保留自己的 kind。
+  const bucket = {works: [], methods: [], ideas: [], drafts: [], news: [], personal: []};
   for (const file of walk(vault)) {
     const rel = relative(vault, file), c = classify(rel, dirs, !!opts.allAsNotes);
     if (!c) continue;
@@ -147,6 +151,24 @@ export function readVault(opts = {}) {
     notes.push({id: 'news' + (i + 1), title: x.title, path: `${parts[0]}/${parts.slice(1).join('/') || x.title}`, body: clean(x.body), tags: tagsOf(x.fm, x.body), rel: norm(x.rel), kind: 'news'});
   });
 
+  // —— 个人知识库（灵感 / 制度 / 推文剪藏）：path 保留真实目录（同 news 的做法），
+  // frontmatter 的 url / domain / author / snapshot 透传给前端渲染来源信息 ——
+  bucket.personal.slice(0, 120).forEach((x, i) => {
+    const parts = x.rel.split(sep);
+    notes.push({
+      id: 'p' + (i + 1), title: x.title, path: `${parts[0]}/${parts.slice(1).join('/') || x.title}`,
+      body: clean(x.body), tags: tagsOf(x.fm, x.body), rel: norm(x.rel), kind: 'personal',
+      category: String(pick(x.fm, ['category', '分类']) || '').trim(),
+      url: String(pick(x.fm, ['url', '链接', 'source']) || '').trim() || undefined,
+      domain: String(pick(x.fm, ['domain', '站点']) || '').trim() || undefined,
+      author: String(pick(x.fm, ['author', '作者']) || '').trim() || undefined,
+      snapshot: String(pick(x.fm, ['snapshot', '快照']) || '').trim() || undefined,
+      sourceFile: String(pick(x.fm, ['sourceFile', '来源文件']) || '').trim() || undefined,
+      summary: String(pick(x.fm, ['summary', '摘要']) || '').trim() || undefined,
+      keyPoints: Array.isArray(x.fm.keyPoints) ? x.fm.keyPoints.map(String).filter(Boolean) : undefined
+    });
+  });
+
   // —— 选题 ——
   const ideas = bucket.ideas.map((x, i) => {
     const status = String(pick(x.fm, ['status', '状态']) || '待写');
@@ -176,6 +198,6 @@ export function readVault(opts = {}) {
 
   return {
     works, notes, ideas, drafts, concepts, snapshot,
-    counts: {works: works.length, worksTotal: bucket.works.length, notes: notes.length, notesTotal: bucket.methods.length, ideas: ideas.length, drafts: drafts.length}
+    counts: {works: works.length, worksTotal: bucket.works.length, notes: notes.length, notesTotal: bucket.methods.length, ideas: ideas.length, drafts: drafts.length, personal: bucket.personal.length}
   };
 }

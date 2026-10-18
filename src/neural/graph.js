@@ -19,6 +19,7 @@ export const KINDS = {
   concept: {label: '概念', en: 'Concept', color: T.kinds.concept},
   tag: {label: '话题', en: 'Topic', color: T.kinds.tag},
   news: {label: 'AI 热点', en: 'AI news', color: T.kinds.news},
+  personal: {label: '个人收藏', en: 'Knowledge clip', color: T.kinds.personal},
   ghost: {label: '未创建', en: 'Unresolved', color: T.kinds.ghost}
 };
 export const LINK_KINDS = {
@@ -34,26 +35,28 @@ export const LINK_KINDS = {
   semantic: '语义相关'
 };
 export const LINK_EN = {contain: 'Contains', wiki: 'Wikilink', source: 'Source', news: 'News source', publish: 'Published as', tag: 'Topic', mention: 'Mention', resonance: 'Resonance', bridge: 'Shared concept', semantic: 'Semantic'};
-export const CONTENT = new Set(['post', 'note', 'idea', 'draft', 'news']);
-// 内容分区：方法笔记 / AI 热点（knowledge）与作品侧（works）。数据里带 partition 时以数据为准。
-export const PARTITION_OF = n => n?.partition || (n?.kind === 'note' || n?.kind === 'news' ? 'knowledge' : 'works');
+export const CONTENT = new Set(['post', 'note', 'idea', 'draft', 'news', 'personal']);
+// 内容分区：方法笔记 / AI 热点 / 个人知识库（knowledge）与作品侧（works）。数据里带 partition 时以数据为准。
+export const PARTITION_OF = n => n?.partition || (n?.kind === 'note' || n?.kind === 'news' || n?.kind === 'personal' ? 'knowledge' : 'works');
 
 const FOLDERS = [
   {id: 'f:works', title: '作品库', path: '02-作品库', angle: 180},
   {id: 'f:drafts', title: '创作台', path: '03-创作台', angle: 145},
   {id: 'f:ideas', title: '选题池', path: '04-选题池', angle: 35},
   {id: 'f:methods', title: '方法库', path: '05-方法库 methods', angle: 0},
-  {id: 'f:00-AI热点', title: 'AI 热点', path: '00-AI热点', angle: -35}
+  {id: 'f:00-AI热点', title: 'AI 热点', path: '00-AI热点', angle: -35},
+  {id: 'f:personal', title: '个人知识库', path: '06-个人知识库', angle: -145}
 ];
 
-// 首页围绕光球的六个模块；角度与图谱布局的目录锚点一致，背景网络会朝各自模块蔓延。
+// 首页围绕光球的七个模块；角度与图谱布局的目录锚点一致，背景网络会朝各自模块蔓延。
 export const MODULES = [
   {id: 'works', title: '作品库', en: 'Works', kind: 'post', folder: 'f:works', angle: 180, icon: 'works', page: 'library'},
   {id: 'concepts', title: '概念网络', en: 'Concepts', kind: 'concept', angle: -90, icon: 'concept'},
   {id: 'methods', title: '方法库', en: 'Methods', kind: 'note', folder: 'f:methods', angle: 0, icon: 'methods'},
   {id: 'ideas', title: '选题池', en: 'Ideas', kind: 'idea', folder: 'f:ideas', angle: 35, icon: 'idea', page: 'ideas'},
   {id: 'drafts', title: '创作台', en: 'Drafts', kind: 'draft', folder: 'f:drafts', angle: 145, icon: 'draft', page: 'drafts'},
-  {id: 'news', title: 'AI 热点', en: 'AI Radar', kind: 'news', folder: 'f:00-AI热点', angle: -35, icon: 'news'}
+  {id: 'news', title: 'AI 热点', en: 'AI Radar', kind: 'news', folder: 'f:00-AI热点', angle: -35, icon: 'news'},
+  {id: 'personal', title: '个人知识库', en: 'Knowledge', kind: 'personal', folder: 'f:personal', angle: -145, icon: 'personal', page: 'knowledge'}
 ];
 export const moduleOf = node => MODULES.find(m => m.kind === node?.kind) || null;
 
@@ -88,16 +91,20 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     link('f:works', 'post:' + p.id, 'contain');
   }
 
-  // 方法笔记与子目录；AI 热点日报（kind: 'news'）挂在 00-AI热点 目录节点下。
+  // 方法笔记与子目录；AI 热点日报（kind: 'news'）挂 00-AI热点 目录节点；
+  // 个人知识库（kind: 'personal'：灵感 / 制度 / 推文剪藏）挂 06-个人知识库 目录节点。
   for (const n of notesRaw) {
     const parts = n.path.split('/');
     const isNews = n.kind === 'news';
-    const sub = isNews ? parts[0] : parts[1];
+    const isPersonal = n.kind === 'personal';
+    const sub = isNews ? parts[0] : isPersonal ? '06-个人知识库' : parts[1];
     const subId = 'f:' + sub;
-    add({id: subId, kind: 'folder', title: sub.replace(/^\d+-/, '').replace(/\s+[a-z-]+$/i, ''), path: parts.slice(0, 2).join('/'), level: 2});
-    link(isNews ? 'f:00-AI热点' : 'f:methods', subId, 'contain');
-    const id = (isNews ? 'news:' : 'note:') + n.id;
-    add({id, kind: isNews ? 'news' : 'note', title: n.title, short: cleanTitle(n.title), path: n.path, folder: subId, partition: n.partition || 'knowledge', text: n.title + '\n' + n.body, body: n.body, tags: n.tags || []});
+    add({id: subId, kind: 'folder', title: sub.replace(/^\d+-/, '').replace(/\s+[a-z-]+$/i, ''), path: isPersonal ? parts[0] : parts.slice(0, 2).join('/'), level: 2});
+    link(isNews ? 'f:00-AI热点' : isPersonal ? 'f:personal' : 'f:methods', subId, 'contain');
+    const kind = isNews ? 'news' : isPersonal ? 'personal' : 'note';
+    const id = (isPersonal ? 'personal:' : isNews ? 'news:' : 'note:') + n.id;
+    add({id, kind, title: n.title, short: cleanTitle(n.title), path: n.path, folder: subId, partition: n.partition || 'knowledge', text: n.title + '\n' + n.body, body: n.body, tags: n.tags || [],
+      ...(isPersonal ? {personal: n} : {})});
     link(subId, id, 'contain');
   }
 

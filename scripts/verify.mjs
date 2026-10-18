@@ -57,11 +57,13 @@ function check(m, label, {allowEmptyPosts = false} = {}) {
     if (!m.postContent.some(c => c.title === p.title)) errs.push(`postContent 里找不到作品：${p.title}`);
   }
   if (new Set(m.posts.map(p => p.id)).size !== m.posts.length) errs.push('作品 id 有重复');
-  // 导入脚本写「05-方法库 methods/」；手写数据时也用这个前缀。AI 热点日报走自己的目录。
+  // 导入脚本写「05-方法库 methods/」；手写数据时也用这个前缀。AI 热点日报与个人知识库走自己的目录。
   for (const n of m.notes) {
     const okPath = n.kind === 'news'
       ? /^00-AI热点\/.+\.md$/.test(n.path || '')
-      : /^05-方法库 methods\/[^/]+\/.+/.test(n.path || '');
+      : n.kind === 'personal'
+        ? /^06-个人知识库\/.+/ .test(n.path || '')
+        : /^05-方法库 methods\/[^/]+\/.+/.test(n.path || '');
     if (!okPath) errs.push(`笔记 path 格式不对：${n.title}`);
   }
   for (const i of m.seedIdeas) if (typeof i.id !== 'number' || !['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题 id 须为数字、status 须为 待写/待扩展/已转草稿：${i.title}`);
@@ -96,7 +98,7 @@ const source = hasLocal ? 'my-data.local.js' : 'sample.js';
 }
 
 // 3. 核心动效：星核、六簇星团与活着的星穹背景是这个看板的核心，不能被删掉或改成静态
-console.log('核心动效（星核与六簇星团）');
+console.log('核心动效（星核与七簇星团）');
 const home = readFileSync(join(ROOT, 'src/neural/Home.jsx'), 'utf8');
 const graphSrc = readFileSync(join(ROOT, 'src/neural/graph.js'), 'utf8');
 const cosmosSrc = readFileSync(join(ROOT, 'src/neural/Cosmos.jsx'), 'utf8');
@@ -127,15 +129,15 @@ for (const [label, re] of sky) if (!new RegExp(re.source).test(cosmosSrc) && !ne
 if (/<video/.test(home) || /<video/.test(cosmosSrc)) fail('Home.jsx / Cosmos.jsx 不应再引用视频素材（reskin v0 已改为全代码自绘）');
 else ok('零视频素材：星核、星团、星云全部代码自绘');
 const modules = (graphSrc.match(/export const MODULES = \[([\s\S]*?)\n\];/) || [])[1] || '';
-if ((modules.match(/\{id: '/g) || []).length !== 6) fail('graph.js 的 MODULES 应为 6 个模块（6 个星团）');
-else ok('6 个模块 → 6 个星团');
+if ((modules.match(/\{id: '/g) || []).length !== 7) fail('graph.js 的 MODULES 应为 7 个模块（7 个星团）');
+else ok('7 个模块 → 7 个星团');
 
-// 3b. 六星座（v6.3）：六个模块 = 六个真实星座，图形来自真实星表，逐帧只做贴图 + 主星闪烁
-console.log('六星座（v6.3）');
+// 3b. 七星座（v6.3 起，v7.0 加入第 7 个）：七个模块 = 七个真实星座，图形来自真实星表，逐帧只做贴图 + 主星闪烁
+console.log('七星座（v7.0）');
 const consSrc = readFileSync(join(ROOT, 'src/neural/constellations.js'), 'utf8');
 const figs = [
   ['真实星座骨架表（d3-celestial · J2000 赤经赤纬）', /constellations\.lines\.json/],
-  ['六个模块的星座映射（天蝎/双鱼/处女/射手/水瓶/仙女）', /天蝎座[\s\S]*双鱼座[\s\S]*处女座[\s\S]*射手座[\s\S]*水瓶座[\s\S]*仙女座/],
+  ['七个模块的星座映射（天蝎/双鱼/处女/射手/水瓶/仙女/猎户）', /天蝎座[\s\S]*双鱼座[\s\S]*处女座[\s\S]*射手座[\s\S]*水瓶座[\s\S]*仙女座[\s\S]*猎户座/],
   ['经典连线（逐段照抄，不自创）', /edges: \[\[0, 1\]/],
   ['烘焙：整幅离屏渲染，逐帧只贴图', /export function baked\(/],
   ['命中区按骨架外沿多边形（不是 bbox）', /export function hitOf\(/]
@@ -146,11 +148,11 @@ if (!/paintConstellation/.test(bandSrc)) fail('内页星座轨（ConstellationBa
 else ok('内页星座轨复用同一套星座画法');
 for (const f of ['src/neural/pages.jsx']) {
   const src = readFileSync(join(ROOT, f), 'utf8');
-  if ((src.match(/<ConstellationBand/g) || []).length !== 3) fail(`${f} 的三个内页都应带星座轨`);
-  else ok('作品库 / 创作台 / 选题池 三个内页都带星座轨');
+  if ((src.match(/<ConstellationBand/g) || []).length !== 4) fail(`${f} 的四个内页都应带星座轨`);
+  else ok('作品库 / 创作台 / 选题池 / 知识库 四个内页都带星座轨');
 }
 if (!/from '\.\/constellations'/.test(home) || !/figData/.test(home) || !/drawCluster\(canvasRefs/.test(home)) fail('Home.jsx 没有用星座层渲染星团');
-else ok('主视图星团层 = 六星座（烘焙 + 主星闪烁）');
+else ok('主视图星团层 = 七星座（烘焙 + 主星闪烁）');
 for (const f of ['media/orb.mp4', 'media/jellyfish.mp4']) if (existsSync(join(ROOT, 'public', f))) warnings.push(`public/${f} 已不再被引用，可以删除（保留不影响）`);
 
 // 3c. 登录页与会话鉴权

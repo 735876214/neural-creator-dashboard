@@ -12,8 +12,8 @@ import {paintConstellation, baked, nameOf, countsOf} from './constellations';
 const CW = 168, CH = 140;                                // 每个小星座的展示尺寸（CSS px，按 2× 绘制）
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const cache = new Map();
-// 垂距（px，向下为正）：v6.5 起全部为 0 = 六个星座同一基线、居中排列
-const ARC = [0, 0, 0, 0, 0, 0];
+// 垂距（px，向下为正）：v6.5 起全部为 0 = 七个星座同一基线、居中排列
+const ARC = [0, 0, 0, 0, 0, 0, 0];
 
 // 小尺寸烘焙：与主视图同一份数据、同一套画法，只是整体缩放到展示框里
 function miniOf(id) {
@@ -48,9 +48,9 @@ export function ConstellationBand({page, onGo}) {
       g.drawImage(src, 0, 0);
     }
   }, [figs]);
-  return <section className="const-band glass" aria-label="六个星座 · 六个模块">
+  return <section className="const-band glass" aria-label="七个星座 · 七个模块">
     <div className="cb-copy">
-      <p className="cb-title">六个星座 <em>Six constellations</em></p>
+      <p className="cb-title">七个星座 <em>Seven constellations</em></p>
       <p className="cb-note">真实星位与经典连线 · 与工作台同一套<em>Real sky positions, classic lines</em></p>
     </div>
     <div className="cb-figs" role="list">

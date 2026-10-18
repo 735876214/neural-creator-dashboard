@@ -57,6 +57,9 @@ services:
       AI_MODEL_ANALYZE: ${AI_MODEL_ANALYZE:-}
       AI_MODEL_IDEAS: ${AI_MODEL_IDEAS:-}
       AI_MODEL_NEWS: ${AI_MODEL_NEWS:-}
+      # —— 网页剪藏（个人知识库）——
+      WEB_FETCH_TIMEOUT: ${WEB_FETCH_TIMEOUT:-20000}
+      WEB_FETCH_MAX_BYTES: ${WEB_FETCH_MAX_BYTES:-2097152}
       # —— AI 热点 ——
       NEWS_SOURCE: ${NEWS_SOURCE:-}
       NEWS_HOUR: ${NEWS_HOUR:-8}

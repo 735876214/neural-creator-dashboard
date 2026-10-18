@@ -13,16 +13,18 @@ export const T = {
     concept: '#eaf0ff',
     tag: '#98a4c6',
     news: '#ffc3d2',
+    personal: '#d9c4ff',
     ghost: '#5f6c96'
   },
-  // 六个星团：色温各有微差（蓝紫 / 青白 / 冷蓝 / 淡金 / 青绿白 / 粉）
+  // 七个星团：色温各有微差（蓝紫 / 青白 / 冷蓝 / 淡金 / 青绿白 / 粉 / 淡紫）
   modules: {
     works: {color: '#bda9ff', warm: '#e6ddff', cool: '#8f7bf0'},
     concepts: {color: '#e2eaff', warm: '#fff6e2', cool: '#9fb6e8'},
     methods: {color: '#a5dcff', warm: '#e2f4ff', cool: '#7aa8e8'},
     ideas: {color: '#ffd79a', warm: '#fff0cf', cool: '#e8b06a'},
     drafts: {color: '#9ff0e0', warm: '#dcfff5', cool: '#6cc8c8'},
-    news: {color: '#ffb0c8', warm: '#ffe2ec', cool: '#e87a9e'}
+    news: {color: '#ffb0c8', warm: '#ffe2ec', cool: '#e87a9e'},
+    personal: {color: '#cbb3f0', warm: '#efe4ff', cool: '#9a7fe0'}
   },
   // 星座线：全部金色系（去掉白/蓝/绿杂色）。near 是簇内亮线，far 是跨簇暗线，flow 是流动光粒
   line: {core: '#e8c884', glow: '#b98f3c', dim: '#7d6a44', flow: '#fff2cd'},

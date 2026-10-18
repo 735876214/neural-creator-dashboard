@@ -144,6 +144,13 @@ docker compose --profile vpn up -d
 
 ## 6.5 AI 热点（第六星座）
 
+> 另有第七星座「个人知识库」：`06-个人知识库/` 下的 `kind: personal` 笔记（灵感 / 制度 / 推文剪藏）。
+> 在看板「知识库」页粘贴链接即可由 note-api 抓取网页、保存 HTML 快照到 `06-个人知识库/.snapshots/`，
+> 配置了 AI 时自动生成摘要与要点写回 frontmatter。快照读取接口带 CSP，不会执行剪藏页的脚本。
+>
+> **AI 助手**：创作台与知识库页右下角的浮动抽屉。上传 md / txt / docx / pdf（≤ MAX_BODY，默认 4 MB）
+> 自动提取文本存进 `06-个人知识库/`（frontmatter 记 `sourceFile`），并可直接对全库提问（复用 `/api/ai/ask` 的 RAG 带引用；未配 AI key 时回退本地规则检索）。
+
 首页多出的一簇「AI 热点」每天自动生成一份日报：
 
 - 数据源是现成的公开 RSS（默认 [AIHOT 全部 AI 动态](https://aihot.news/all)，`NEWS_SOURCE` 可换成任何 RSS 2.0 源）；

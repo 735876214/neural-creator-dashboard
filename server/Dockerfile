@@ -1,7 +1,7 @@
 # note-api：读写笔记库的 HTTP 服务，同时可以托管前端构建产物 dist/。
 #
-# 服务端零依赖（只用 Node 自带模块），所以不需要 npm install、没有原生编译，
-# 镜像很小、构建很快。
+# 服务端只用 Node 自带模块，唯一的运行时依赖是 pdfjs-dist（上传 PDF 的文本提取，
+# 纯 JS 无原生编译）。npm install --omit=dev 只装它，镜像仍然很小。
 FROM node:24-alpine
 
 # VAULT_GIT=1 时 note-api 会调用 git 做自动提交；alpine 基础镜像不自带 git。
@@ -18,6 +18,8 @@ WORKDIR /app
 # 只拷服务端：前端默认由 nginx 托管；需要让 note-api 直接托管时设置 STATIC_DIR 并挂载 dist。
 COPY server ./server
 COPY package.json ./
+# 运行时依赖只有 pdfjs-dist（react / vite 都在 devDependencies，不会被装进镜像）
+RUN npm install --omit=dev --no-audit --no-fund
 
 ENV NODE_ENV=production \
     PORT=8787 \

@@ -738,6 +738,57 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
 .an-ask { border-top-color: var(--rule); }
 .chip { border-radius: 7px; }
 
+/* —— v7.1 AI 助手（创作台 / 知识库的浮动抽屉）—— */
+.as-fab { position: fixed; right: 22px; bottom: 22px; z-index: 40; display: flex; align-items: center; gap: 7px; padding: 9px 14px; border-radius: 999px; border-color: var(--gold-hair); color: var(--gold); font-size: 12.5px; letter-spacing: .06em; cursor: pointer; }
+.as-fab:hover { border-color: var(--gold-line); }
+.as-drawer { position: fixed; right: 18px; bottom: 18px; z-index: 41; display: flex; flex-direction: column; width: min(400px, calc(100vw - 36px)); height: min(520px, calc(100vh - 40px)); border-color: var(--gold-hair); border-radius: var(--radius); overflow: hidden; }
+.as-drawer > header { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+.as-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--gold); letter-spacing: .1em; flex: 1; }
+.as-tabs { display: flex; gap: 4px; }
+.as-tabs button { padding: 4px 10px; border: 1px solid transparent; border-radius: 999px; background: none; color: var(--ink-2); font-size: 11.5px; cursor: pointer; }
+.as-tabs button.on { border-color: var(--gold-hair); color: var(--gold); }
+.as-tabs button:disabled { opacity: .4; cursor: not-allowed; }
+.as-thread { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.as-hint { margin: 0; font-size: 12px; color: var(--ink-3); line-height: 1.6; }
+.as-q { margin: 0; align-self: flex-end; max-width: 85%; padding: 7px 12px; border-radius: 12px 12px 3px 12px; background: color-mix(in srgb, var(--gold) 16%, transparent); border: 1px solid var(--gold-hair); font-size: 12.5px; }
+.as-a { max-width: 95%; font-size: 12.5px; line-height: 1.65; color: var(--ink); }
+.as-a > p { margin: 0; white-space: pre-wrap; }
+.as-local { margin-top: 6px; padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--radius-sm); }
+.as-local h5 { margin: 0 0 4px; font-size: 11px; color: var(--gold); letter-spacing: .1em; }
+.as-local p { margin: 0 0 6px; font-size: 11.5px; color: var(--ink-2); }
+.as-busy { margin: 0; font-size: 12px; color: var(--ink-3); font-style: italic; }
+.as-ask { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--rule); }
+.as-ask input { flex: 1; min-width: 0; }
+.as-ask .send { flex: none; }
+.as-upload { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; }
+.as-cats { display: flex; gap: 6px; }
+.as-cats button { padding: 5px 14px; border: 1px solid var(--rule-2); border-radius: 999px; background: none; color: var(--ink-2); font-size: 12px; cursor: pointer; }
+.as-cats button.on { border-color: var(--gold-line); color: var(--gold); }
+.as-drop { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 150px; border: 1px dashed var(--rule-2); border-radius: var(--radius); cursor: pointer; color: var(--ink-3); font-size: 12.5px; transition: border-color .2s, background .2s; }
+.as-drop:hover, .as-drop.busy { border-color: var(--gold-line); background: rgba(232, 200, 132, .05); }
+.as-drop input { display: none; }
+.as-uplog { margin: 0; padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--radius-sm); font-size: 11.5px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; max-height: 130px; overflow-y: auto; }
+
+/* —— v7.0 知识库页（个人知识库：灵感 / 制度 / 推文剪藏）—— */
+.kbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; margin-bottom: 12px; border-radius: var(--radius); }
+.kbar-clip { display: flex; align-items: center; gap: 8px; flex: 1 1 380px; min-width: 0; }
+.kbar-clip input { flex: 1; min-width: 0; }
+.kbar-actions { display: flex; gap: 8px; }
+.kcats { margin-bottom: 14px; }
+.kgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.kcard { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: var(--radius); animation: cardIn .5s both; }
+.kcard header { cursor: pointer; }
+.kcard h3 { margin: 0; font-size: 15px; line-height: 1.4; }
+.kcard header:hover h3 { color: #f0d6a0; }
+.kc-src { margin: 4px 0 0; font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+.kc-summary { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-2); border-left: 2px solid color-mix(in srgb, var(--kc) 45%, transparent); padding-left: 10px; }
+.kc-points { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.65; color: var(--ink-2); }
+.kc-body { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-3); }
+.kcard footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 6px; border-top: 1px solid var(--rule); }
+.kcard footer .pill { padding: 4px 9px; font-size: 11.5px; }
+.kempty { grid-column: 1 / -1; }
+@media (max-width: 700px) { .kgrid { grid-template-columns: 1fr; } }
+
 /* —— v6.3 内页星座轨：六个模块 = 六个星座（与工作台同一套语言），本页的那一个亮着 —— */
 .const-band { display: flex; align-items: center; gap: 16px; padding: 12px 16px 14px; margin-bottom: 16px; border-radius: var(--radius); }
 .cb-copy { flex: none; width: 170px; }

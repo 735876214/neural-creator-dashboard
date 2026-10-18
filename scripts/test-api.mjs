@@ -5,7 +5,8 @@
 import {strict as assert} from 'node:assert';
 import {spawn} from 'node:child_process';
 import {cpSync, existsSync, mkdtempSync, readFileSync, rmSync} from 'node:fs';
-import {createServer} from 'node:net';
+import {createServer} from 'node:http';
+import {createServer as createNetServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -55,10 +56,11 @@ try {
       NEWS_CRON: '0',
       AI_API_KEY: '',
       EMBED_API_KEY: '',
-      // 基础用例不开启登录，也避免开发机上的环境变量干扰
+      // 基础用例不开启登录，也避免开发机上的环境变量干扰；网页抓取允许私网（测试用本地 HTTP 服务）
       DASHBOARD_PASSWORD: '',
       AUTH_FILE: '',
-      API_TOKEN: ''
+      API_TOKEN: '',
+      WEB_FETCH_ALLOW_PRIVATE: '1'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -131,7 +133,118 @@ try {
   assert.equal(bad.status, 400);
   ok('非法选题状态返回 400');
 
-  // 7. 登录：未登录 401 → /api/login 拿 Cookie → 带 Cookie 可读 → auth-check 204
+  // 6b. 个人知识库：本地 HTTP 服务当网页源 → 剪藏 → 快照 → /api/data → 删除备份
+  const clipPage = await new Promise(ok2 => {
+    const s = createServer((req, res) => {
+      res.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
+      res.end('<!doctype html><html><head><title>E2E 剪藏测试页</title></head><body><nav>导航噪音</nav><article><h1>正文标题</h1><p>这是一段足够长的测试正文，用来验证 HTML 转文本与网页剪藏落盘链路。' + '内容填充。'.repeat(30) + '</p></article></body></html>');
+    });
+    s.listen(0, '127.0.0.1', () => { const {port} = s.address(); ok2({port, close: () => s.close()}); });
+  });
+  const posted = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({url: `http://127.0.0.1:${clipPage.port}/page`, category: '推文'})});
+  assert.equal(posted.status, 201, '剪藏应返回 201：' + JSON.stringify(posted.body));
+  assert.match(posted.body.path, /^06-个人知识库\//, '剪藏 md 应落在 06-个人知识库/');
+  assert.ok(existsSync(join(vault, posted.body.path)), '剪藏 md 未创建');
+  assert.match(readFileSync(join(vault, posted.body.path), 'utf8'), /url:/, 'frontmatter 应带 url');
+  assert.ok(posted.body.snapshot && existsSync(join(vault, posted.body.snapshot)), 'HTML 快照未落盘');
+  const data2 = await json('/api/data?fresh');
+  const clipped = data2.body.notes.find(n => n.kind === 'personal');
+  assert.ok(clipped && clipped.url, '/api/data 应包含 kind:personal 且带 url');
+  assert.equal(data2.body.files['personal:' + clipped.id], clipped.path ?? undefined, 'files 应有 personal: 前缀映射');
+  // AI 未启用：重新分析返回 501
+  const an501 = await json('/api/knowledge/analyze', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({path: posted.body.path})});
+  assert.equal(an501.status, 501);
+  // 快照读取：200 + CSP；目录外路径 400
+  const snap = await fetch(base + '/api/knowledge/snapshot?path=' + encodeURIComponent(posted.body.snapshot));
+  assert.equal(snap.status, 200);
+  assert.match(snap.headers.get('content-security-policy') || '', /default-src 'none'/, '快照响应必须带 CSP');
+  const snapBad = await json('/api/knowledge/snapshot?path=' + encodeURIComponent('05-方法库 methods/流程/观察记录方法.md'));
+  assert.equal(snapBad.status, 400);
+  // 非法 category
+  const badCat = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({title: 'x', category: '乱写'})});
+  assert.equal(badCat.status, 400);
+  // 缺 title 且缺 url
+  const badEmpty = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({note: 'x'})});
+  assert.equal(badEmpty.status, 400);
+  // 删除剪藏 → .trash 备份
+  const rmClip = await json('/api/note?path=' + encodeURIComponent(posted.body.path), {method: 'DELETE'});
+  assert.equal(rmClip.status, 200);
+  assert.ok(existsSync(join(vault, '.trash', posted.body.path)), '剪藏删除后应备份到 .trash');
+  clipPage.close();
+  ok('个人知识库：剪藏 / 快照 / 501 / 路径白名单 / 删除备份');
+
+  // 6c. 上传文件入库：md 直读 / docx zip 解析 / 非法类型 400
+  const upMd = await fetch(base + '/api/knowledge/upload', {method: 'POST',
+    headers: {'x-filename': encodeURIComponent('测试文档.md'), 'x-category': encodeURIComponent('制度'), 'content-type': 'application/octet-stream'},
+    body: '第一行：上传测试正文。\n第二条制度要点：零依赖解析。'});
+  assert.equal(upMd.status, 201, '上传 md 应 201');
+  const upMdBody = await upMd.json();
+  assert.match(upMdBody.path, /^06-个人知识库\//);
+  assert.ok(upMdBody.chars > 10);
+
+  // 最小 docx：手工构造 zip（store 存储，无压缩），word/document.xml 直写
+  const crc32 = b => { let c, table = []; for (let n = 0; n < 256; n++) { c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; table[n] = c; } let r = -1; for (const x of b) r = table[(r ^ x) & 0xff] ^ (r >>> 8); return (r ^ -1) >>> 0; };
+  const makeZip = entries => { // entries: [{name, data(Buffer)}]，全部 store 不压缩
+    const parts = [], central = [];
+    let offset = 0;
+    for (const {name, data} of entries) {
+      const nameBuf = Buffer.from(name, 'utf8');
+      const crc = crc32(data);
+      const local = Buffer.alloc(30 + nameBuf.length + data.length);
+      local.writeUInt32LE(0x04034b50, 0);
+      local.writeUInt16LE(20, 6);           // version needed
+      local.writeUInt16LE(0, 8);            // method = store
+      local.writeUInt32LE(crc, 14);
+      local.writeUInt32LE(data.length, 18); // compressed
+      local.writeUInt32LE(data.length, 22); // uncompressed
+      local.writeUInt16LE(nameBuf.length, 26);
+      nameBuf.copy(local, 30); data.copy(local, 30 + nameBuf.length);
+      parts.push(local);
+      const cd = Buffer.alloc(46 + nameBuf.length);
+      cd.writeUInt32LE(0x02014b50, 0);
+      cd.writeUInt16LE(20, 6);
+      cd.writeUInt16LE(0, 10);              // method = store
+      cd.writeUInt32LE(crc, 16);
+      cd.writeUInt32LE(data.length, 20);
+      cd.writeUInt32LE(data.length, 24);
+      cd.writeUInt16LE(nameBuf.length, 28);
+      cd.writeUInt32LE(offset, 42);         // local header offset
+      nameBuf.copy(cd, 46);
+      central.push(cd);
+      offset += local.length;
+    }
+    const cdBuf = Buffer.concat(central);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(entries.length, 8);
+    eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(cdBuf.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    return Buffer.concat([...parts, cdBuf, eocd]);
+  };
+  const docXml = '<?xml version="1.0"?><w:document xmlns:w="x"><w:body><w:p><w:r><w:t>第一条</w:t></w:r><w:r><w:t>上传测试制度正文</w:t></w:r></w:p><w:p><w:r><w:t>第二条：E2E 文档解析成功。</w:t></w:r></w:p></w:body></w:document>';
+  const docx = makeZip([{name: 'word/document.xml', data: Buffer.from(docXml, 'utf8')}]);
+  const upDocxRes = await fetch(base + '/api/knowledge/upload', {method: 'POST',
+    headers: {'x-filename': encodeURIComponent('会议纪要.docx'), 'x-category': encodeURIComponent('制度'), 'content-type': 'application/octet-stream'},
+    body: docx});
+  assert.equal(upDocxRes.status, 201, '上传 docx 应 201：' + JSON.stringify(await upDocxRes.json().catch(() => ({}))));
+  const d2 = await (await fetch(base + '/api/data?fresh')).json();
+  const docxNote = d2.notes.find(n => n.title === '会议纪要');
+  assert.ok(docxNote, '/api/data 应出现 docx 条目');
+  const docxMd = readFileSync(join(vault, docxNote.path), 'utf8');
+  assert.match(docxMd, /E2E 文档解析成功/, 'docx 正文应被提取');
+  assert.match(docxMd, /sourceFile: 会议纪要\.docx/, 'frontmatter 应记 sourceFile');
+  // 非法类型
+  const upBad = await fetch(base + '/api/knowledge/upload', {method: 'POST',
+    headers: {'x-filename': encodeURIComponent('virus.exe'), 'content-type': 'application/octet-stream'}, body: Buffer.from([0, 1, 2])});
+  assert.equal(upBad.status, 400);
+  // 缺文件名
+  const upNoName = await fetch(base + '/api/knowledge/upload', {method: 'POST', headers: {'content-type': 'application/octet-stream'}, body: 'x'});
+  assert.equal(upNoName.status, 400);
+  ok('上传入库：md / docx / 非法类型 / 缺文件名');
+
+  // 7. 登录：未登录 401 → /api/login 换 Cookie → 带 Cookie 可读 → auth-check 204
   const authPort = await freePort();
   const authBase = `http://127.0.0.1:${authPort}`;
   authChild = spawn(process.execPath, [join(ROOT, 'server/index.mjs')], {

@@ -7,7 +7,7 @@ import {CONFIG, asset} from '../config';
 import {buildGraph, forceLayout, stats, KINDS, MODULES} from './graph';
 import {Home} from './Home';
 import {Cosmos} from './Cosmos';
-import {Library, Drafts, Ideas} from './pages';
+import {Library, Drafts, Ideas, Knowledge} from './pages';
 import {Count} from './Analysis';
 import {Icon} from './icons';
 import {T} from './theme';
@@ -44,7 +44,7 @@ function Modal({title, en, onClose, children, wide}) {
   </div>;
 }
 
-const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas']];
+const navs = [['home', '工作台', 'Workspace'], ['library', '作品库', 'Works'], ['drafts', '创作台', 'Drafts'], ['ideas', '选题池', 'Ideas'], ['knowledge', '知识库', 'Knowledge']];
 const initialPage = () => { const h = location.hash.slice(1); return navs.some(n => n[0] === h) ? h : 'home'; };
 
 function Snapshot({goal, onGoal, ideas, drafts, onIdea, onDraft, onLibrary}) {
@@ -213,13 +213,15 @@ function App() {
     if (a.type === 'read') setModal({read: graph.index.get(a.id)});
     if (a.type === 'editIdea') editIdea(a.idea);
     if (a.type === 'ideaToDraft') toDraft(a.idea);
+    if (a.type === 'url') window.open(a.url, '_blank', 'noopener');
+    if (a.type === 'snapshot') window.open(persist.apiUrl('/api/knowledge/snapshot?path=' + encodeURIComponent(a.path)), '_blank', 'noopener');
   }, [graph, drafts, ideas]); // eslint-disable-line react-hooks/exhaustive-deps
   // 内页星座轨 / 标签的点击：本模块有内页就直接切页，没有就回工作台并展开该星座
   const goModule = useCallback(id => {
     const m = MODULES.find(x => x.id === id);
     if (m?.page) setPage(m.page); else { setFocus({mod: id, sel: null}); setPage('home'); }
   }, []);
-  const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', concept: 'concepts'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
+  const openInGraph = id => { const n = graph.index.get(id); const mod = {post: 'works', note: 'methods', idea: 'ideas', draft: 'drafts', concept: 'concepts', personal: 'personal'}[n?.kind]; if (mod) { setFocus({mod, sel: id}); setPage('home'); } };
   const s = stats(graph);
 
   return <div className={`neural page-${page}`}>
@@ -251,6 +253,7 @@ function App() {
       {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule}/>}
       {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onModule={goModule} readOnly={!live} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
+      {page === 'knowledge' && <Knowledge graph={graph} readOnly={!live} onGraph={openInGraph} onModule={goModule} onAction={onAction} onNewDraft={newDraft} onEditIdea={editIdea} ideas={ideas} drafts={drafts} onDeleteDraft={deleteDraft} showToast={setToast}/>}
     </main>
 
     <footer className="site-foot">
@@ -342,9 +345,10 @@ function renderNewsBody(body) {
   });
 }
 
-// 方法笔记 / 作品的阅读弹窗。部署模式下提供「编辑正文」：拉原文 → textarea → 保存落盘。
+// 方法笔记 / 个人知识库 / 作品的阅读弹窗。部署模式下提供「编辑正文」：拉原文 → textarea → 保存落盘。
 function ReadModal({node, onClose, editable}) {
-  const isNote = node.kind === 'note';
+  const isNote = node.kind === 'note' || node.kind === 'personal';
+  const personal = node.kind === 'personal' ? node.personal || {} : null;
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(node.body || '');
   const [mtime, setMtime] = useState(null);
@@ -384,6 +388,10 @@ function ReadModal({node, onClose, editable}) {
     {!editing
       ? <div className="reader">
           <p className="quiet">{node.path}</p>
+          {personal && <p className="quiet">{personal.url
+            ? <>来源 <em>Source</em>：<a href={personal.url} target="_blank" rel="noopener noreferrer">{personal.domain || personal.url}</a>
+               {personal.snapshot && <> · <a href={persist.apiUrl('/api/knowledge/snapshot?path=' + encodeURIComponent(personal.snapshot))} target="_blank" rel="noopener noreferrer">查看快照 <em>Snapshot</em></a></>}</>
+            : <>个人知识库 · {personal.category || '笔记'} <em>Personal knowledge</em></>}</p>}
           {/* 日报（news）：把 [标题](链接) 渲染成可点的标题，链接本身不显示；其余保持纯文本 */}
           {node.kind === 'news'
             ? <div className="reader-news">{renderNewsBody(node.body)}</div>

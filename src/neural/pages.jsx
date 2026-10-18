@@ -6,8 +6,9 @@ import {ConstellationBand} from './ConstellationBand';
 import {snapshot} from '../data';
 import {posts} from './works';
 import {T} from './theme';
-import {useSaveState, draftKey} from './persist';
+import {useSaveState, draftKey, apiUrl, refreshData} from './persist';
 import {SaveBadge} from './SaveStatus';
+import {Assistant} from './Assistant';
 
 const fmt = v => v == null ? '—' : Number(v).toLocaleString('zh-CN');
 
@@ -164,6 +165,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         {!node.deg && <p className="empty-line">写下内容或 [[链接]] 后，这里会长出连接。<em>Links appear as you write.</em></p>}
       </aside>}
     </div>
+    <Assistant graph={graph} readOnly={readOnly} showToast={msg => console.info('[assistant]', msg)} goNote={onGo}/>
   </div>;
 }
 
@@ -201,5 +203,135 @@ export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule, readOnly}
         {!list.length && <p className="empty-line">这个状态下还没有选题 <em>Nothing here yet</em></p>}
       </section>;
     })}</div>
+  </div>;
+}
+
+// —— 知识库 Knowledge（个人知识库：灵感 / 制度 / 推文剪藏）——
+const CATS = [['灵感', 'Sparks'], ['制度', 'Policies'], ['推文', 'Clips']];
+
+export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDraft, onEditIdea, showToast}) {
+  const items = useMemo(() => graph.nodes.filter(n => n.kind === 'personal')
+    .sort((a, b) => String(b.personal?.clipped || '').localeCompare(String(a.personal?.clipped || ''))), [graph]);
+  const [cat, setCat] = useState('灵感');
+  const [url, setUrl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [composing, setComposing] = useState(null); // '灵感' | '制度'
+  const [formTitle, setFormTitle] = useState('');
+  const [formBody, setFormBody] = useState('');
+  const list = items.filter(n => (n.personal?.category || '灵感') === cat);
+
+  const relOf = n => n.path; // personal 节点的 path 就是 vault 相对路径（06-个人知识库/xxx.md）
+
+  const clip = async e => {
+    e.preventDefault();
+    if (!url.trim() || busy || readOnly) return;
+    setBusy(true);
+    try {
+      const res = await fetch(apiUrl('/api/knowledge'), {method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({url: url.trim(), category: '推文'})});
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+      setUrl('');
+      await refreshData();
+      showToast(j.analysisError ? '剪藏已保存，但 AI 分析失败：' + j.analysisError : '网页已剪藏，快照与摘要已写入知识库');
+    } catch (err) { showToast('剪藏失败：' + err.message); }
+    finally { setBusy(false); }
+  };
+
+  const saveComposed = async () => {
+    if (!formTitle.trim() || readOnly) return;
+    setBusy(true);
+    try {
+      const res = await fetch(apiUrl('/api/knowledge'), {method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({title: formTitle, note: formBody, category: composing})});
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+      setComposing(null);
+      await refreshData();
+      showToast('已保存到个人知识库（06-个人知识库/）');
+    } catch (err) { showToast('保存失败：' + err.message); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async n => {
+    if (!window.confirm(`删除「${n.short || n.title}」？NAS 上的 .md 文件会先备份到 vault/.trash/ 再删除。`)) return;
+    try {
+      const res = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(relOf(n))), {method: 'DELETE'});
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      await refreshData();
+      showToast('已删除，原文件备份在 vault/.trash/');
+    } catch (err) { showToast('删除失败：' + err.message); }
+  };
+
+  // 转为选题 / 转为草稿：预填并把本条标题以 [[双链]] 引用进正文，进现有创作链
+  const toIdea = n => {
+    if (readOnly) return;
+    onEditIdea({id: Date.now(), title: n.short || n.title, platform: '小红书', priority: '中', status: '待写',
+      note: `来自个人知识库「${n.short || n.title}」。${n.personal?.summary ? '\n要点：' + n.personal.summary : ''}\n\n切入点：`});
+  };
+  const toDraft = n => {
+    if (readOnly) return;
+    onNewDraft(n.short || n.title, `【来自个人知识库「${n.short || n.title}」】\n\n参考：[[${n.short || n.title}]]\n${n.personal?.summary ? '\nAI 摘要：' + n.personal.summary : ''}\n\n要点：\n\n正文：`, null, null);
+  };
+
+  return <div className="page page-knowledge">
+    <PageHead zh="个人知识库" en="Knowledge" sub="灵感、制度与好文章，都在这里。" subEn="Sparks, policies and good posts — one constellation."/>
+    <ConstellationBand page="knowledge" onGo={onModule}/>
+    <section className="kbar glass">
+      <form className="kbar-clip" onSubmit={clip}>
+        <Icon name="link" size={15}/>
+        <input value={url} onChange={e => setUrl(e.target.value)} placeholder="粘贴推文或文章链接，剪藏并让 AI 分析… Paste a URL to clip & analyze"
+          aria-label="剪藏网址" disabled={readOnly || busy}/>
+        <button className="pill primary" disabled={readOnly || busy || !url.trim()}>{busy ? '抓取中…' : <><Icon name="save" size={14}/>剪藏 <em>Clip</em></>}</button>
+      </form>
+      <div className="kbar-actions">
+        <button className="pill ghost" disabled={readOnly} onClick={() => setComposing('灵感')}><Icon name="spark" size={14}/>新建灵感 <em>Spark</em></button>
+        <button className="pill ghost" disabled={readOnly} onClick={() => setComposing('制度')}><Icon name="file" size={14}/>新建制度 <em>Policy</em></button>
+      </div>
+    </section>
+    <div className="seg kcats" role="group" aria-label="按分类浏览">
+      {CATS.map(([zh, en]) => <button key={zh} className={cat === zh ? 'active' : ''} onClick={() => setCat(zh)}>{zh}<em>{en}</em><b>{items.filter(n => (n.personal?.category || '灵感') === zh).length}</b></button>)}
+    </div>
+    <div className="kgrid">
+      {list.map((n, i) => {
+        const p = n.personal || {};
+        return <article className="kcard glass" key={n.id} style={{animationDelay: i * 60 + 'ms', '--kc': KINDS.personal.color}}>
+          <header onClick={() => onGraph(n.id)} role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') onGraph(n.id); }}>
+            <h3>{n.short || n.title}</h3>
+            <p className="kc-src">{p.url
+              ? <><Icon name="link" size={12}/>{p.domain || '网页'}{p.author ? ' · @' + p.author : ''}</>
+              : <><Icon name="file" size={12}/>{p.category || '笔记'}</>}
+              {p.clipped ? ' · ' + String(p.clipped).slice(0, 10) : ''}</p>
+          </header>
+          {p.summary && <p className="kc-summary">{p.summary}</p>}
+          {(p.keyPoints || []).length > 0 && <ul className="kc-points">{p.keyPoints.slice(0, 4).map((k, j) => <li key={j}>{k}</li>)}</ul>}
+          {!p.summary && <p className="kc-body">{(n.body || '').slice(0, 140)}{(n.body || '').length > 140 ? '…' : ''}</p>}
+          {n.tags?.length > 0 && <div className="chip-row">{n.tags.slice(0, 5).map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div>}
+          <footer>
+            <button className="pill ghost" onClick={() => onGraph(n.id)} title="打开分析"><Icon name="concept" size={13}/>图谱 <em>Graph</em></button>
+            <button className="pill ghost" disabled={readOnly} onClick={() => toIdea(n)}><Icon name="idea" size={13}/>转选题 <em>To idea</em></button>
+            <button className="pill ghost" disabled={readOnly} onClick={() => toDraft(n)}><Icon name="draft" size={13}/>转草稿 <em>To draft</em></button>
+            {p.url && <a className="pill ghost" href={p.url} target="_blank" rel="noopener noreferrer" title="打开原网页"><Icon name="outlink" size={13}/></a>}
+            {p.snapshot && <a className="pill ghost" href={apiUrl('/api/knowledge/snapshot?path=' + encodeURIComponent(p.snapshot))} target="_blank" rel="noopener noreferrer" title="查看快照"><Icon name="eye" size={13}/></a>}
+            <button className="pill ghost danger" disabled={readOnly} onClick={() => remove(n)} title="删除"><Icon name="trash" size={13}/></button>
+          </footer>
+        </article>;
+      })}
+      {!list.length && <div className="empty kempty"><Icon name="personal" size={30}/><p>{cat === '推文' ? '还没有剪藏。粘贴一个链接试试。' : `还没有「${cat}」条目。`}<em>Nothing here yet</em></p></div>}
+    </div>
+    {composing && <div className="veil" onClick={() => setComposing(null)}>
+      <section className="modal glass" role="dialog" aria-modal="true" aria-label="新建知识库条目" onClick={e => e.stopPropagation()}>
+        <header><h2>新建{composing} <em>New {composing === '灵感' ? 'spark' : 'policy'}</em></h2><button className="icon-btn" onClick={() => setComposing(null)} aria-label="关闭"><Icon name="close" size={16}/></button></header>
+        <div className="form">
+          <label>标题 <em>Title</em><input autoFocus value={formTitle} onChange={e => setFormTitle(e.target.value)} placeholder={composing === '制度' ? '如：2026 年度安全检查通报' : '一句话标题'}/></label>
+          <label>正文 <em>Body</em><textarea rows={8} value={formBody} onChange={e => setFormBody(e.target.value)}/></label>
+          <div className="form-actions">
+            <button className="pill ghost" onClick={() => setComposing(null)}>取消 <em>Cancel</em></button>
+            <button className="pill primary" disabled={busy || !formTitle.trim()} onClick={saveComposed}>保存到知识库 <em>Save</em></button>
+          </div>
+        </div>
+      </section>
+    </div>}
+    <Assistant graph={graph} readOnly={readOnly} showToast={showToast} defaultCategory="制度" goNote={onGraph}/>
   </div>;
 }

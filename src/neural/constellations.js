@@ -135,6 +135,9 @@ export const SPECS = {
   // AI 热点 → 仙女座 Andromeda：连线照抄 d3-celestial constellations.lines.json 的 And 特征
   //（17 个折点 / 5 段：W 外支 π-β-μ-ν、主线 δ-ε-ζ-η-λ-κ-ι、北支 γ-ξ-ο-θ-51、α 收尾），没有自创一段。
   // 星等取自恒星命名亮星表（Hipparcos）。
+  // AI 热点 → 仙女座 Andromeda：连线照抄 d3-celestial constellations.lines.json 的 And 特征
+  //（17 个折点 / 5 段：W 外支 π-β-μ-ν、主线 δ-ε-ζ-η-λ-κ-ι、北支 γ-ξ-ο-θ-51、α 收尾），没有自创一段。
+  // 星等取自恒星命名亮星表（Hipparcos）。
   news: {
     zh: '仙女座', en: 'Andromeda', nodes: 10,
     stars: [
@@ -157,6 +160,31 @@ export const SPECS = {
       {ra: -3.4915, dec: 46.4203, mag: 4.61, n: 'ν Nu'}
     ],
     edges: [[14, 11], [11, 12], [12, 16], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [2, 7], [7, 10], [10, 8], [8, 9], [13, 0], [7, 15]]
+  },
+  // 个人知识库 → 猎户座 Orion：连线照抄 d3-celestial constellations.lines.json 的 Ori 特征
+  //（北支 β-λ-γ、腰带 δ-ε-ζ、南支 β-κ-α / γ-ζ-α 剑与盾牌 μ-π1-π2-π3-π4-π5-π6 拱弧），
+  // 星等取自亮星表（Hipparcos）。Betelgeuse（参宿四）与 Rigel（参宿七）是全天最亮的一对。
+  personal: {
+    zh: '猎户座', en: 'Orion', nodes: 14,
+    stars: [
+      {ra: 61.351, dec: -1.2017, mag: 3.39, n: 'μ Tabit'},
+      {ra: 63.234, dec: 9.29, mag: 3.19, n: 'π1'},
+      {ra: 65.699, dec: 6.9623, mag: 4.64, n: 'π2'},
+      {ra: 66.731, dec: 1.7803, mag: 4.35, n: 'π3 Tabit'},
+      {ra: 71.289, dec: 2.4276, mag: 4.05, n: 'π4'},
+      {ra: 73.193, dec: 2.3662, mag: 4.06, n: 'π5'},
+      {ra: 74.335, dec: 1.9766, mag: 5.35, n: 'π6'},
+      {ra: 75.694, dec: 9.9342, mag: 2.23, n: 'γ Bellatrix'},
+      {ra: 78.634, dec: -8.2016, mag: 0.18, n: 'β Rigel'},
+      {ra: 81.467, dec: 6.3497, mag: 2.77, n: 'δ Mintaka'},
+      {ra: 84.053, dec: -1.2019, mag: 1.69, n: 'ε Alnilam'},
+      {ra: 85.190, dec: -1.9426, mag: 1.88, n: 'ζ Alnitak'},
+      {ra: 86.939, dec: -9.6696, mag: 2.09, n: 'κ Saiph'},
+      {ra: 88.793, dec: 7.4071, mag: 0.45, n: 'α Betelgeuse'},
+      {ra: 93.722, dec: 14.2088, mag: 3.39, n: 'λ Meissa'},
+      {ra: 84.912, dec: -6.1399, mag: 4.65, n: 'ι Hatysa'}
+    ],
+    edges: [[1, 14], [14, 7], [7, 6], [6, 5], [5, 4], [4, 3], [3, 2], [2, 1], [7, 9], [9, 10], [10, 11], [11, 8], [8, 12], [12, 15], [15, 8], [11, 15], [0, 10], [0, 3], [0, 13], [13, 11], [13, 14]]
   }
 };
 
@@ -169,13 +197,14 @@ export const FIG = {
   methods: {s: 132, fx: 142, fy: 152},
   ideas: {s: 100, fx: 108, fy: 84},
   drafts: {s: 118, fx: 118, fy: 84},
-  news: {s: 112, fx: 130, fy: 120}
+  news: {s: 112, fx: 130, fy: 120},
+  personal: {s: 128, fx: 112, fy: 170}
 };
 // 模块名（与图例同一套叫法）
 export const MODS = {
   works: ['作品', 'Works'], methods: ['知识笔记', 'Knowledge notes'],
   ideas: ['选题', 'Idea'], drafts: ['草稿', 'Draft'], concepts: ['概念', 'Concept'],
-  news: ['AI 热点', 'AI Radar']
+  news: ['AI 热点', 'AI Radar'], personal: ['个人收藏', 'Knowledge clips']
 };
 // 设计基准：主视图里簇的「标准尺寸」——簇在屏幕上的尺寸为 size 时，图形按 size/288 缩放
 export const BASE = 288;

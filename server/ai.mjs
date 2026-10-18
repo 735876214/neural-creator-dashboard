@@ -29,7 +29,8 @@ export const TASK_MODELS = {
   ask: process.env.AI_MODEL_ASK || CHAT_MODEL,
   analyze: process.env.AI_MODEL_ANALYZE || CHAT_MODEL,
   ideas: process.env.AI_MODEL_IDEAS || CHAT_MODEL,
-  news: process.env.AI_MODEL_NEWS || CHAT_MODEL
+  news: process.env.AI_MODEL_NEWS || CHAT_MODEL,
+  web: process.env.AI_MODEL_WEB || CHAT_MODEL
 };
 const EMBED_BASE = (process.env.EMBED_BASE_URL || CHAT_BASE).replace(/\/+$/, '');
 const EMBED_KEY = process.env.EMBED_API_KEY || CHAT_KEY;
@@ -220,6 +221,18 @@ export async function generateIdeas(notes, {model} = {}) {
     note: String(i.note || '').slice(0, 300),
     sourceTitles: (i.sourceTitles || []).map(String).slice(0, 3)
   })).filter(i => i.title);
+}
+
+// ⑤ 网页剪藏分析：摘要 + 要点 + 标签（个人知识库「推文 / 文章」用）。
+export async function analyzeWebPage({url, title, text}, {model} = {}) {
+  const body = String(text || '').slice(0, 8000); // 控制输入 token
+  const out = await chat([
+    {role: 'system', content: SYS + ' 输出 JSON：{"summary":"一句话摘要","keyPoints":["…"],"tags":["…"]}'},
+    {role: 'user', content: `URL：${url || '（无）'}\n标题：${title || '（无）'}\n\n正文：\n${body}\n\n分析这个网页：给一句 40 字以内的中文摘要、3-6 条要点（保留原文关键信息与数据）、3-6 个话题标签（优先用正文里的词）。`}
+  ], {json: true, model});
+  const tags = [...new Set((out.tags || []).map(t => String(t).replace(/^#/, '').trim()).filter(Boolean))].slice(0, 6);
+  const keyPoints = (out.keyPoints || []).map(p => String(p).trim()).filter(Boolean).slice(0, 6);
+  return {summary: String(out.summary || '').slice(0, 160), keyPoints, tags};
 }
 
 // ④ 问答（返回文本；上下文由调用方拼好，这里不检索）

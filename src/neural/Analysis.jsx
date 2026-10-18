@@ -4,7 +4,7 @@ import {Icon} from './icons';
 import {profileFor, bandsOf, outerCountOf} from './v41';
 import {isLive, getMeta, getFiles, setSemantic} from '../data/store';
 import {aiAnalyze, aiRelate, aiIdeas, aiModels, pickedModel, setPickedModel} from './sync';
-import {apiUrl} from './persist';
+import {apiUrl, refreshData} from './persist';
 
 const fmt = (v, d = 0) => v == null || Number.isNaN(v) ? '—' : Number(v).toLocaleString('zh-CN', {minimumFractionDigits: d, maximumFractionDigits: d});
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -82,12 +82,15 @@ function Insights({items}) {
   </section>;
 }
 
-// AI 区块：只方法笔记显示。打标签 + 摘要写回 frontmatter；语义边刷新后重算。
+// AI 区块：方法笔记与个人知识库（网页剪藏）显示。
+// note：打标签 + 摘要写回 frontmatter；语义边刷新后重算。
+// personal：调 /api/knowledge/analyze 重跑网页分析（摘要 + 要点 + 标签）。
 function AiPanel({graph, node, onGo, onToast}) {
   const meta = getMeta();
   const ai = meta ? meta.ai : null;
-  if (!isLive() || !ai?.enabled) return null;
-  const rel = getFiles()?.['note:' + node.id] || null;
+  const isPersonal = node.kind === 'personal';
+  const rel = getFiles()?.[isPersonal ? 'personal:' + node.id.replace(/^personal:/, '') : 'note:' + node.id] || null;
+  if (!isLive() || !ai?.enabled || (isPersonal ? !rel : false)) return null;
   const [state, setState] = useState({busy: false, msg: '', tags: null, summary: null, related: null});
   const run = (fn, okMsg) => async () => {
     setState(s => ({...s, busy: true, msg: ''}));
@@ -96,7 +99,16 @@ function AiPanel({graph, node, onGo, onToast}) {
   };
   return <section className="an-section ai-panel">
     <h3><Icon name="agent" size={14}/>AI 分析 <em>AI insights</em></h3>
-    <div className="chip-row">
+    {isPersonal && <div className="chip-row">
+      <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
+        const res = await fetch(apiUrl('/api/knowledge/analyze'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({id: node.id})});
+        const j = await res.json();
+        if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+        await refreshData();
+        return {summary: j.analysis?.summary, tags: j.analysis?.tags};
+      }, '网页分析已写回笔记')}>重新分析网页 <em>Re-analyze</em></button>
+    </div>}
+    {!isPersonal && <div className="chip-row">
       <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
         // 打标签 + 摘要，写回 frontmatter（tags / summary 键）
         const dry = await aiAnalyze([rel], true);
@@ -119,7 +131,7 @@ function AiPanel({graph, node, onGo, onToast}) {
         const r = await aiIdeas([rel]);
         return {msg: r.candidates?.length ? '候选选题：' + r.candidates.map(c => c.title).join('；') : '没有生成候选'};
       }, '选题候选已生成')}>生成选题 <em>Seed ideas</em></button>
-    </div>
+    </div>}
     {state.busy && <p className="quiet">AI 正在处理…</p>}
     {state.msg && <p className="quiet">{state.msg}</p>}
     {state.summary && <p className="ai-summary">{state.summary}</p>}
@@ -306,6 +318,28 @@ function analyze(graph, node) {
       ]
     };
   }
+  // personal（个人知识库：灵感 / 制度 / 推文剪藏）
+  if (node.kind === 'personal') {
+    const p = node.personal || {};
+    const isClip = !!p.url;
+    const linkedIdeas = [...nb.back, ...nb.mutual, ...nb.out].filter(x => graph.index.get(x.id).kind === 'idea').map(x => graph.index.get(x.id));
+    const linkedDrafts = [...nb.back, ...nb.mutual, ...nb.out].filter(x => graph.index.get(x.id).kind === 'draft').map(x => graph.index.get(x.id));
+    return {
+      badge: [p.category || '个人收藏', p.category === '推文' ? 'Web clip' : p.category === '制度' ? 'Policy' : 'Spark'], status: `${p.domain || (isClip ? '网页剪藏' : '本地笔记')}${p.author ? ' · @' + p.author : ''} · ${node.path}`,
+      action: isClip ? ['打开原网页', 'Open source', {type: 'url', url: p.url}] : ['阅读全文', 'Read note', {type: 'read', id: node.id}],
+      action2: isClip && p.snapshot ? ['查看快照', 'Snapshot', {type: 'snapshot', path: p.snapshot}] : null,
+      metric: connectivity(),
+      tiles: [['outlink', d.out, '出链', 'Outgoing'], ['back', d.back, '反链', 'Backlinks'], ['link', d.both, '双向共振', 'Mutual'], ['file', (node.body || '').length, '字数', 'Chars']],
+      insights: [
+        ...(p.summary ? [['AI 摘要', 'AI summary', p.summary, 'gold']] : []),
+        ...((p.keyPoints || []).length ? [['要点', 'Key points', p.keyPoints.slice(0, 4).join('；'), 'info']] : []),
+        ...(linkedIdeas.length ? [['已转为选题', 'Seeded ideas', linkedIdeas.map(x => `「${x.short || x.title}」`).join('、'), 'gold']] : []),
+        ...(linkedDrafts.length ? [['已用于草稿', 'Used in drafts', linkedDrafts.map(x => `「${x.short || x.title}」`).join('、'), 'gold']] : []),
+        ...resonance,
+        ...(isClip ? [['关于这条剪藏', 'About', '网页由服务端抓取并保存快照；AI 摘要可能存在偏差，引用前请核对原文。', 'muted']] : [])
+      ]
+    };
+  }
   // concept：概念按分区各有一份（同名两条），面板里按名字合并报数
   const groups = new Map();
   for (const n of graph.nodes) if (n.kind === 'concept') {
@@ -393,7 +427,7 @@ export function Analysis({graph, node, module, onGo, onAction, onClose}) {
       {a.all && <section className="an-section"><h3>全部指标 <em>All metrics</em></h3><div className="an-all">{a.all.map(([zh, en, v]) => <div key={zh}><span>{zh}<em>{en}</em></span><b>{v}</b></div>)}</div></section>}
       <Insights items={a.insights}/>
       {node.tags?.length > 0 && <section className="an-section"><h3>话题标签 <em>Topics</em></h3><div className="chip-row">{node.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div></section>}
-      {node.kind === 'note' && <AiPanel graph={graph} node={node} onGo={onGo}/>}
+      {(node.kind === 'note' || node.kind === 'personal') && <AiPanel graph={graph} node={node} onGo={onGo}/>}
       <Links graph={graph} node={node} onGo={onGo}/>
     </div>
     <AskBox graph={graph} node={node} onGo={onGo}/>
