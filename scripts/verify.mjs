@@ -3,6 +3,7 @@
 // 用法：npm run verify              日常检查
 //       npm run verify -- --release  发布前检查（另外要求仓库地址占位符已替换）
 import {readFileSync, existsSync, mkdtempSync, rmSync} from 'node:fs';
+import {execSync} from 'node:child_process';
 import {join, resolve, dirname, basename} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath, pathToFileURL} from 'node:url';
@@ -179,13 +180,21 @@ const bootSrc = readFileSync(join(ROOT, 'src/neural/boot.js'), 'utf8');
 if (!/\/api\/session/.test(bootSrc)) fail('boot.js 没有在取数前检查 /api/session');
 else ok('boot.js 取数前检查登录状态');
 
-// 3d. 一键部署：compose 引用的文件都在，Dockerfile 是多阶段构建
+// 3d. 一键部署：compose 用 GHCR 镜像（GitHub Actions 构建），镜像名与 workflow 一致
 console.log('一键部署');
 const composeSrc = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8');
-const composeNeeds = ['Dockerfile', 'server', 'src', 'public', 'package.json', 'notes-vault'];
-for (const f of composeNeeds) {
-  const p = join(ROOT, f);
-  if (!existsSync(p)) fail(`compose 部署缺文件：${f}`);
+const imageMatch = composeSrc.match(/image:\s*ghcr\.io\/([^\s:]+)/);
+if (!imageMatch) {
+  fail('compose 未使用 ghcr.io 镜像（部署模式为 GitHub Actions 构建后拉取）');
+} else {
+  // GHCR 镜像名小写；期望值 = 仓库 owner/名（从 git remote 推导，再小写比较）
+  const remote = execSync('git remote get-url origin', {cwd: ROOT, encoding: 'utf8'}).trim();
+  const repo = (remote.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/) || [])[1]?.toLowerCase();
+  if (imageMatch[1].toLowerCase() !== repo) fail(`compose 镜像名 ${imageMatch[1]} 与仓库 ${repo} 不一致`);
+  else ok(`compose 镜像 ghcr.io/${imageMatch[1]} 与仓库一致`);
+  const wf = readFileSync(join(ROOT, '.github/workflows/docker-image.yml'), 'utf8');
+  if (!/IMAGE_NAME:\s*\$\{\{ github\.repository \}\}/.test(wf)) fail('workflow 未使用 github.repository 作为 IMAGE_NAME，镜像名易漂移');
+  else ok('workflow 镜像名取自 github.repository');
 }
 const dockerfileSrc = readFileSync(join(ROOT, 'Dockerfile'), 'utf8');
 if (!/FROM .* AS web/.test(dockerfileSrc) || !/npm run build/.test(dockerfileSrc) || !/COPY --from=web/.test(dockerfileSrc)) {

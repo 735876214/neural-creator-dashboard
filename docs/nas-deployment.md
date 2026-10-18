@@ -69,9 +69,22 @@ tags: [笔记系统, 新手教程]
 
 ```bash
 cd docker/neural                  # compose 文件所在目录
-cp deploy/.env.example .env       # 可选：填 AI_API_KEY、DASHBOARD_PASSWORD 等
 docker compose up -d
 ```
+
+`.env` 是可选的：在 compose 文件同目录建一个 `.env`（可参考仓库里的 `deploy/.env.example`，
+NAS 上没有仓库文件时直接新建即可），常用项：
+
+```ini
+DASHBOARD_USER=admin
+DASHBOARD_PASSWORD=          # 留空 = 首次启动随机生成，docker compose logs note-api 查看
+WEB_PORT=8088                # 看板端口，被占用时改
+# AI_API_KEY=sk-...          # 可选：填了才有 AI 区块
+# AI_BASE_URL=https://api.deepseek.com/v1
+# AI_MODEL=deepseek-chat
+```
+
+不建 `.env` 也能启动，只是 AI / 热点关闭。
 
 登录密码由 note-api 首次启动自举生成，写在容器卷的 `auth.json` 里（重启沿用，不会换密码）；**不需要**宿主机安装 `htpasswd`。两种用法：
 
@@ -86,7 +99,7 @@ docker compose logs note-api
 
 > 极空间的 Container Manager 也可以图形化导入这个 compose 文件。
 >
-> `.env` 是可选的：复制 `deploy/.env.example` 到 compose 文件同目录为 `.env`；不填也能启动，只是 AI / 热点关闭。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
+> `.env` 的完整变量说明见仓库 `deploy/.env.example`。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
 
 浏览器打开 `http://<NAS-IP>:8088`，会先看到登录页；输入用户名和密码后进入看板，星核亮起来就是成功了。8088 被占用时在 `.env` 里改 `WEB_PORT`。
 
