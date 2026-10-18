@@ -1,7 +1,7 @@
 {
   "name": "neural-creator-dashboard",
-  "version": "0.7.0",
-  "description": "A neural-network style creator dashboard: a star core and six constellation clusters linking your notes and works.",
+  "version": "0.8.0",
+  "description": "A neural-network style creator dashboard: a star core and seven constellation clusters linking your notes and works.",
   "private": true,
   "type": "module",
   "license": "MIT",
