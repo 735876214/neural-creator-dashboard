@@ -31,30 +31,31 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
       return j;
     } catch { setModelsErr('拉不到模型列表：请检查接口地址与 key'); setModels([]); return []; }
   };
-  // 连接刚保存时 connect 自己拉列表并提示；effect 只在连接参数真正变化时补拉
-  // （记录上一次的参数，重复保存相同连接不会触发，也不会卡住后续的真实变化）。
+  // 拉模型列表的唯一 owner：连接参数（baseUrl / 是否已配 key）变化时拉取并按结果提示。
+  // connect 只负责保存——不在这里拉，两条路径并发双拉的竞态从结构上消除。
   const lastConnRef = useRef(null);
   useEffect(() => {
     if (!ai?.enabled) return;
-    const key = `${settings?.aiBaseUrl || ''}|${!!settings?.aiKeyConfigured}`;
-    if (lastConnRef.current === key) return;
-    lastConnRef.current = key;
-    loadModels();
+    const connKey = `${settings?.aiBaseUrl || ''}|${!!settings?.aiKeyConfigured}`;
+    if (lastConnRef.current === connKey) return;
+    const first = lastConnRef.current === null;
+    lastConnRef.current = connKey;
+    loadModels().then(j => {
+      if (j.length) setMsg(first ? '' : '已连接，模型列表已拉到——选一个作为全局默认模型 · Connected');
+      else setMsg(first ? '' : '已保存连接，但拉不到模型列表');
+    });
   }, [ai?.enabled, settings?.aiBaseUrl, settings?.aiKeyConfigured]);
 
-  // 第一段：保存接口地址 + key（key 留空 = 不改动）
+  // 第一段：保存接口地址 + key（key 留空 = 不改动）。列表拉取与提示由上面的 effect 负责。
   const connect = async () => {
-    setBusy(true); setMsg('');
+    setBusy(true); setMsg('保存中…');
     try {
       const patch = {aiBaseUrl: baseUrl.trim()};
       if (key.trim()) patch.aiApiKey = key.trim();
-      const next = await saveSettings(patch);
+      await saveSettings(patch);
       setKey('');
-      onRefresh?.(next);
-      // 当场重拉模型列表并按结果提示；effect 侧用 lastConnRef 去重，不会并发重复拉
-      const j = await loadModels();
-      if (j.length) setMsg('已连接，模型列表已拉到——选一个作为全局默认模型 · Connected');
-      else setMsg('已保存连接，但拉不到模型列表');
+      setMsg('已保存 · Saved——正在拉取模型列表…');
+      onRefresh?.();
     } catch (e) { setMsg('保存失败：' + e.message); }
     finally { setBusy(false); }
   };
@@ -220,6 +221,7 @@ export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose
     try {
       await saveSettings({aiModel: id || null});
       savedModelRef.current = undefined; // 保存落定，恢复跟随外部变化
+      onRefresh?.(); // 重拉 aiInfo / settings——头部「已启用 · 全局模型 X」即时反映新模型
     }
     catch (e) { setModel(prev); savedModelRef.current = undefined; setModelMsg('模型保存失败：' + e.message); } // 回滚 UI 并展示错误
   };

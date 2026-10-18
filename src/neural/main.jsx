@@ -194,12 +194,14 @@ function App() {
   useEffect(() => { history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page); window.scrollTo({top: 0}); }, [page]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2800); return () => clearTimeout(t); }, [toast]);
 
-  // 打开设置弹窗时现拉一份脱敏设置（公众号是否已配置、同步时间等）
+  // 打开设置弹窗时现拉一份脱敏设置（公众号是否已配置、同步时间等）。
+  // seqRef 防乱序：并发重拉时（弹窗开着保存了多次），只有最新一次的响应允许落盘，
+  // 旧快照晚到不会再覆盖新状态。
+  const settingsSeq = useRef(0);
   useEffect(() => {
     if (modal !== 'settings') return;
-    let on = true;
-    fetch(persist.apiUrl('/api/settings')).then(r => r.json()).then(j => { if (on) setSettingsLive(j); }).catch(() => {});
-    return () => { on = false; };
+    const seq = ++settingsSeq.current;
+    fetch(persist.apiUrl('/api/settings')).then(r => r.json()).then(j => { if (seq === settingsSeq.current) setSettingsLive(j); }).catch(() => {});
   }, [modal, settingsRev]); // settingsRev：AI 配置保存后重拉
 
   // AI 启用状态（Assistant / AiPanel / 设置面板的单一事实源）：挂载即拉，保存 AI 配置后重拉。
