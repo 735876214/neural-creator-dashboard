@@ -102,6 +102,8 @@ export function usePendingSaves() {
 
 const draftPayload = (draft, sourceTitle) => {
   const fm = {};
+  // 选题关联：稳定 id 优先（sourceIdeaId，改名不断链）；标题仅作为老读取端的兼容回退
+  if (draft.source != null && draft.source !== '') fm.sourceIdeaId = String(draft.source);
   if (sourceTitle) fm.source = sourceTitle;
   // 发布来源（半自动发布回填）：非空才写，避免把空键刷进文件
   for (const k of ['platform', 'url', 'platformId', 'syncedAt']) {
@@ -159,32 +161,6 @@ export function scheduleIdea(idea) {
 
 export function saveIdeaNow(idea) {
   return queueNow(ideaKey(idea.id), 'idea', ideaPayload(idea));
-}
-
-// 选题改名后，把关联草稿的 frontmatter source 改成新标题。
-// 只发 fm，不碰正文，避免用 /api/data 里截断过的正文覆盖完整文件。
-export async function updateDraftSource(id, sourceTitle) {
-  if (!isLive() || !sourceTitle) return null;
-  const key = draftKey(id);
-  if (!refFor(key)) return null; // 尚未落盘的草稿，创建时会带上 source
-  // 先把草稿待写的内容落盘（它可能带着旧标题），再单独改 source，
-  // 避免防抖中的正文保存事后又把 source 覆盖回旧标题。
-  clearTimeout(timers.get(key)); timers.delete(key);
-  if (outbox.has(key)) await flushKey(key);
-  return enqueue(key, async () => {
-    const ref = refFor(key);
-    if (!ref) return;
-    try {
-      const res = await fetch(API + '/api/note', {
-        method: 'PUT', headers: {'content-type': 'application/json'},
-        body: JSON.stringify({path: ref.path, fm: {source: sourceTitle}, mtime: ref.mtime})
-      });
-      if (res.ok) {
-        const j = await res.json().catch(() => ({}));
-        if (j.path) refs.set(key, {path: j.path, mtime: j.mtime});
-      }
-    } catch { /* 关联更新失败不阻塞选题保存；用户下次编辑草稿时会重写 source */ }
-  });
 }
 
 export function createDraft({id, title, body, sourceTitle}) {

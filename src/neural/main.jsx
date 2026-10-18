@@ -248,10 +248,7 @@ function App() {
       if (st.state === 'saved') setToast('选题已保存到 NAS 笔记库（04-选题池/）· Saved to vault on NAS');
       else setToast(st.message || '选题保存中… · Saving to NAS');
     });
-    // 标题变了：关联草稿的 source 存的是标题，跟着改，避免刷新后关联断裂。
-    if (prev && prev.title !== editing.title) {
-      for (const d of drafts) if (d.source === editing.id) persist.updateDraftSource(d.id, editing.title);
-    }
+  // 选题改名不再需要同步草稿：sourceIdeaId（稳定 id）关联，标题变了边还在
   }
   function toDraft(idea) {
     if (!live) { setToast('未连接 NAS，当前为只读演示 · Read-only (no NAS)'); return; }

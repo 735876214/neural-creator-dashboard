@@ -390,17 +390,22 @@ function cleanFm(kind, fm) {
   if (typeof fm !== 'object' || Array.isArray(fm)) fail(400, 'fm 必须是对象');
   const out = {};
   if (kind === 'idea') {
-    for (const k of ['platform', 'priority', 'status', 'note', 'sourceNews']) {
+    for (const k of ['platform', 'priority', 'status', 'note', 'sourceNews', 'id', 'sourceIdeaId']) {
       if (!(k in fm)) continue;
       if (typeof fm[k] !== 'string') fail(400, `选题属性 ${k} 必须是字符串`);
+      if (k === 'id' && fm.id.length > 32) fail(400, 'id 过长');
       out[k] = fm[k];
     }
     if ('priority' in out && !['高', '中', '低'].includes(out.priority)) fail(400, '优先级必须是 高/中/低');
     if ('status' in out && !['待写', '待扩展', '已转草稿'].includes(out.status)) fail(400, '状态必须是 待写/待扩展/已转草稿');
   } else {
     if ('source' in fm) {
-      if (!(typeof fm.source === 'string' || typeof fm.source === 'number')) fail(400, 'source 必须是选题标题');
+      if (!(typeof fm.source === 'string' || typeof fm.source === 'number')) fail(400, 'source 必须是选题标题或选题 id');
       out.source = String(fm.source);
+    }
+    if ('sourceIdeaId' in fm) {
+      if (typeof fm.sourceIdeaId !== 'string') fail(400, 'sourceIdeaId 必须是字符串（选题的稳定 id）');
+      out.sourceIdeaId = fm.sourceIdeaId;
     }
     // 草稿 / 作品的发布来源字段（半自动发布回填；作品走 /api/note 的 fm 白名单之外另行处理）
     for (const k of ['platform', 'url', 'platformId', 'syncedAt']) {
@@ -679,8 +684,11 @@ async function route(req, res, url) {
       return json(res, 200, {path: finalRel, mtime: r.mtime, changed: r.changed, renamed: finalRel !== rel});
     }
     if (!title) fail(400, '新建需要一个标题');
-    const r = createNote(kind, {title, body, fm: cleanFm(kind, fm)});
-    return json(res, 201, {path: r.path, mtime: r.mtime, created: true});
+    const fmClean = cleanFm(kind, fm);
+    // 选题创建时写一次稳定 id：此后增删其他文件、改名都不影响关联
+    if (kind === 'idea' && !fmClean.id) fmClean.id = randomUUID().slice(0, 8);
+    const r = createNote(kind, {title, body, fm: fmClean});
+    return json(res, 201, {path: r.path, mtime: r.mtime, created: true, id: fmClean.id});
   }
 
   // 新建方法笔记（脱离编辑器独立创作）：作品不在这里建——作品的唯一入口是草稿发布。

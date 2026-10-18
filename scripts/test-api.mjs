@@ -283,6 +283,35 @@ try {
   assert.equal(badPostNew.status, 400, 'note-new 不开放 post');
   ok('新建方法笔记（/api/note-new）');
 
+  // 6d2. 稳定 ID：选题 fm.id + 草稿 fm.sourceIdeaId 优先关联；老格式 source=标题 回退
+  const ideaNew = await put('/api/idea', {title: 'e2e 稳定ID选题', body: 'x', fm: {id: 'idea-e2e1'}});
+  assert.equal(ideaNew.status, 201);
+  const ideaMd = readFileSync(join(vault, ideaNew.body.path), 'utf8');
+  assert.match(ideaMd, /id: idea-e2e1/, '选题应写入稳定 id');
+  // 草稿用 sourceIdeaId 关联（不写 source 标题）
+  const dStable = await put('/api/draft', {title: 'e2e 稳定ID草稿', body: 'x', fm: {sourceIdeaId: 'idea-e2e1'}});
+  assert.equal(dStable.status, 201);
+  // 改选题标题 → 关联不断（id 优先）
+  const ren = await put('/api/idea', {path: ideaNew.body.path, title: 'e2e 稳定ID选题改'});
+  assert.equal(ren.status, 200);
+  const dStableData = await json('/api/data?fresh');
+  const dStableNote = dStableData.body.seedDrafts.find(d => d.title === 'e2e 稳定ID草稿');
+  assert.ok(dStableNote, '稳定ID草稿应出现在 /api/data');
+  const ideaRenamed = dStableData.body.seedIdeas.find(i => i.title === 'e2e 稳定ID选题改');
+  assert.ok(ideaRenamed, '改名的选题应存在');
+  assert.equal(String(dStableNote.source), String(ideaRenamed.id), '改名后 source 仍应按 id 关联');
+  // 无 id 的自动生成：新建选题不带 fm.id → 201 且文件里有 id
+  const ideaAuto = await put('/api/idea', {title: 'e2e 自动ID选题', body: 'x'});
+  assert.equal(ideaAuto.status, 201);
+  assert.match(readFileSync(join(vault, ideaAuto.body.path), 'utf8'), /id: "?[A-Za-z0-9_-]+"?/, '新建选题应自动生成稳定 id');
+  // 老格式回退：source=标题 仍能关联
+  const dLegacy = await put('/api/draft', {title: 'e2e 老格式草稿', body: 'x', fm: {source: 'e2e 稳定ID选题改'}});
+  assert.equal(dLegacy.status, 201);
+  const dLegacyData = await json('/api/data?fresh');
+  const dLegacyNote = dLegacyData.body.seedDrafts.find(d => d.title === 'e2e 老格式草稿');
+  assert.equal(String(dLegacyNote.source), String(ideaRenamed.id), '老格式 source=标题 应回退关联成功');
+  ok('稳定 ID：选题 id + sourceIdeaId 优先 / 自动生成 / 标题回退');
+
   // 发布：建一篇草稿 → 移入 02-作品库 + 指标（createNote 的 draft 落在 03-创作台/ 根目录）
   const pubDraft = await put('/api/draft', {title: 'e2e 发布稿', body: '发布链路验证'});
   assert.equal(pubDraft.status, 201);

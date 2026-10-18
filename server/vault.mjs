@@ -183,15 +183,20 @@ export function readVault(opts = {}) {
   // —— 选题 ——
   const ideas = bucket.ideas.map((x, i) => {
     const status = String(pick(x.fm, ['status', '状态']) || '待写');
-    return {id: i + 1, title: x.title, platform: String(pick(x.fm, ['platform', '平台']) || '小红书'), priority: ['高', '中', '低'].includes(String(pick(x.fm, ['priority', '优先级']))) ? String(pick(x.fm, ['priority', '优先级'])) : '中',
+    // 稳定 ID：创建时写入的 fm id 优先（增删文件不会位移）；老数据回落到序号
+    const stableId = String(pick(x.fm, ['id', '编号']) || '').trim();
+    return {id: stableId || i + 1, title: x.title, platform: String(pick(x.fm, ['platform', '平台']) || '小红书'), priority: ['高', '中', '低'].includes(String(pick(x.fm, ['priority', '优先级']))) ? String(pick(x.fm, ['priority', '优先级'])) : '中',
       status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120)), sourceNews: String(pick(x.fm, ['sourceNews', '来源热点', '热点日期', 'newsDate']) || '') || undefined, rel: norm(x.rel)};
   });
 
   // —— 草稿 ——
+  // source 关联：优先 fm sourceIdeaId（稳定 id，String 统一比较），回退老格式 fm source=选题标题
   const drafts = bucket.drafts.map((x, i) => {
     const src = String(pick(x.fm, ['source', '来源选题', '选题']) || '');
-    const idea = ideas.find(d => d.title === src);
-    return {id: 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null,
+    const srcId = String(pick(x.fm, ['sourceIdeaId']) || '').trim();
+    const idea = (srcId && ideas.find(d => String(d.id) === srcId)) || ideas.find(d => d.title === src);
+    const stableId = String(pick(x.fm, ['id', '编号']) || '').trim();
+    return {id: stableId || 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null,
       platform: String(pick(x.fm, ['platform', '平台']) || '').trim() || undefined, rel: norm(x.rel)};
   });
 
