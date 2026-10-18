@@ -31,18 +31,18 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
       return j;
     } catch { setModelsErr('拉不到模型列表：请检查接口地址与 key'); setModels([]); return []; }
   };
-  // 拉模型列表的唯一 owner：连接参数（baseUrl / 是否已配 key）变化时拉取并按结果提示。
-  // connect 只负责保存——不在这里拉，两条路径并发双拉的竞态从结构上消除。
+  // 拉模型列表的唯一 owner：连接参数（baseUrl / 是否已配 key）变化时拉取并按结果写提示。
+  // connect 写「保存中…」，保存落定写「已保存」；参数变化时这里把文案升级为「已连接…」。
   const lastConnRef = useRef(null);
   useEffect(() => {
     if (!ai?.enabled) return;
     const connKey = `${settings?.aiBaseUrl || ''}|${!!settings?.aiKeyConfigured}`;
-    if (lastConnRef.current === connKey) return;
+    if (lastConnRef.current === connKey) return; // 参数没变：connect 已写「已保存」，无需收尾
     const first = lastConnRef.current === null;
     lastConnRef.current = connKey;
     loadModels().then(j => {
-      if (j.length) setMsg(first ? '' : '已连接，模型列表已拉到——选一个作为全局默认模型 · Connected');
-      else setMsg(first ? '' : '已保存连接，但拉不到模型列表');
+      if (j.length) setMsg('已连接，模型列表已拉到——选一个作为全局默认模型 · Connected');
+      else setMsg('已保存连接，但拉不到模型列表');
     });
   }, [ai?.enabled, settings?.aiBaseUrl, settings?.aiKeyConfigured]);
 
@@ -54,7 +54,9 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
       if (key.trim()) patch.aiApiKey = key.trim();
       await saveSettings(patch);
       setKey('');
-      setMsg('已保存 · Saved——正在拉取模型列表…');
+      // 参数未变时 effect 不会重跑（原始依赖相等），所以这里直接写终态文案；
+      // 参数变了时 effect 会拉列表并把文案升级为「已连接…」。
+      setMsg('已保存 · Saved');
       onRefresh?.();
     } catch (e) { setMsg('保存失败：' + e.message); }
     finally { setBusy(false); }
@@ -74,6 +76,7 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
     <div className="form-actions">
       <button className="pill primary" onClick={connect} disabled={busy || readOnly}>保存连接 <em>Connect</em></button>
     </div>
+    {msg && <p className="quiet" role="status">{msg}</p>}
     <p className="quiet">Key 只存 NAS 数据目录（不进笔记库、不回显）；接口地址存设置文件 <em>Key stays in NAS data dir, never echoed</em></p>
 
     <label>全局模型 <em>Default model</em>

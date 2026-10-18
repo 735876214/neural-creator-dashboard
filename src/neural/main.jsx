@@ -420,10 +420,9 @@ function App() {
         readOnly={!live}
         onClose={close}
         onRefresh={() => {
+          // 只需重拉 aiInfo / settings（AI 配置的单一事实源）；全量 refreshData 已无必要——
+          // Assistant / AiPanel 都读 aiInfo prop，store.data.ai 没有消费者了。
           setSettingsRev(v => v + 1);
-          // store.data.ai（Assistant / AiPanel 读的那份）只随 setApiData 更新；
-          // .dashboard 在 vault 指纹之外、轮询不会自动触发，这里必须显式重拉。
-          persist.refreshData().catch(() => {});
         }}
       />
       {live && <div className="form-actions signout-row">
