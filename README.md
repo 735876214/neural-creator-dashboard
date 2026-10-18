@@ -131,7 +131,7 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 ├── scripts/import-notes.mjs   笔记导入；scripts/verify.mjs 校验（npm run verify）
 ├── examples/vault/            虚构的示例笔记库
 ├── server/                    note-api（读写 vault、AI 编排、索引）
-├── deploy/                    NAS 部署用 compose / nginx 配置
+├── deploy/                    本机开发 compose（docker-compose.dev.yml）+ .env 模板；部署版 compose 在仓库根
 ├── docs/                      部署、使用指南与架构说明
 ├── public/avatar.svg          头像（抽象图形）
 ├── src/config.js              个性化配置

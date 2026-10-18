@@ -15,7 +15,7 @@
 |---|---|---|
 | 纯静态 | `npm run build` 后的 `dist/` | 构建时打包进 bundle 的 `my-data.local.js` 或 `sample.js` |
 | 本机开发 | `npm run dev`（Vite :5173）+ `npm run api`（note-api :8787） | note-api 实时读取 vault；Vite 把 `/api` 代理到 8787 |
-| 部署（NAS） | nginx（web）+ note-api；Syncthing / Tailscale 可选，见 `deploy/docker-compose.yml` | vault 里的 `.md` 文件 |
+| 部署（NAS） | nginx（web）+ note-api；Syncthing / Tailscale 可选，见仓库根的 `docker-compose.yml` | vault 里的 `.md` 文件 |
 
 核心不变式：**`.md` 文件是唯一真相**；SQLite 与前端内存里的图谱都是可删可重建的派生物。唯一的例外是 `vault/.dashboard/settings.json`（月目标、AI 模型选择），它也是用户数据，随 vault 一起备份，但不参与笔记解析。
 
@@ -146,7 +146,7 @@ Obsidian / Syncthing            看板设置 vault/.dashboard/settings.json
 | `skills/neural-creator-dashboard/SKILL.md` | 可被 `npx skills add` 安装的通用 Agent Skill |
 | `examples/vault/` | 虚构示例笔记库，演示 frontmatter 格式 |
 | `deploy/docker-compose.dev.yml` | 开发版：只起 note-api 容器 |
-| `deploy/docker-compose.yml` / `nginx.conf` | 部署版：note-api + nginx（登录页 + 会话 Cookie，`auth_request` 保护静态资源）；Syncthing / Tailscale 是可选 profile |
+| `docker-compose.yml` / `nginx.conf`（仓库根） | 部署版：note-api + nginx（登录页 + 会话 Cookie，`auth_request` 保护静态资源）；Syncthing / Tailscale 是可选 profile |
 | `docs/nas-deployment.md` | 极空间 NAS 部署全流程 |
 
 ---

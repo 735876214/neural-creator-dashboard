@@ -6,7 +6,7 @@
 
 创作神经网络看板：React 19 + Vite 7 的纯前端页面，把作品、方法笔记、选题、草稿推导成一张神经网络图谱。纯静态模式不联网、不调用 AI；部署模式由 note-api 读写 NAS 上的 vault，业务数据不保存在浏览器。
 
-> **部署模式（deploy）**：项目有两种运行类型——部署（后端 note-api 读写 vault，见 `docs/nas-deployment.md` 与 `deploy/`）和开发（本机 `docker-compose.dev.yml` + `npm run dev`）。部署模式引入 note-api 服务（`server/`）与可选的 AI 能力（`server/ai.mjs`，OpenAI 兼容接口）。纯静态行为保留：`src/neural/boot.js` 先尝试 `fetch('/api/data')`，取不到就回退本地数据（示例或 `npm run import` 的快照）。AI key 只存在于服务端环境变量，绝不进前端 bundle。
+> **部署模式（deploy）**：项目有两种运行类型——部署（后端 note-api 读写 vault，见 `docs/nas-deployment.md` 与仓库根的 `docker-compose.yml` / `nginx.conf`，环境变量模板 `deploy/.env.example`）和开发（本机 `docker-compose.dev.yml` + `npm run dev`）。部署模式引入 note-api 服务（`server/`）与可选的 AI 能力（`server/ai.mjs`，OpenAI 兼容接口）。纯静态行为保留：`src/neural/boot.js` 先尝试 `fetch('/api/data')`，取不到就回退本地数据（示例或 `npm run import` 的快照）。AI key 只存在于服务端环境变量，绝不进前端 bundle。
 
 ## 命令
 

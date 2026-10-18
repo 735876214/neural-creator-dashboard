@@ -91,7 +91,7 @@ docker compose logs auth
 
 > 极空间的 Container Manager 也可以图形化导入这个 compose 文件。
 >
-> `.env` 是可选的：Compose 会自动读取 `deploy/.env` 填充 compose 里的 `${VAR}`；不填也能启动，只是 AI / 热点关闭。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
+> `.env` 是可选的：复制 `deploy/.env.example` 到**仓库根目录**（与 `docker-compose.yml` 同目录）为 `.env`；不填也能启动，只是 AI / 热点关闭。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
 
 浏览器打开 `http://<NAS-IP>:8088`，会先看到登录页；输入用户名和密码后进入看板，星核亮起来就是成功了。8088 被占用时在 `.env` 里改 `WEB_PORT`。
 
@@ -169,8 +169,8 @@ docker compose --profile vpn up -d
 
 | 现象 | 原因与处理 |
 |---|---|
-| build 报 `lstat .../server: no such file or directory` | 只上传了 `deploy/`，构建上下文里没有 `server/`。把整个项目目录（至少 `server/`、`package.json`、`dist/`、`notes-vault/`）放到 NAS，并保证 compose 在 `项目根/deploy/docker-compose.yml` |
-| 旧版报 `env file .../deploy/.env not found` | 早期 compose 硬依赖 `.env`。更新到当前版本后 `.env` 可选；需要 AI 时再 `cp .env.example .env` |
+| build 报 `lstat .../server: no such file or directory` | 只上传了 `deploy/`，构建上下文里没有 `server/`。把整个仓库放到 NAS（compose 已在仓库根目录），至少含 `server/`、`package.json`、`dist/`、`notes-vault/`、`nginx.conf` |
+| 旧版报 `env file .../deploy/.env not found` | 早期 compose 硬依赖 `.env` 且放在 `deploy/`。更新到当前版本后 `.env` 放仓库根目录、可选；需要 AI 时再 `cp deploy/.env.example .env` |
 | 不知道登录密码 | `.env` 没设 `DASHBOARD_PASSWORD` 时首次启动随机生成：`docker compose logs auth` |
 | 登录后又跳回登录页 | 会话 Cookie 丢了或密码改过。检查浏览器是否禁用 Cookie；改密码后执行 `docker compose up -d --force-recreate auth note-api` 重新登录 |
 | 登录页一直提示「连不上笔记库服务」 | note-api 没起来或 `/api` 反代不通：`docker compose logs note-api`，并确认 nginx 的 `proxy_pass http://note-api:8787` 可用 |

@@ -1,29 +1,24 @@
-# 部署版：看板 + note-api（本机开发用 docker-compose.dev.yml）
+# 部署版：看板 + note-api（本机开发用 deploy/docker-compose.dev.yml）
 #
-# 路径都是相对 compose 文件所在目录解析的。两种放法都支持：
-#
-# 放法 A（推荐，NAS 图形界面常用）：把 docker-compose.yml 放在仓库根目录，
-#   server/ dist/ notes-vault/ 与它并排 —— 默认路径直接可用，无需任何变量：
+# 本文件在仓库根目录，所有路径相对它解析，NAS 上 git clone / 上传整个仓库后直接可用：
 #   neural-creator-dashboard/
-#   ├── docker-compose.yml      ← 放这里
+#   ├── docker-compose.yml      ← 本文件
 #   ├── .env                    ← 可选，从 deploy/.env.example 复制
-#   ├── server/                 ← 必须上传；缺了会报 lstat .../server: no such file or directory
-#   ├── package.json            ← 必须上传（构建时装 pdfjs-dist）
-#   ├── dist/                   ← 本机构建后上传，nginx 托管
+#   ├── nginx.conf              ← web 容器挂载的 nginx 配置
+#   ├── server/                 ← 必须在；缺了会报 lstat .../server: no such file or directory
+#   ├── package.json            ← 必须在（构建时装 pdfjs-dist）
+#   ├── dist/                   ← 本机 npm run build 后上传，nginx 托管
 #   └── notes-vault/            ← 笔记库
 #
-# 放法 B：compose 留在 deploy/ 子目录（和仓库里一致）。此时在 .env 里指定：
-#   REPO_ROOT=..                # 上一级就是仓库根
-#   VAULT_DIR=../notes-vault
-#   DIST_DIR=../dist
-#
-# compose 与仓库彻底分开时，三个变量都可以给绝对路径。
+# compose / 笔记库 / dist 放在别处时，在 .env 里覆盖三个变量（绝对或相对本文件）：
+#   REPO_ROOT=...   VAULT_DIR=...   DIST_DIR=...
 #
 # 用法：
 #   1. 本机构建前端：npm run build
-#   2. 把整个项目目录 + notes-vault/ 放到 NAS，进入 deploy/ 目录：
-#        cp .env.example .env          # 可选：填 AI key / 看板密码等；不填也能启动
+#   2. 整个仓库放到 NAS，在仓库根目录：
+#        cp deploy/.env.example .env    # 可选：填 AI key / 看板密码等；不填也能启动
 #        docker compose up -d --build
+#      NAS 图形界面：把项目指向仓库根目录（compose 文件所在处）构建启动
 #   3. 打开 http://<NAS-IP>:8088
 #
 # 登录：用户默认 admin。.env 里设置了 DASHBOARD_PASSWORD 就用它；
@@ -129,7 +124,7 @@ services:
           console.log('========== 看板登录 ==========');
           console.log('用户名：' + user);
           console.log('密码：  ' + pass);
-          console.log('固定密码：在 deploy/.env 设置 DASHBOARD_PASSWORD=你的密码');
+          console.log('固定密码：在 .env 设置 DASHBOARD_PASSWORD=你的密码');
           console.log('=============================');
           console.log('');
         }
