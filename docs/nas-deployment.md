@@ -58,7 +58,7 @@ tags: [笔记系统, 新手教程]
 
 ## 2. 准备 compose 文件（NAS 上不需要源码）
 
-镜像由 GitHub Actions 自动构建并发布到 GHCR（`ghcr.io/735876214/cms-single:latest`，
+镜像由 GitHub Actions 自动构建并发布到 GHCR（`ghcr.io/735876214/neural-creator-dashboard:latest`，
 仓库为 public 时拉取无需登录）。NAS 上只需要 `docker-compose.yml`（如放在 `docker/neural/`），
 不需要源码、不需要本机构建。
 

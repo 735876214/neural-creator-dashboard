@@ -15,7 +15,7 @@
 |---|---|---|
 | 纯静态 | `npm run build` 后的 `dist/` | 构建时打包进 bundle 的 `my-data.local.js` 或 `sample.js` |
 | 本机开发 | `npm run dev`（Vite :5173）+ `npm run api`（note-api :8787） | note-api 实时读取 vault；Vite 把 `/api` 代理到 8787 |
-| 部署（NAS） | note-api 单容器（GHCR 镜像 `ghcr.io/735876214/cms-single`，compose 直接拉取，前端构建在 GitHub Actions 完成） | vault 里的 `.md` 文件 |
+| 部署（NAS） | note-api 单容器（GHCR 镜像 `ghcr.io/735876214/neural-creator-dashboard`，compose 直接拉取，前端构建在 GitHub Actions 完成） | vault 里的 `.md` 文件 |
 
 核心不变式：**`.md` 文件是唯一真相**；SQLite 与前端内存里的图谱都是可删可重建的派生物。唯一的例外是 `vault/.dashboard/settings.json`（月目标、AI 模型选择），它也是用户数据，随 vault 一起备份，但不参与笔记解析。
 

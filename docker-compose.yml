@@ -6,7 +6,7 @@
 #   打开 http://<NAS-IP>:8088
 #
 # 镜像由 GitHub Actions 在 push 到 main 时自动构建并发布到 GHCR：
-#   ghcr.io/735876214/cms-single:latest
+#   ghcr.io/735876214/neural-creator-dashboard:latest
 # 更新看板 = 在 NAS 上重新拉取镜像（图形界面点一次，或 docker compose pull && up -d）。
 #
 # compose / 笔记库放在别处时，在 .env 里覆盖：
@@ -25,7 +25,7 @@ services:
   note-api:
     # GitHub Actions 构建并发布的多阶段镜像（含前端产物 + note-api）。
     # 仓库为 public，GHCR 包默认继承可见性，NAS 拉取无需登录。
-    image: ghcr.io/735876214/cms-single:latest
+    image: ghcr.io/735876214/neural-creator-dashboard:latest
     container_name: neural-note-api
     restart: unless-stopped
     environment:
