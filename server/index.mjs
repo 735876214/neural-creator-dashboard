@@ -992,14 +992,21 @@ async function route(req, res, url) {
       try { page = await fetchPage(url.trim()); }
       catch (e) { fail(e instanceof FetchError ? 400 : 502, e.message); }
     }
-    const finalTitle = (page && htmlTitle(page.html)) || String(title || '').trim();
-    if (!finalTitle) fail(400, '网页没有标题，请补一个 title');
+    let finalTitle = (page && htmlTitle(page.html)) || String(title || '').trim() || null;
     const text = page ? htmlToText(page.html) : String(note || '');
-    const domain = page ? new URL(page.url).hostname : undefined;
 
-    // AI 分析：未启用/失败都不丢剪藏，只带 analysisError
+    // 标题三级来源：og/title 标签 → AI 从正文提炼 →（仍无则报错）。
     let analysis = null, analysisError = null;
-    if (page && analyze !== false && aiEnabled()) {
+    if (page && !finalTitle && aiEnabled()) {
+      try {
+        const probe = await analyzeWebPage({url: page.url, title: null, text});
+        if (probe.title) { finalTitle = probe.title; analysis = probe; }
+      } catch (e) { analysisError = e.message; }
+    }
+    if (!finalTitle) fail(400, '网页没有标题（AI 也未能从正文提炼），请补一个 title');
+
+    // AI 分析：未启用/失败都不丢剪藏，只带 analysisError（上面标题兜底已分析过就复用）。
+    if (page && analyze !== false && aiEnabled() && !analysis) {
       try { analysis = await analyzeWebPage({url: page.url, title: finalTitle, text}); }
       catch (e) { analysisError = e.message; }
     }
@@ -1015,7 +1022,7 @@ async function route(req, res, url) {
 
     const fm = cleanPersonalFm({
       category: cat,
-      ...(page ? {url: page.url, domain, clipped: new Date().toISOString().slice(0, 10)} : {}),
+      ...(page ? {url: page.url, domain: new URL(page.url).hostname, clipped: new Date().toISOString().slice(0, 10)} : {}),
       ...(analysis?.summary ? {summary: analysis.summary} : {}),
       ...(analysis?.keyPoints?.length ? {keyPoints: analysis.keyPoints} : {}),
       ...(snapshotRel ? {snapshot: snapshotRel} : {}),

@@ -227,12 +227,12 @@ export async function generateIdeas(notes, {model} = {}) {
 export async function analyzeWebPage({url, title, text}, {model} = {}) {
   const body = String(text || '').slice(0, 8000); // 控制输入 token
   const out = await chat([
-    {role: 'system', content: SYS + ' 输出 JSON：{"summary":"一句话摘要","keyPoints":["…"],"tags":["…"]}'},
-    {role: 'user', content: `URL：${url || '（无）'}\n标题：${title || '（无）'}\n\n正文：\n${body}\n\n分析这个网页：给一句 40 字以内的中文摘要、3-6 条要点（保留原文关键信息与数据）、3-6 个话题标签（优先用正文里的词）。`}
+    {role: 'system', content: SYS + ' 输出 JSON：{"summary":"一句话摘要","keyPoints":["…"],"tags":["…"],"title":"30字以内标题"}'},
+    {role: 'user', content: `URL：${url || '（无）'}\n标题：${title || '（无）'}\n\n正文：\n${body}\n\n分析这个网页：给一句 40 字以内的中文摘要、3-6 条要点（保留原文关键信息与数据）、3-6 个话题标签（优先用正文里的词）${title ? '' : '，再从正文提炼一个 30 字以内、能当文件名的标题（title 字段）'}。`}
   ], {json: true, model});
   const tags = [...new Set((out.tags || []).map(t => String(t).replace(/^#/, '').trim()).filter(Boolean))].slice(0, 6);
   const keyPoints = (out.keyPoints || []).map(p => String(p).trim()).filter(Boolean).slice(0, 6);
-  return {summary: String(out.summary || '').slice(0, 160), keyPoints, tags};
+  return {summary: String(out.summary || '').slice(0, 160), keyPoints, tags, title: String(out.title || '').trim().slice(0, 60) || null};
 }
 
 // ④ 问答（返回文本；上下文由调用方拼好，这里不检索）

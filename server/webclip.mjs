@@ -99,7 +99,12 @@ const decodeEntities = s => String(s)
 const squeeze = s => s.replace(/[ \t ]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 
 export function htmlTitle(html) {
-  const m = String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const s = String(html);
+  // og:title（或 twitter:title）优先：微信推文的 <title> 是「标题+账号名」长串，og:title 才是纯标题。
+  const meta = s.match(/<meta[^>]+property=["'](?:og:title|twitter:title)["'][^>]*content=["']([^"']*)["']/i)
+    || s.match(/<meta[^>]+content=["']([^"']*)["'][^>]*property=["'](?:og:title|twitter:title)["']/i);
+  if (squeeze(meta?.[1] || '')) return squeeze(meta[1]).slice(0, 120);
+  const m = s.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   return m ? squeeze(decodeEntities(m[1].replace(/<[^>]+>/g, ' '))).slice(0, 120) : '';
 }
 
