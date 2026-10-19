@@ -230,6 +230,61 @@ for (const f of ['index.html']) if (!existsSync(join(ROOT, f))) missing.push(f);
 if (missing.length) missing.forEach(f => fail('缺少文件：' + f));
 else ok(`入口页面、${new Set(media).size} 个图片素材与头像都在（reskin v0 后已无视频素材）`);
 
+// 5. 写回契约：前端节点 id 前缀、frontmatter 剥离、附件名必须与服务端一致。
+// 这几条 bug 只存在于前端，test-api 只能打服务端接口，测不到，所以在源码层面钉住。
+console.log('写回契约');
+const wGraph = readFileSync(join(ROOT, 'src/neural/graph.js'), 'utf8');
+const wMain = readFileSync(join(ROOT, 'src/neural/main.jsx'), 'utf8');
+const wAnalysis = readFileSync(join(ROOT, 'src/neural/Analysis.jsx'), 'utf8');
+const wServer = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+// 服务端 noteNodeId() 给笔记/日报/知识库一律发 note: 前缀，前端自己拼 news: 会对不上 files 映射与 /api/note
+const badNews = /'news:/.test(wGraph) || /'news:/.test(wMain);
+if (badNews) fail('前端还在用 news: 前缀拼节点 id（服务端统一是 note:）');
+else ok('节点 id 前缀与服务端 noteNodeId() 一致（日报也是 note:）');
+// node.id 本身已带 note: 前缀，再拼一次会变成 note:note:n1，AI 面板永远匹配不到结果
+if (/'note:'\s*\+\s*node\.id/.test(wAnalysis)) fail("Analysis.jsx 里仍在用 'note:' + node.id 拼 id（node.id 已带前缀）");
+else ok('AI 面板按 node.id 直接匹配结果，没有重复拼前缀');
+// /api/note 的 GET 返回整篇原文，PUT 的 body 只收正文：不剥离就会把 frontmatter 复制成两份
+const noStrip = !/stripFrontmatter\(/.test(wMain) || !existsSync(join(ROOT, 'src/neural/mdfront.js'))
+  || !/from '\.\/mdfront\.js'/.test(readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8'));
+if (noStrip) fail('写回前必须用 src/neural/mdfront.js 的 stripFrontmatter 剥离 frontmatter（否则每保存一次多一份）');
+else ok('写回前剥离 frontmatter（src/neural/mdfront.js，测试引同一份实现）');
+// —— 界面契约：这几处都被真实 bug 踩过，改坏了要立刻红 ——
+const noteModalSrc = readFileSync(join(ROOT, 'src/neural/NoteModal.jsx'), 'utf8');
+if (/setBody\(\(b =>/.test(noteModalSrc) || !/setBody\(b => \(b \? b \+ '\\n' : ''\) \+ v\)/.test(noteModalSrc)) {
+  fail('新建笔记插图时把箭头函数拼进了字符串（正文会被替换成函数源码）');
+} else ok('新建笔记插图按函数回调追加正文');
+
+const starSrc = readFileSync(join(ROOT, 'src/neural/StarCore.jsx'), 'utf8');
+if (/avg > 1 \/ 62/.test(starSrc)) {
+  fail('星核降档阈值 1/62 高于 60Hz 帧间隔（16.7ms），普通显示器会必然降两档');
+} else ok('星核自适应降档阈值低于 60Hz 帧间隔');
+
+const cbSrc = readFileSync(join(ROOT, 'src/neural/ConstellationBand.jsx'), 'utf8');
+if (/<button[^>]*role="listitem"/.test(cbSrc)) {
+  fail('星座轨按钮上的 role="listitem" 会覆盖按钮语义');
+} else ok('星座轨按钮保留了按钮语义');
+
+// 所有直连写接口（不经过 persist.flushKey）都要登记「本页写的」，否则自动刷新会误报外部改动。
+// 按文件检查：出现写方法的文件必须出现 markSelfWrite()，新增写接口时忘了登记会让这里变红。
+const WRITE_FILES = ['main.jsx', 'NoteModal.jsx', 'pages.jsx', 'Assistant.jsx', 'Analysis.jsx', 'SettingsPanel.jsx', 'persist.js'];
+const unmarked = WRITE_FILES.filter(f => {
+  const src = readFileSync(join(ROOT, 'src/neural', f), 'utf8');
+  const writes = (src.match(/method: '(?:PUT|POST|DELETE)'/g) || []).length;
+  return writes > 0 && !/markSelfWrite\(\)/.test(src);
+});
+if (!/export function markSelfWrite\(/.test(readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8'))) {
+  fail('persist.js 缺少 markSelfWrite()');
+} else if (unmarked.length) fail('这些文件有直连写接口但没登记本页写入：' + unmarked.join('、'));
+else ok('直连写盘都登记了本页写入，自动刷新不会误报外部改动');
+
+// 登记自写盘之后轮询不会再因这次写盘刷新数据，所以这几条路径必须自己拉一次。
+if (!/persist\.refreshData\(\)/.test(wMain)) {
+  fail('阅读弹窗保存后没有调用 persist.refreshData()（登记自写盘后不会再被轮询刷新，会看到旧正文）');
+} else ok('阅读弹窗保存后自己刷新了数据');
+if (!/name: posix\.basename\(rel\)/.test(wServer)) fail('附件上传返回的 name 必须等于落盘文件名（posix.basename(rel)）');
+else ok('附件上传返回的 name 就是落盘文件名');
+
 for (const w of warnings) console.log('  ! ' + w);
 if (errors.length) { console.error('\n未通过：'); errors.forEach(e => console.error('  ✗ ' + e)); process.exit(1); }
 console.log('\n全部通过。');

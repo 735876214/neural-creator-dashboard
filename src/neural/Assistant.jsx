@@ -2,7 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {askGraph} from './graph';
 import {Icon} from './icons';
 import {isLive} from '../data/store';
-import {apiUrl, refreshData} from './persist';
+import {apiUrl, refreshData, markSelfWrite} from './persist';
 
 // —— AI 助手（创作台 / 知识库右下角的浮动抽屉）——
 // 两个能力：① 上传文件（md/txt/docx/pdf）提取文本存进个人知识库；② 对整个笔记库提问
@@ -57,6 +57,7 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
         });
         const j = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+        markSelfWrite();
         setNote(n => (n ? n + '\n' : '') + `✓ ${file.name} → ${j.path}（${j.chars} 字）`);
       } catch (err) {
         setNote(n => (n ? n + '\n' : '') + `✗ ${file.name}：${err.message}`);

@@ -96,7 +96,9 @@ export function StarCore({live, reduced, graph}) {
         acc += dt; count++;
         if (count >= 90) {
           const avg = acc / count; acc = 0; count = 0;
-          if (avg > 1 / 62 && down < 2) {
+          // 阈值必须低于 60Hz 的 16.67ms（1/62≈16.1ms 会让每块 60Hz 屏稳定超预算、必然降两档）：
+          // 连续 90 帧均值慢于 ~50fps 才降档，真正的卡顿（低端机/大分辨率）才触发。
+          if (avg > 1 / 50 && down < 2) {
             down++;
             const grains = Math.round((params.grains ?? PARAMS.grains) * (down === 1 ? .55 : .34));
             try {

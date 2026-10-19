@@ -4,12 +4,14 @@
 // 不联网、不依赖测试框架；用 examples/vault 的临时副本，测试完自动清理。
 import {strict as assert} from 'node:assert';
 import {spawn} from 'node:child_process';
-import {cpSync, existsSync, mkdtempSync, readFileSync, rmSync} from 'node:fs';
+import {cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
 import {createServer as createNetServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+// 和前端用同一份实现，避免测试里内联一份正则、测不到真正跑在页面里的那段逻辑
+import {stripFrontmatter} from '../src/neural/mdfront.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'ncd-api-'));
@@ -372,6 +374,81 @@ try {
   const upTraversal = await json('/api/attachment?path=' + encodeURIComponent('05-方法库 methods/流程/观察记录方法.md'));
   assert.equal(upTraversal.status, 400);
   ok('附件上传与读取（/api/attachment：白名单 + 目录钉死）');
+
+  // 6e. 回归：附件返回的 name 必须就是真正落盘的文件名（前端拿它拼 ![[名称]]）
+  const upNamed = await fetch(base + '/api/attachment', {method: 'POST',
+    headers: {'x-filename': encodeURIComponent('回归截图.png'), 'content-type': 'application/octet-stream'}, body: png});
+  const upNamedBody = await upNamed.json();
+  assert.equal(upNamedBody.name, upNamedBody.path.split('/').pop(), '附件 name 必须与落盘文件名一致');
+  ok('附件 name 与落盘文件名一致（回归）');
+
+  // 6f. 回归：日报节点的 files key / GET 都必须是 note: 前缀（前端 graph 用的就是这个 id）
+  mkdirSync(join(vault, '00-AI热点'), {recursive: true});
+  writeFileSync(join(vault, '00-AI热点/2026-01-01-回归日报.md'),
+    '---\ntags: [日报]\n---\n# 回归日报\n\n- [条目](https://example.com/a)\n', 'utf8');
+  const newsData = await json('/api/data?fresh');
+  const newsNote = newsData.body.notes.find(n => n.kind === 'news');
+  assert.ok(newsNote, '00-AI热点/ 下的笔记应解析为 kind=news');
+  assert.ok(newsData.body.files['note:' + newsNote.id], '日报的 files key 必须是 note: 前缀');
+  const newsGet = await json('/api/note?id=' + encodeURIComponent('note:' + newsNote.id));
+  assert.equal(newsGet.status, 200, '日报必须能按 note: id 读到原文');
+  ok('日报节点统一用 note: 前缀（回归）');
+
+  // 6g. 回归：同名笔记保存时不能在「X 2.md / X 3.md」之间反复改名
+  const dupA = await put('/api/idea', {title: 'e2e 同名选题', body: 'a'});
+  const dupB = await put('/api/idea', {title: 'e2e 同名选题', body: 'b'});
+  assert.equal(dupA.status, 201);
+  assert.equal(dupB.status, 201);
+  assert.notEqual(dupA.body.path, dupB.body.path, '同名笔记应写入不同文件');
+  const dupSave1 = await put('/api/idea', {path: dupB.body.path, title: 'e2e 同名选题', body: 'b2'});
+  const dupSave2 = await put('/api/idea', {path: dupSave1.body.path, title: 'e2e 同名选题', body: 'b3'});
+  assert.equal(dupSave1.body.path, dupB.body.path, '标题未变时不应改名');
+  assert.equal(dupSave2.body.path, dupB.body.path, '连续保存也不应改名');
+  // 真改标题时仍要跟着改文件名
+  const dupRenamed = await put('/api/idea', {path: dupB.body.path, title: 'e2e 改名后的选题', body: 'b4'});
+  assert.equal(dupRenamed.body.path, '04-选题池/e2e 改名后的选题.md');
+  assert.ok(!existsSync(join(vault, dupB.body.path)), '旧文件名应已移走');
+  ok('同名笔记保存不改名漂移，改标题仍跟随（回归）');
+
+  // 6g2. 回归：标题本身以数字结尾时（「报告 2026」→「报告」）不能被当成重名序号而漏改名
+  const numA = await put('/api/idea', {title: 'e2e 报告 2026', body: 'n'});
+  assert.equal(numA.status, 201);
+  assert.match(numA.body.path, /e2e 报告 2026\.md$/, '标题里的数字应留在文件名里');
+  const numRen = await put('/api/idea', {path: numA.body.path, title: 'e2e 报告', body: 'n2'});
+  assert.equal(numRen.body.path, '04-选题池/e2e 报告.md', '标题「报告 2026」改成「报告」必须改名');
+  ok('标题带数字时改名不被误判（回归）');
+
+  // 6h. 回归：按 GET 返回的全文回写时必须先剥离 frontmatter，否则每保存一次就多一份 --- 块
+  const fmRel = '05-方法库/01-流程/回归-frontmatter.md';
+  writeFileSync(join(vault, fmRel), '---\ntags: [回归]\ntitle: 回归用笔记\n---\n正文第一行\n', 'utf8');
+  const fmGet = await json('/api/note?path=' + encodeURIComponent(fmRel));
+  assert.equal(fmGet.status, 200);
+  const fmBody = stripFrontmatter(fmGet.body.text);
+  assert.ok(!/^---/.test(fmBody), 'stripFrontmatter 应去掉开头的 frontmatter 块');
+  const fmPut = await put('/api/note', {path: fmRel, body: fmBody + '\n\n回归：正文改写', mtime: fmGet.body.mtime});
+  assert.equal(fmPut.status, 200);
+  const fmAfter = readFileSync(join(vault, fmRel), 'utf8');
+  const fmCount = (fmAfter.match(/^---$/gm) || []).length;
+  assert.equal(fmCount, 2, 'frontmatter 只能保留一份（首尾两行 ---）：' + JSON.stringify(fmAfter.slice(0, 120)));
+  assert.match(fmAfter, /tags: \[回归\]/, 'frontmatter 内容不能丢');
+  assert.match(fmAfter, /回归：正文改写/);
+  ok('回写正文剥离 frontmatter 后不复制（回归）');
+
+  // 6i. 回归：正文里有畸形图片链接（裸 %）时 GET /api/note 不能 500
+  const badRel = '05-方法库/01-流程/回归-图片.md';
+  writeFileSync(join(vault, badRel), '---\ntags: [回归]\n---\n![图](100%.png)\n正文\n', 'utf8');
+  const badGet = await json('/api/note?path=' + encodeURIComponent(badRel));
+  assert.equal(badGet.status, 200, '畸形图片链接不应让整篇笔记打不开：' + JSON.stringify(badGet.body).slice(0, 120));
+  const badData = await json('/api/data');
+  assert.equal(badData.status, 200);
+  ok('畸形图片链接不会让 /api/note 500（回归）');
+
+  // 6j. /api/health 不暴露笔记库绝对路径
+  const health = await json('/api/health');
+  assert.equal(health.status, 200);
+  assert.equal(health.body.ok, true);
+  assert.ok(!('vault' in health.body), '健康检查不应返回 vault 绝对路径');
+  ok('/api/health 只返回 ok');
 
   // 7. 登录：未登录 401 → /api/login 换 Cookie → 带 Cookie 可读 → auth-check 204
   const authPort = await freePort();

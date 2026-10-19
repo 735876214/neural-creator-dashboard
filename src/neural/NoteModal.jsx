@@ -1,6 +1,6 @@
 import React, {useRef, useState} from 'react';
 import {Icon} from './icons';
-import {apiUrl, refreshData} from './persist';
+import {apiUrl, refreshData, markSelfWrite} from './persist';
 
 // —— 脱离外部编辑器的独立创作入口（obsidian-independence.md P0）——
 // uploadAttachment：上传图片到 vault 附件目录（99-附件/），返回 ![[名称]] 插入文本。
@@ -15,6 +15,7 @@ export async function uploadAttachment(file) {
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+  markSelfWrite(); // 这次是看板自己写的：自动刷新轮询别把它当外部改动
   await refreshData().catch(() => {});
   return j; // {path, name}
 }
@@ -59,6 +60,7 @@ export function NewNoteModal({onClose, onDone}) {
         body: JSON.stringify({title, body, fm: {tags: tags.split(/[,，\s]+/).filter(Boolean)}})});
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+      markSelfWrite(); // 这次是看板自己写的：自动刷新轮询别把它当外部改动
       await refreshData().catch(() => {});
       onDone?.(j.path);
     } catch (e) { setErr(e.message); setBusy(false); }
@@ -77,7 +79,7 @@ export function NewNoteModal({onClose, onDone}) {
             <input type="file" accept="image/*" ref={fileRef} className="visually-hidden" onChange={async e => {
               const f = e.target.files?.[0]; e.target.value = '';
               if (!f) return;
-              const err2 = await insertImageAtCursor({current: null}, f, v => setBody((b => b ? b + '\n' : '') + v));
+              const err2 = await insertImageAtCursor({current: null}, f, v => setBody(b => (b ? b + '\n' : '') + v));
               if (err2) setErr(err2);
             }}/>
             <button type="button" className="pill ghost" onClick={() => fileRef.current?.click()}><Icon name="save" size={13}/>上传</button>
@@ -110,6 +112,7 @@ export function PublishModal({draft, onClose, onDone}) {
         body: JSON.stringify({path: draft.path, title: title !== draft.title ? title : undefined, metrics})});
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+      markSelfWrite(); // 这次是看板自己写的：自动刷新轮询别把它当外部改动
       await refreshData().catch(() => {});
       onDone?.(j.path);
     } catch (e) { setErr(e.message); setBusy(false); }

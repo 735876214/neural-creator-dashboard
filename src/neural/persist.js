@@ -10,6 +10,10 @@
 // 按「数据不保存在浏览器」的要求，outbox 只在内存里；刷新/关闭页面前会提示。
 import {useSyncExternalStore} from 'react';
 import {getMeta, getFiles, getMtimes, getSettings, setApiData} from '../data/store.js';
+import {FM_RE, stripFrontmatter} from './mdfront.js';
+
+// 兼容既有调用方（main.jsx 用 persist.stripFrontmatter）。
+export {stripFrontmatter};
 
 export const isLive = () => !!getMeta();
 
@@ -56,6 +60,14 @@ export function seedRefs({files, mtimes} = {}) {
     if (!REF_KINDS.has(key.split(':')[0])) continue;
     refs.set(key, {path, mtime: mtimes?.[key] ?? null});
   }
+}
+
+// 某条记录当前在 vault 里的路径：内存 refs（本页刚写入的）优先，其次 /api/data 的 files。
+// 新建草稿后 /api/data 尚未刷新，发布按钮靠它反查路径，否则必须先刷新页面才能发布。
+export function refPath(key) {
+  const r = refs.get(key);
+  if (r?.path) return r.path;
+  return getFiles()[key] || null;
 }
 
 function refFor(key) {
@@ -283,7 +295,7 @@ export function flushKey(key) {
 
     const j = await res.json().catch(() => ({}));
     savedSigs.set(key, item.sig);
-    lastSelfWriteAt = Date.now(); // 自动刷新轮询据此忽略自己刚写的变化（4s 宽限）
+    markSelfWrite(); // 登记「这次写盘是本页写的」：自动刷新轮询据此不再弹假的外部改动提示
     attempts.delete(key);
     clearTimeout(retryTimers.get(key)); retryTimers.delete(key);
 
@@ -324,6 +336,27 @@ export function flushNow() {
 // 最近一次本页写盘成功的时间戳（0 = 没有）；外部改动自动刷新用它区分「自己写的」与「外部改的」。
 let lastSelfWriteAt = 0;
 export const lastSelfWrite = () => lastSelfWriteAt;
+// 最近一次本页写盘后 /api/version 返回的指纹（0 = 未知）。轮询拿它判定「这次变化就是自己写的」。
+let selfVersion = 0;
+let selfVersionSeq = 0; // 多次写盘并行时只认最后发起的那次，避免旧指纹盖掉新指纹
+export const lastSelfVersion = () => selfVersion;
+// 任何一条写盘成功路径（persist.flushKey 与阅读弹窗的直连 PUT）都要调它登记，
+// 否则下一次轮询会把这次写入当成外部改动，弹一条假的「笔记库有外部改动」。
+// 故意不 await：这是给轮询用的附加信息，不该阻塞保存状态，也不该让 /api/version 卡住保存链。
+export function markSelfWrite() {
+  lastSelfWriteAt = Date.now();
+  const seq = ++selfVersionSeq;
+  try {
+    // 老浏览器没有 AbortSignal.timeout 时退化成不超时；这里绝不能往抛异常，
+    // 它在保存成功路径上，抛出去会把一次已经落盘的保存变成「保存失败」。
+    const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(4000) : undefined;
+    fetch(API + '/api/version', signal ? {signal} : undefined)
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => { if (seq === selfVersionSeq && j && typeof j.v === 'number') selfVersion = j.v; })
+      .catch(() => { /* 拿不到就退化成时间窗判断 */ });
+  } catch { /* 同上：探测失败不影响保存 */ }
+}
 // 有在途/未落盘的写入（outbox 有 key，或状态 pending/error/conflict）——自动刷新不覆盖这些条目。
 export const isPending = key => outbox.has(key) || UNRESOLVED.has(getSaveState(key).state);
 
@@ -394,6 +427,7 @@ export async function deleteDraft(id) {
   try {
     const res = await fetch(API + '/api/note?path=' + encodeURIComponent(current.path), {method: 'DELETE'});
     if (res.ok || res.status === 404) {
+      markSelfWrite(); // 删除也是一次写盘，不登记就会在下一轮轮询里变成假的「外部改动」
       refs.delete(key); savedSigs.delete(key); attempts.delete(key); states.delete(key); emit();
       return {ok: true, gone: true};
     }
@@ -413,12 +447,6 @@ export async function refreshData() {
   const res = await fetch(API + '/api/data?fresh');
   if (!res.ok) throw new Error('HTTP ' + res.status);
   setApiData(await res.json());
-}
-
-const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
-
-export function stripFrontmatter(text) {
-  return String(text || '').replace(FM_RE, '');
 }
 
 function fmValue(text, keys) {

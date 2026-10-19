@@ -102,7 +102,9 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     add({id: subId, kind: 'folder', title: sub.replace(/^\d+-/, '').replace(/\s+[a-z-]+$/i, ''), path: isPersonal ? parts[0] : parts.slice(0, 2).join('/'), level: 2});
     link(isNews ? 'f:00-AI热点' : isPersonal ? 'f:personal' : 'f:methods', subId, 'contain');
     const kind = isNews ? 'news' : isPersonal ? 'personal' : 'note';
-    const id = (isPersonal ? 'personal:' : isNews ? 'news:' : 'note:') + n.id;
+    // 前缀必须和 note-api 的 noteNodeId() 一致：日报也是 note:（服务端 /api/note 的 id 映射、
+    // 以及 /api/ai/relate 写出的语义边都用 note:）。用 news: 会让日报既不能编辑正文，也永远接不上语义边。
+    const id = (isPersonal ? 'personal:' : 'note:') + n.id;
     add({id, kind, title: n.title, short: cleanTitle(n.title), path: n.path, folder: subId, partition: n.partition || 'knowledge', text: n.title + '\n' + n.body, body: n.body, tags: n.tags || [],
       ...(isPersonal ? {personal: n} : {})});
     link(subId, id, 'contain');

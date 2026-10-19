@@ -10,7 +10,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {Icon} from './icons';
 import {aiModels} from './sync.js';
-import {saveSettings, apiUrl, saveGoal} from './persist';
+import {saveSettings, apiUrl, saveGoal, markSelfWrite, refreshData} from './persist';
 
 function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}) {
   const keyConfigured = !!settings?.aiKeyConfigured;
@@ -127,6 +127,10 @@ function PlatformSection({settings, onSaved, readOnly}) {
     setBusy(true); setMsg('');
     try {
       const res = await fetch(apiUrl('/api/platforms/pull'), {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
+      if (res.ok) {
+        markSelfWrite(); // 拉指标会写回作品 frontmatter
+        await refreshData().catch(() => {}); // onSaved 是空函数，不自己拉就看不到新指标
+      }
       const j = await res.json().catch(() => ({}));
       const results = j.results || [];
       const ok = results.filter(r => r.updated).length;
@@ -165,7 +169,7 @@ function PlatformSection({settings, onSaved, readOnly}) {
   </section>;
 }
 
-function GoalSection({goal, monthCount, onGoal}) {
+function GoalSection({goal, monthCount, onGoal, readOnly}) {
   const [v, setV] = useState(String(goal));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
@@ -173,6 +177,7 @@ function GoalSection({goal, monthCount, onGoal}) {
 
   const save = async () => {
     const n = Number(v);
+    if (readOnly) { setMsg('未连接 NAS，目标只读 · Read-only'); return; }
     if (!(Number.isInteger(n) && n >= 1 && n <= 100)) { setMsg('目标必须是 1–100 的整数'); return; }
     setBusy(true); setMsg('');
     try {
@@ -186,10 +191,10 @@ function GoalSection({goal, monthCount, onGoal}) {
     <h3><Icon name="save" size={14}/>月目标 <em>Monthly goal</em></h3>
     <div className="form-row">
       <label>目标篇数 <em>Target</em>
-        <input type="number" min="1" max="100" step="1" value={v} onChange={e => setV(e.target.value)} disabled={busy} aria-label="目标篇数"/>
+        <input type="number" min="1" max="100" step="1" value={v} onChange={e => setV(e.target.value)} disabled={busy || readOnly} aria-label="目标篇数"/>
       </label>
       <div className="set-status"><span className="set-ok">本月已发布 {monthCount} 篇</span>
-        <button type="button" className="pill primary" onClick={save} disabled={busy}>保存目标 <em>Save</em></button>
+        <button type="button" className="pill primary" onClick={save} disabled={busy || readOnly}>保存目标 <em>Save</em></button>
       </div>
     </div>
     {msg && <p className="quiet" role="status">{msg}</p>}

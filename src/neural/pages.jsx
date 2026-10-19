@@ -6,7 +6,7 @@ import {ConstellationBand} from './ConstellationBand';
 import {snapshot} from '../data';
 import {posts} from './works';
 import {T} from './theme';
-import {useSaveState, draftKey, apiUrl, refreshData} from './persist';
+import {useSaveState, draftKey, apiUrl, refreshData, markSelfWrite} from './persist';
 import {getFiles} from '../data/store';
 import {SaveBadge} from './SaveStatus';
 import {Assistant} from './Assistant';
@@ -262,6 +262,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
       setUrl('');
+      markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
       await refreshData();
       showToast(j.analysisError ? '剪藏已保存，但 AI 分析失败：' + j.analysisError : '网页已剪藏，快照与摘要已写入知识库');
     } catch (err) { showToast('剪藏失败：' + err.message); }
@@ -277,6 +278,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
       setComposing(null);
+      markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
       await refreshData();
       showToast('已保存到个人知识库（06-个人知识库/）');
     } catch (err) { showToast('保存失败：' + err.message); }
@@ -288,6 +290,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
     try {
       const res = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(relOf(n))), {method: 'DELETE'});
       if (!res.ok) throw new Error('HTTP ' + res.status);
+      markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
       await refreshData();
       showToast('已删除，原文件备份在 vault/.trash/');
     } catch (err) { showToast('删除失败：' + err.message); }
@@ -387,6 +390,7 @@ export function Methods({graph, readOnly, onGo, onAction, onModule, showToast, o
       if (!res.ok) throw new Error('HTTP ' + res.status);
       setSel(null);
       showToast('已删除，原文件备份在 vault/.trash/');
+      markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
       await refreshData();
     } catch (err) { showToast('删除失败：' + err.message); }
   };

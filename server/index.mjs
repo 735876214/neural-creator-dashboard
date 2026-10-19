@@ -214,10 +214,17 @@ function cookieHeader(value, req) {
   return `${SESSION_COOKIE}=${encodeURIComponent(value || '')}; Path=/; HttpOnly; SameSite=Lax; ${age}${secure ? '; Secure' : ''}`;
 }
 
+// 只有在显式信任代理（TRUST_PROXY=1，反向代理/nginx 部署）时才读转发头：
+// 部署版 note-api 直接发布端口，客户端自带 x-real-ip 就能让每个请求都是新 IP、
+// 把登录失败计数拆散到无限多个 key 上（限流形同虚设）。
+const TRUST_PROXY = /^(1|true|yes)$/i.test(String(process.env.TRUST_PROXY || ''));
 function clientIp(req) {
-  const forwarded = String(req.headers['x-real-ip'] || req.headers['x-forwarded-for'] || '')
-    .split(',')[0].trim();
-  return forwarded || req.socket.remoteAddress || 'unknown';
+  if (TRUST_PROXY) {
+    const forwarded = String(req.headers['x-real-ip'] || req.headers['x-forwarded-for'] || '')
+      .split(',')[0].trim();
+    if (forwarded) return forwarded;
+  }
+  return req.socket.remoteAddress || 'unknown';
 }
 
 // 把客户端给的相对路径钉死在笔记库内部，只允许 .md。
@@ -504,6 +511,8 @@ function createNote(kind, {title, body = '', fm = {}}) {
 // Obsidian 禁止出现在文件名里的字符，另外把双链里有歧义的 # ^ [ ] | 也换掉
 const safeName = t => String(t || '').replace(/[\\/:*?"<>|#^[\]]/g, ' ')
   .replace(/\s+/g, ' ').replace(/^\.+/, '').trim().slice(0, 80) || '未命名';
+// 新建时给重名笔记加的后缀：「标题 N」
+const dedupName = name => new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' \\d+$');
 
 function removeNote(rel) {
   const {abs} = inside(rel);
@@ -572,7 +581,8 @@ function authed(req) {
 async function route(req, res, url) {
   const p = url.pathname.replace(/\/+$/, '') || '/';
 
-  if (p === '/api/health') return json(res, 200, {ok: true, vault: VAULT, indexed: index.count()});
+  // 健康检查只需要 ok：绝对路径与索引条数不该对未鉴权请求暴露
+  if (p === '/api/health') return json(res, 200, {ok: true});
 
   // —— 登录：这几个端点在未登录时也必须可用 ——
   if (p === '/api/session' && req.method === 'GET') {
@@ -586,6 +596,8 @@ async function route(req, res, url) {
     if (!auth) return json(res, 200, {ok: true, required: false});
     const ip = clientIp(req);
     const now = Date.now();
+    // 失败记录只在成功登录时清除：不定期清过期项的话 Map 会随来源 IP 一直长
+    if (loginFailures.size > 512) for (const [k, v] of loginFailures) if (v.reset <= now) loginFailures.delete(k);
     const rec = loginFailures.get(ip);
     if (rec && rec.reset > now && rec.n >= LOGIN_MAX) {
       res.setHeader('retry-after', String(Math.ceil((rec.reset - now) / 1000)));
@@ -823,8 +835,8 @@ async function route(req, res, url) {
     writeFileSync(join(VAULT, rel), buf);
     gitCommit(rel, `上传附件 ${rel}`);
     invalidate();
-    const finalName = `${stem}-${Date.now()}${ext}`;
-    return json(res, 201, {path: rel, name: finalName});
+    // name 必须就是真正落盘的文件名：前端拿它拼 ![[...]]。再调一次 Date.now() 会跨毫秒对不上。
+    return json(res, 201, {path: rel, name: posix.basename(rel)});
   }
 
   if (p === '/api/attachment' && req.method === 'GET') {
@@ -1215,9 +1227,19 @@ function renameTo(title, rel) {
   const {abs} = inside(rel);
   const dir = dirname(abs);
   const name = safeName(title);
+  // 文件名已经是「标题」或「标题 N」时说明标题没变，直接返回；否则重名笔记每次保存
+  // 都会在 X 2.md / X 3.md 之间来回改名，Obsidian 双链每次断一次。
+  const cur = abs.slice(dir.length + 1);
+  const stem = cur.endsWith('.md') ? cur.slice(0, -3) : cur;
+  if (stem === name) return rel;
+  // 文件名是「标题 N」（新建时的重名序号）且同一标题的基名已被别的文件占用 → 标题没变，不能改名。
+  // 只凭「空格+数字」判断会把「报告 2026.md 改成标题 报告」这种真实改名误判成未变。
+  const baseAbs = join(dir, name + '.md');
+  if (baseAbs !== abs && existsSync(baseAbs) && dedupName(name).test(stem)) return rel;
   let next = join(dir, name + '.md');
-  if (next === abs) return rel;
-  for (let i = 2; existsSync(next); i++) next = join(dir, `${name} ${i}.md`);
+  for (let i = 2; i < 1000 && existsSync(next); i++) next = join(dir, `${name} ${i}.md`);
+  // 序号用尽时绝不能继续 rename：那时 next 是个已有文件，renameSync 会静默覆盖它
+  if (existsSync(next)) fail(409, `同名文件过多，未改名：${rel}`);
   const nextRel = posix.join(posix.dirname(rel), next.slice(dir.length + 1));
   try {
     renameSync(abs, next);

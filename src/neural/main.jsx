@@ -134,7 +134,11 @@ function App() {
         const j = await r.json();
         if (stopped) return;
         if (lastV != null && j.v !== lastV) {
-          if (Date.now() - persist.lastSelfWrite() < 4000) { lastV = j.v; return; }
+          // 指纹正是本页写盘后记下的那个 → 这次变化就是自己写的回声，静默接受，不弹提示。
+          if (j.v === persist.lastSelfVersion()) { lastV = j.v; return; }
+          // 刚写盘的 4 秒内还判断不了是回声还是外部改动：先不推进 lastV，下个周期再判。
+          // 推进了会把外部改动标记成已处理，指纹之后不再变化就永远拉不回来了。
+          if (Date.now() - persist.lastSelfWrite() < 4000) return;
           lastV = j.v;
           await persist.refreshData();
           setToast('笔记库有外部改动，看板已更新 · Vault updated');
@@ -308,7 +312,7 @@ function App() {
   // 路径从 /api/data 的 files 映射反查（draft:<id> → vault 相对路径），未落盘的草稿没有 path。
   function toPost(draft) {
     if (!live) { setToast('未连接 NAS，当前为只读演示 · Read-only (no NAS)'); return; }
-    const path = getFiles()['draft:' + draft.id] || null;
+    const path = getFiles()['draft:' + draft.id] || persist.refPath(persist.draftKey(draft.id)) || null;
     if (!path) { setToast('草稿还没同步到 NAS，等保存完成后再发布 · Not synced yet'); return; }
     setModal({toPost: {path, title: draft.title}});
   }
@@ -496,7 +500,8 @@ function renderNewsBody(body) {
 
 // 方法笔记 / 个人知识库 / 作品的阅读弹窗。部署模式下提供「编辑正文」：拉原文 → textarea → 保存落盘。
 function ReadModal({node, onClose, editable}) {
-  const isNote = node.kind === 'note' || node.kind === 'personal';
+  // 日报（news）也走 GET/PUT /api/note（id 前缀同样是 note:），所以三种都能拉原文带 mtime 编辑。
+  const isNote = node.kind === 'note' || node.kind === 'personal' || node.kind === 'news';
   const editArea = React.useRef(null);
   const personal = node.kind === 'personal' ? node.personal || {} : null;
   const [editing, setEditing] = useState(false);
@@ -511,9 +516,15 @@ function ReadModal({node, onClose, editable}) {
   useEffect(() => {
     if (!editing || !isNote) return;
     let on = true;
-    fetch(persist.apiUrl('/api/note?id=' + encodeURIComponent(node.id))).then(r => r.json()).then(j => {
-      if (on) { setText(j.text || node.body || ''); setMtime(j.mtime); }
-    }).catch(() => { if (on) { setText(node.body || ''); setErr('读不到原文，编辑的是看板缓存'); } });
+    fetch(persist.apiUrl('/api/note?id=' + encodeURIComponent(node.id))).then(async r => {
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
+      return j;
+    }).then(j => {
+      // GET 返回的是整篇原文（含 --- frontmatter）。编辑框只装正文：服务端 setBody() 会保留
+      // 原 frontmatter 再拼新正文，把 frontmatter 一起提交会每保存一次就复制一份。
+      if (on) { setText(persist.stripFrontmatter(j.text ?? node.body ?? '')); setMtime(j.mtime); }
+    }).catch(() => { if (on) { setText(persist.stripFrontmatter(node.body || '')); setErr('读不到原文，编辑的是看板缓存'); } });
     return () => { on = false; };
   }, [editing, isNote, node.id, node.body]);
 
@@ -528,10 +539,13 @@ function ReadModal({node, onClose, editable}) {
         const j = await res.json().catch(() => ({}));
         setErr('文件已被其他编辑器改动，未覆盖 · Conflict: file changed elsewhere, not overwritten');
         setMtime(j.mtime);
-        setServerText(j.content || ''); // NAS 当前版本，供 diff；不再直接覆盖编辑框（丢输入）
+        setServerText(persist.stripFrontmatter(j.content || '')); // NAS 当前正文，供 diff；不再直接覆盖编辑框（丢输入）
         return;
       }
       if (!res.ok) throw new Error('HTTP ' + res.status);
+      persist.markSelfWrite(); // 弹窗是直连 PUT，同样要登记，否则轮询会弹假的外部改动
+      // 登记后轮询就不再因这次写盘刷新数据，必须自己拉一次：否则图谱/检索/重开弹窗还是旧正文
+      await persist.refreshData().catch(() => {});
       onClose();
     } catch (e) { setErr('保存失败：' + e.message + ' · Save failed'); }
     finally { setBusy(false); }
@@ -549,7 +563,7 @@ function ReadModal({node, onClose, editable}) {
           {node.kind === 'news'
             ? <div className="reader-news">{renderNewsBody(node.body)}</div>
             : <pre>{node.body}</pre>}
-          {(isNote || node.kind === 'news') && editable && <div className="form-actions">
+          {isNote && editable && <div className="form-actions">
             <button className="pill primary" onClick={() => setEditing(true)}><Icon name="draft" size={14}/>编辑正文 <em>Edit</em></button>
             <span className="quiet">改动会写回 NAS 笔记库文件 <em>Writes back to the vault on NAS</em></span>
           </div>}

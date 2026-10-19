@@ -98,7 +98,12 @@ export function attachmentsOf(body) {
   const out = new Set();
   for (const m of String(body || '').matchAll(/!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) out.add(m[1].trim());
   for (const m of String(body || '').matchAll(/!\[[^\]]*\]\(([^)\s]+)/g)) {
-    if (!/^https?:/i.test(m[1])) out.add(decodeURIComponent(m[1].trim()));
+    if (!/^https?:/i.test(m[1])) {
+      // 笔记里写成 ![图](100%.png) 这种裸 % 时 decodeURIComponent 会抛 URIError，
+      // 原来会沿调用链冒到 GET /api/note 变成 500（整篇打不开），这里回退到原始字符串。
+      const raw = m[1].trim();
+      try { out.add(decodeURIComponent(raw)); } catch { out.add(raw); }
+    }
   }
   return [...out].filter(f => /\.(png|jpe?g|gif|webp|avif|svg|bmp|pdf|mp4|mov|m4a|mp3|wav)$/i.test(f) || !/\./.test(f.split('/').pop()));
 }

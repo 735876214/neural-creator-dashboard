@@ -4,7 +4,7 @@ import {Icon} from './icons';
 import {profileFor, bandsOf, outerCountOf} from './v41';
 import {isLive, getMeta, getFiles, setSemantic} from '../data/store';
 import {aiAnalyze, aiRelate, aiIdeas, aiModels, pickedModel, setPickedModel} from './sync';
-import {apiUrl, refreshData} from './persist';
+import {apiUrl, refreshData, markSelfWrite} from './persist';
 
 const fmt = (v, d = 0) => v == null || Number.isNaN(v) ? '—' : Number(v).toLocaleString('zh-CN', {minimumFractionDigits: d, maximumFractionDigits: d});
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -91,7 +91,9 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
   // 不能改变本组件的 hook 数量，否则 React 抛 hooks 数量不匹配。
   const [state, setState] = useState({busy: false, msg: '', tags: null, summary: null, related: null});
   const isPersonal = node.kind === 'personal';
-  const rel = getFiles()?.[isPersonal ? 'personal:' + node.id.replace(/^personal:/, '') : 'note:' + node.id] || null;
+  // node.id 已经是图谱完整 id（note: / personal: 前缀由 graph.js 加好），这里不能再拼一次，
+  // 否则 key 变成 note:note:n1，getFiles() 永远取不到，AI 面板必然失败。
+  const rel = getFiles()?.[node.id] || null;
   if (!isLive() || !aiEnabled || (isPersonal ? !rel : false)) return null;
   const run = (fn, okMsg) => async () => {
     setState(s => ({...s, busy: true, msg: ''}));
@@ -105,6 +107,7 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
         const res = await fetch(apiUrl('/api/knowledge/analyze'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({id: node.id})});
         const j = await res.json();
         if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+        markSelfWrite(); // 服务端已把 summary/tags 写回笔记 frontmatter
         await refreshData();
         return {summary: j.analysis?.summary, tags: j.analysis?.tags};
       }, '网页分析已写回笔记')}>重新分析网页 <em>Re-analyze</em></button>
@@ -116,7 +119,10 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
         if (!dry.todo) return {msg: '这篇已经分析过了'};
         const job = await aiAnalyze([rel]);
         const r = await pollJob(job.job.id);
-        const one = r.result?.find(x => x.id === 'note:' + node.id);
+        // 写盘发生在后台任务里，指纹要等任务结束才稳定：此刻登记 + 刷新，轮询才不会误报外部改动
+        markSelfWrite();
+        await refreshData().catch(() => {});
+        const one = r.result?.find(x => x.id === node.id);
         return one ? {tags: one.tags, summary: one.summary} : {};
       }, '标签与摘要已写入笔记')}>打标签 + 摘要 <em>Tag &amp; summarize</em></button>
       {embedOn && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
@@ -429,6 +435,7 @@ function MetricsEditor({node}) {
       });
       if (res.status === 409) { setMsg('文件已被其他编辑器改动，未覆盖 · Conflict'); setBusy(false); return; }
       if (!res.ok) throw new Error('HTTP ' + res.status);
+      markSelfWrite(); // 指标写回了作品 frontmatter
       setMsg('已写入，刷新数据…');
       setTimeout(() => location.reload(), 800);
     } catch (e) { setMsg('保存失败：' + e.message); setBusy(false); }

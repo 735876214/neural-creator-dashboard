@@ -53,10 +53,10 @@ export function ConstellationBand({page, onGo}) {
       <p className="cb-title">七个星座 <em>Seven constellations</em></p>
       <p className="cb-note">真实星位与经典连线 · 与工作台同一套<em>Real sky positions, classic lines</em></p>
     </div>
-    <div className="cb-figs" role="list">
+    <div className="cb-figs">
       {MODULES.map((m, i) => {
         const [zh, en] = nameOf(m.id), n = countsOf(m.id), on = m.id === page;
-        return <button key={m.id} role="listitem" className={`cb-fig ${on ? 'on' : ''}`}
+        return <button key={m.id} className={`cb-fig ${on ? 'on' : ''}`}
           onClick={() => onGo && onGo(m.id)} style={{'--mod': T.modules[m.id].color, '--dy': `${ARC[i] ?? 0}px`}}
           aria-current={on ? 'true' : undefined}
           title={`${zh} ${en} · ${m.title} · ${n.stars} 主星 ${n.edges} 连线`}>
