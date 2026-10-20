@@ -10,7 +10,7 @@
 //
 // 登录：note-api 开了登录时，/api/session 会返回 required:true / authenticated:false，
 // 这时跳转到独立的 login.html；登录成功后再回到当前页。纯静态模式没有这个接口，直接跳过。
-import {setApiData, setError} from '../data/store.js';
+import {setApiData, setError, beginLoad} from '../data/store.js';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 const EXPECT_API = import.meta.env.VITE_API_BASE !== undefined;
@@ -19,6 +19,9 @@ const LOGIN_PAGE = (import.meta.env.BASE_URL || '/') + 'login.html';
 
 let redirecting = false;
 let authRequired = false;
+// 收到过 note-api 的 HTTP 响应（哪怕 401/500）就说明这里是部署模式：
+// 这条事实不能只靠构建期的 VITE_API_BASE 判断（生产镜像的 npm run build 不传 build-arg）。
+let serverSeen = false;
 
 function redirectToLogin() {
   if (redirecting) return;
@@ -71,7 +74,22 @@ async function fetchJson(path, init) {
 
 async function checkSession() {
   try { return await fetchJson('/api/session'); }
-  catch { return null; } // 纯静态站、旧版 note-api、或者接口还没起来
+  catch (e) {
+    if (e.status) serverSeen = true; // 有 HTTP 状态码 = 后端在，只是这次没成功
+    return null; // 纯静态站、旧版 note-api、或者接口还没起来
+  }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// 部署模式下没取到数据：每 20 秒安静地试一次，成功就整页重载（图谱与只读态一起恢复）。
+function selfHeal() {
+  const timer = setInterval(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/data`, {headers: {accept: 'application/json'}});
+      if (r.ok) { clearInterval(timer); location.reload(); }
+    } catch { /* 继续等 */ }
+  }, 20_000);
 }
 
 async function boot() {
@@ -84,15 +102,32 @@ async function boot() {
 
   installAuthRedirect();
 
+  const seq = beginLoad();
+  let json = null, lastErr = null;
+  // 容器刚起来 / 大库首次 reindex 可能超过一次超时：重试几次再决定回退，
+  // 否则用户看到的是「示例数据 + 全只读」，像是笔记库被清空了。
+  for (let attempt = 0; attempt < 4 && !json; attempt++) {
+    try { json = await fetchJson('/api/data'); }
+    catch (e) {
+      if (e.status === 401 && authRequired) { redirectToLogin(); return; }
+      if (e.status) serverSeen = true;
+      lastErr = e;
+      if (e.status && e.status < 500) break; // 401 之外的 4xx 重试没意义
+      if (attempt < 3) await sleep(600 * 2 ** attempt);
+    }
+  }
   try {
-    const json = await fetchJson('/api/data');
-    if (!json || !Array.isArray(json.posts)) throw new Error('note-api 返回的数据形状不对');
-    setApiData(json);
+    if (!json) throw lastErr || new Error('读不到笔记库');
+    if (!Array.isArray(json.posts)) throw new Error('note-api 返回的数据形状不对');
+    setApiData(json, seq);
   } catch (e) {
     if (e.status === 401 && authRequired) { redirectToLogin(); return; }
     setError(e);
     console.warn('[boot] 读不到 note-api，回退到本地数据：', e.message);
-    if (EXPECT_API) notice('连不上笔记库，正在用本地数据 · Offline: using bundled data');
+    if (EXPECT_API || serverSeen) {
+      notice('连不上笔记库，暂时用本地数据，正在后台重试 · Offline, retrying');
+      selfHeal();
+    }
   }
 
   document.getElementById('boot-wait')?.remove();

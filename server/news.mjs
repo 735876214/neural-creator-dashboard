@@ -7,8 +7,8 @@
 //   3. 写进 vault（00-AI热点/YYYY-MM-DD.md，自动进图谱）和 SQLite（news 表）。
 //
 // 定时：startNewsCron 每小时检查一次，当天还没有日报且已过 NEWS_HOUR（默认 8 点）就生成。
-// 环境变量：NEWS_SOURCE（RSS 地址）、NEWS_HOUR（生成时刻）、NEWS_CRON=0 关闭。
-import {writeFileSync, mkdirSync, existsSync} from 'node:fs';
+// 环境变量：NEWS_SOURCE（RSS 地址）、NEWS_HOUR（生成时刻）、NEWS_TZ_OFFSET（默认 8）、NEWS_CRON=0 关闭。
+import {writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, rmSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {writeDoc} from './frontmatter.mjs';
 import {chat, TASK_MODELS, aiEnabled} from './ai.mjs';
@@ -17,7 +17,34 @@ const NEWS_HOUR = Number(process.env.NEWS_HOUR || 8);
 const NEWS_DIR = '00-AI热点';
 const MAX_ITEMS = 40;
 
-const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// 容器默认 UTC（镜像不装 tzdata）：用显式偏移判定「几点之后」和「今天是哪天」，
+// 否则 NEWS_HOUR=8 在北京时间是 16:00，凌晨重启还会把日报写到前一天。
+const TZ_OFFSET_RAW = Number(process.env.NEWS_TZ_OFFSET);
+const TZ_OFFSET = Number.isFinite(TZ_OFFSET_RAW) ? TZ_OFFSET_RAW : 8;
+const localNow = (ms = Date.now()) => new Date(ms + TZ_OFFSET * 3600_000);
+// 传进来的 Date 已偏移到固定时区，统一用 UTC 字段取值。
+const localDate = (d = localNow()) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+
+// 日报 .md 的有效性：文件存在且是一份完整文档（有 frontmatter 栅栏、非空）。
+// 只看 existsSync 会把写坏的半截文件当成「已生成」，之后永远不会被修复。
+function validMd(path) {
+  try {
+    const t = readFileSync(path, 'utf8');
+    return t.trim().length > 0 && t.startsWith('---') && t.indexOf('\n---', 3) > 0;
+  } catch { return false; }
+}
+
+// 同目录临时文件 + rename：写盘中途被杀/断电只会留下完整旧版或完整新版。
+function writeMdAtomic(path, text) {
+  const tmp = path + `.${process.pid}-${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmp, text, 'utf8');
+    renameSync(tmp, path);
+  } catch (e) {
+    try { rmSync(tmp, {force: true}); } catch {}
+    throw e;
+  }
+}
 
 // —— RSS 2.0 极简解析（只用正则；源是标准 RSS，不值得为此引依赖） ——
 const cdata = s => String(s || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
@@ -92,20 +119,19 @@ function renderMd(date, items, {digest, topics}) {
 export async function refreshNews(index, vaultDir, io = {}) {
   const date = localDate();
   const cached = index.getNews(date);
-  // vault 里文件还在（没被手动删）才复用缓存
+  // vault 里文件还在且完整（没被手动删 / 没被写坏）才复用缓存
   const mdPath = join(vaultDir, NEWS_DIR, `${date}.md`);
-  if (cached && existsSync(mdPath)) return null;
+  if (cached && validMd(mdPath)) return null;
 
   const items = await fetchAiNews();
   if (!items.length) throw new Error('RSS 里没有可用条目');
   const r = await digestNews(items);
   index.putNews(date, {...r, items: items.map(i => ({title: i.title, link: i.link, date: i.date?.toISOString?.() || null})), model: TASK_MODELS.news});
 
-  // 写进 vault（自动进图谱）；文件已存在（比如重启后补写）就跳过
-  if (!existsSync(mdPath)) {
-    const text = renderMd(date, items, r);
+  // 写进 vault（自动进图谱）；文件已完整存在（比如重启后补写）就跳过，残缺的会重写覆盖
+  if (!validMd(mdPath)) {
     mkdirSync(dirname(mdPath), {recursive: true});
-    writeFileSync(mdPath, text, 'utf8');
+    writeMdAtomic(mdPath, renderMd(date, items, r));
   }
   return {date, digest: r.digest, topics: r.topics.length, items: items.length};
 }
@@ -119,7 +145,7 @@ export async function forceRefresh(index, vaultDir, io = {}) {
   index.putNews(date, {...r, items: items.map(i => ({title: i.title, link: i.link, date: i.date?.toISOString?.() || null})), model: TASK_MODELS.news});
   const mdPath = join(vaultDir, NEWS_DIR, `${date}.md`);
   mkdirSync(dirname(mdPath), {recursive: true});
-  writeFileSync(mdPath, renderMd(date, items, r), 'utf8');
+  writeMdAtomic(mdPath, renderMd(date, items, r));
   return {date, digest: r.digest, topics: r.topics.length, items: items.length};
 }
 
@@ -132,6 +158,9 @@ export function listNews(index, limit = 14) { return index.listNews(limit); }
 export async function ideasFromNews(index, vaultDir, {model, auto = false, io = {}} = {}) {
   const news = index.listNews(1, true)[0];
   if (!news) throw new Error('还没有热点日报：先 POST /api/news/refresh 生成一份');
+  // 幂等闸必须放在 AI 调用之前：放在生成候选之后，cron 与手动同时触发时
+  // 两边都会先各调一次模型、各写 3 个选题（第二份还会被重名保护改名成「标题 2」）。
+  if (auto && news.ideasAt) return {candidates: [], written: [], skipped: '今天的选题已自动落盘过'};
   const myWorks = [];
   const data = index.allNotes(true);
   for (const n of data) {
@@ -157,7 +186,6 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
   // 防重：当天已自动落过（news 表记了 ideasAt）就不再落——否则每次手动触发都会攒一堆新题。
   const createNote = io.createNote;
   const written = [];
-  if (news.ideasAt) return {candidates, written, skipped: '今天的选题已自动落盘过'};
   for (const c of candidates) {
     // 正文保留依据的热点条目与原文链接，frontmatter 记 sourceNews，图谱据此连回日报。
     const sources = c.newsTitles.length
@@ -188,8 +216,8 @@ export function startNewsCron(runOnce) {
   let running = false;
   const tick = async () => {
     if (running) return;
-    const now = new Date();
-    if (now.getHours() < NEWS_HOUR) return;
+    const now = localNow();
+    if (now.getUTCHours() < NEWS_HOUR) return;
     running = true;
     try { await runOnce(); console.error('[news] 当日 AI 热点日报已就绪'); }
     catch (e) { console.error('[news] 日报生成失败：', e.message); }

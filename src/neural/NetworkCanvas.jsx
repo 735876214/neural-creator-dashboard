@@ -5,6 +5,31 @@ import {T} from './theme';
 const P = T.canvas;
 const ADD = P.additive ? 'lighter' : 'source-over';
 
+// 节点光晕与球体、连线光粒：每帧 createRadialGradient 在节点多时是主要开销，
+// 这里按颜色烘成精灵图（球体的偏光位置一起烘进去），每帧只 drawImage + globalAlpha。
+const sprites = new Map();
+// circle=true 时按内切圆裁剪：球体外圈色标不是全透明，不裁的话方框四角会被画成实心方块。
+function sprite(key, stops, {size = 64, inner = null, circle = false} = {}) {
+  let cv = sprites.get(key);
+  if (!cv) {
+    cv = document.createElement('canvas');
+    cv.width = cv.height = size;
+    const g2 = cv.getContext('2d');
+    const g = inner
+      ? g2.createRadialGradient(inner[0] * size, inner[1] * size, 0, size / 2, size / 2, size / 2)
+      : g2.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    for (const [at, col] of stops) g.addColorStop(at, col);
+    g2.fillStyle = g;
+    if (circle) { g2.beginPath(); g2.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2); g2.clip(); }
+    g2.fillRect(0, 0, size, size);
+    sprites.set(key, cv);
+  }
+  return cv;
+}
+const glowOf = color => sprite('glow:' + color, [[0, color + P.glow], [1, color + '00']]);
+const bodyOf = color => sprite('body:' + color, [[0, P.light], [.45, color], [1, color + 'aa']], {inner: [.325, .325], circle: true});
+const pulseOf = c => sprite('pulse:' + c, [[0, `rgba(${c},1)`], [1, `rgba(${c},0)`]], {size: 32});
+
 // 背景星图：从星核蔓延出的全部恒星、话题与概念；簇内连线偏亮、跨簇连线细而暗，双向共振走暖金。
 export function NetworkCanvas({graph, layout, live, reduced}) {
   const ref = useRef(null);
@@ -115,12 +140,12 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
             let x = x1 + (x2 - x1) * u, y = y1 + (y2 - y1) * u;
             if (k.l.both) { const mx = (k.A.s[0] + k.B.s[0]) / 2 + (k.B.s[1] - k.A.s[1]) * .12, my = (k.A.s[1] + k.B.s[1]) / 2 - (k.B.s[0] - k.A.s[0]) * .12; const uu = fwd ? u : 1 - u; x = (1 - uu) ** 2 * k.A.s[0] + 2 * (1 - uu) * uu * mx + uu * uu * k.B.s[0]; y = (1 - uu) ** 2 * k.A.s[1] + 2 * (1 - uu) * uu * my + uu * uu * k.B.s[1]; }
             const a = Math.sin(u * Math.PI) * (on ? .95 : .2) * (PARTITION_OF(k.A.n) !== PARTITION_OF(k.B.n) ? .6 : 1);
-            const g = ctx.createRadialGradient(x, y, 0, x, y, 6);
             const c = k.l.both ? (lane ? P.mutualIn : P.mutual) : P.pulseOne;
-            g.addColorStop(0, `rgba(${c},${a})`); g.addColorStop(1, `rgba(${c},0)`);
-            ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.fill();
+            ctx.globalAlpha = a;
+            ctx.drawImage(pulseOf(c), x - 6, y - 6, 12, 12);
           }
         }
+        ctx.globalAlpha = 1; // 光粒用的是逐粒 alpha，画完必须还原，后面的节点/文字才不会被压暗
         ctx.globalCompositeOperation = 'source-over';
       }
 
@@ -135,12 +160,11 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
         const r = x.r * (hl && on ? 1.35 : 1) * (.82 + .22 * x.z);
         ctx.globalAlpha = a;
         ctx.globalCompositeOperation = ADD;
-        const g = ctx.createRadialGradient(px, py, 0, px, py, r * 3.6);
-        g.addColorStop(0, color + P.glow); g.addColorStop(1, color + '00');
-        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, r * 5, 0, 7); ctx.fill();
+        // 渐变跨度按原来的 3.6r 铺开（不是 5r），观感才和逐帧画时一致
+        ctx.drawImage(glowOf(color), px - r * 3.6, py - r * 3.6, r * 7.2, r * 7.2);
         ctx.globalCompositeOperation = 'source-over';
         if (x.n.kind === 'ghost') { ctx.setLineDash([2, 2]); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(px, py, r + 1, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
-        else { const b = ctx.createRadialGradient(px - r * .35, py - r * .35, 0, px, py, r); b.addColorStop(0, P.light); b.addColorStop(.45, color); b.addColorStop(1, color + 'aa'); ctx.fillStyle = b; ctx.beginPath(); ctx.arc(px, py, r, 0, 7); ctx.fill(); }
+        else ctx.drawImage(bodyOf(color), px - r, py - r, r * 2, r * 2);
         // 文字只给少数节点：悬停时全亮，平时只有最常被提及的几个概念、且必须离开中央主角区
         const away = Math.hypot(px - cx, py - cy) > Math.min(W, H) * .27;
         const label = hl ? on && x.n.kind !== 'tag' : named.has(x.n.id) && away;

@@ -62,6 +62,17 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
     finally { setBusy(false); }
   };
 
+  const clearKey = async () => {
+    setBusy(true); setMsg('清除中…');
+    try {
+      await saveSettings({aiApiKey: ''});
+      setKey('');
+      setMsg('已清除已存 key，回退到服务端环境变量 · Key cleared');
+      onRefresh?.();
+    } catch (e) { setMsg('清除失败：' + e.message); }
+    finally { setBusy(false); }
+  };
+
   return <section className="set-section" aria-label="AI 配置">
     <h3><Icon name="agent" size={14}/>AI <em>AI</em></h3>
     <p className="quiet">{ai?.enabled
@@ -75,6 +86,8 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
     </label>
     <div className="form-actions">
       <button className="pill primary" onClick={connect} disabled={busy || readOnly}>保存连接 <em>Connect</em></button>
+      {/* 留空 = 不改动，所以「换服务商 / key 泄漏」时必须有显式的清除入口（服务端接受 aiApiKey: ''） */}
+      {keyConfigured && <button className="pill ghost danger" onClick={clearKey} disabled={busy || readOnly}>清除已存 Key <em>Clear key</em></button>}
     </div>
     {msg && <p className="quiet" role="status">{msg}</p>}
     <p className="quiet">Key 只存 NAS 数据目录（不进笔记库、不回显）；接口地址存设置文件 <em>Key stays in NAS data dir, never echoed</em></p>
@@ -127,15 +140,16 @@ function PlatformSection({settings, onSaved, readOnly}) {
     setBusy(true); setMsg('');
     try {
       const res = await fetch(apiUrl('/api/platforms/pull'), {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
-      if (res.ok) {
-        markSelfWrite(); // 拉指标会写回作品 frontmatter
-        await refreshData().catch(() => {}); // onSaved 是空函数，不自己拉就看不到新指标
-      }
       const j = await res.json().catch(() => ({}));
+      // 非 2xx 必须把服务端原因显示出来：否则「没配凭据」「请求失败」都会被说成「没有可同步的作品」
+      if (!res.ok) { setMsg('同步失败：' + (j.error || 'HTTP ' + res.status)); return; }
+      markSelfWrite(); // 拉指标会写回作品 frontmatter
+      await refreshData().catch(() => {}); // onSaved 是空函数，不自己拉就看不到新指标
       const results = j.results || [];
       const ok = results.filter(r => r.updated).length;
+      const failed = results.filter(r => r.error);
       setMsg(results.length
-        ? `同步完成：${results.length} 篇带平台来源，${ok} 篇更新了指标`
+        ? `同步完成：${results.length} 篇带平台来源，${ok} 篇更新了指标${failed.length ? `；${failed.length} 篇失败：${failed[0].error}` : ''}`
         : '没有可同步的作品：发布回填过链接的才会自动拉取指标');
       onSaved?.();
     } catch (e) { setMsg('同步失败：' + e.message); }
@@ -163,7 +177,9 @@ function PlatformSection({settings, onSaved, readOnly}) {
     </div>
     {msg && <p className="quiet" role="status">{msg}</p>}
     <div className="form-actions">
-      <button className="pill primary" onClick={save} disabled={busy || readOnly || (!appid.trim() && !secret.trim())}>保存平台设置 <em>Save</em></button>
+      {/* 两个输入框都留空且已配置 = 关掉公众号同步（服务端也接受这种清空），不能禁用 */}
+      <button className="pill primary" onClick={save} disabled={busy || readOnly || (!appid.trim() && !secret.trim() && !configured)}>保存平台设置 <em>Save</em></button>
+      {configured && !appid.trim() && !secret.trim() && <span className="quiet">保存后将关闭公众号同步 <em>Clears saved appid and secret</em></span>}
     </div>
     <p className="quiet">Secret 只写入 NAS（vault/.dashboard/settings.json），保存后不回显；服务端环境变量 WECHAT_APPID / WECHAT_SECRET 优先于这里的配置 <em>Stored on NAS, never echoed back</em></p>
   </section>;
@@ -202,7 +218,7 @@ function GoalSection({goal, monthCount, onGoal, readOnly}) {
 }
 
 // 弹窗主体。settings 用 /api/settings 的脱敏视图；ai 是 /api/data 的 ai 信息。
-export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose, onRefresh}) {
+export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose, onRefresh, onGoal}) {
   const [model, setModel] = useState(settings?.aiModel || '');
   const [modelMsg, setModelMsg] = useState('');
   const [tab, setTab] = useState('ai');
@@ -239,9 +255,11 @@ export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose
       {tabs.map(([id, zh, en]) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>{zh}<em>{en}</em></button>)}
     </nav>
     {tab === 'ai' && <AiSection ai={ai} settings={settings} model={model} modelMsg={modelMsg} onModel={saveModel} readOnly={readOnly} onRefresh={onRefresh}/>}
-    {tab === 'platform' && <PlatformSection settings={settings} onSaved={() => {}} readOnly={readOnly}/>}
+    {/* onSaved 必须真的重拉设置：configured 来自 settings，不刷新的话「清空凭据关同步」在同一会话里永远不可用 */}
+    {tab === 'platform' && <PlatformSection settings={settings} onSaved={onRefresh} readOnly={readOnly}/>}
     {tab === 'goal' && <GoalSection goal={goal} monthCount={monthCount} readOnly={readOnly} onGoal={async n => {
       await saveGoal(n);
+      onGoal?.(n); // 回写 App 的 goal：只写 NAS 不回写，首页进度环与再次打开的面板都还是旧值
       onClose?.();
     }}/>}
     {readOnly && <p className="quiet">未连接 NAS：设置只读，连接 note-api 后可编辑 <em>Read-only — connect note-api to edit</em></p>}

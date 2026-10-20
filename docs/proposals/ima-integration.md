@@ -1,8 +1,8 @@
 # 通过 IMA 官方 OpenAPI 获取知识库的可行性评估报告
 
 > 评估对象：neural-creator-dashboard（v0.7.0，七星座图谱 + note-api 部署模式）
-> 评估日期：2026-10-19
-> 评估范围：以腾讯 ima（ima.copilot）为知识来源，把知识库内容取回并落入看板「个人知识库」（`06-个人知识库/`）；含反向写入与检索替代的可行性判断
+> 评估日期：2026-10-19（v1）；2026-10-20 复核（v2：新增 §十「双向同步专项评估」，结论见 §一 末段）
+> 评估范围：以腾讯 ima（ima.copilot）为知识来源，把知识库内容取回并落入看板「个人知识库」（`06-个人知识库/`）；含反向写入与检索替代的可行性判断，以及「查看文件 / AI 检索 / 编辑回写」三项双向同步诉求的逐条判定
 
 ---
 
@@ -17,8 +17,16 @@
 | 方向 | 结论 | 说明 |
 |---|---|---|
 | ima 知识库 → 看板（只读镜像） | ✅ **中高**，建议 P1 | 网页 / 公众号 / 笔记三类可拉全文；文件类可下原件；订阅与公共库保真度低 |
-| 看板 → ima（剪藏、笔记回写） | ✅ **高**，可顺带做 | `import_doc` / `import_urls` / `add_knowledge` 是官方正向能力，比抓取稳 |
-| 用 ima 检索替代本地 RAG | ❌ **不建议** | 接口无「问答」能力，检索只能拿标题与高亮片段；且引入外部依赖与频控 |
+| 看板 → ima（剪藏、笔记回写） | ✅ **高**，可顺带做 | `import_doc`（新建）/ `append_doc`（追加）实测可用；`update_note` 实测为**块级补丁**（需 block_id），不能整篇覆盖（§11.2） |
+| 用 ima 检索替代本地 RAG | ⚠️ **实测**：`openapi/rag/v1/search` 可用，但只覆盖**公开知识库** | 返回原文 chunk（含 markdown 片段），但拿不到自己库的内容；`search_knowledge` 实测 `highlight_content` 为空串 |
+
+**v2 复核后的双向同步结论（详见 §十）：**
+
+| 诉求 | 判定 | 依据 |
+|---|---|---|
+| 看板查看 ima 库里的文件 | ✅ **可行** | `get_knowledge_list` → `get_media_info` → `url_info.url` 下载原件；经同源代理预览 |
+| 通过 AI 检索 ima 库内容 | ❌ 自己库无官方检索 / ✅ 公开库有 | `rag/v1/search` 实测只命中公开共享知识库；自己库的 `search_knowledge` 无片段 → 仍需镜像后本地 RAG（§11.2） |
+| 看板编辑内容同步回 ima | ⚠️ 只能新建/追加 | `import_doc` 新建、`append_doc` 追加实测成功；`update_note` 是块级补丁（block_id 不可得）；知识库条目**无更新、无删除** |
 
 真正的约束不在接口能力，而在四点：**知识库条目没有 `modify_time`（增量只能靠本地 diff）、频控（`110021`）、`media_type=11` 只返回纯文本、订阅库/公共库只给 300 字预览或 AI 摘要**。
 
@@ -127,9 +135,11 @@
 
 `import_urls`（剪藏顺手入 ima）、`add_knowledge`（把 `06-个人知识库/*.md` 上传为 Markdown 条目）、`import_doc`（把草稿/笔记推成 ima 笔记）都是官方正向接口，成本低于抓取，且能形成「NAS 是真相、ima 是分发」的合理分工。
 
+> v2 复核补充：除上述三个之外，实测还存在未公开的 `update_note`（原地更新笔记）、`move_knowledge` / `rename_knowledge`（条目移动与改名），但没有**知识库条目内容更新**与任何**删除**接口，因此「看板编辑 → 知识库文件覆盖」不成立，见 §10.3 ③。
+
 ### 3.3 检索替代：不建议
 
-OpenAPI 只提供 `search_knowledge`（标题 / 高亮片段）与 `search_note`，**没有问答接口**。用 ima 充当看板的 RAG 后端，会退化成「关键词命中列表」，且每次问答都要消耗外部额度并受频控影响。看板现有的 `/api/ai/ask`（本地检索 + 模型编排 + 引用）在延迟、成本、可控性上都更优。
+OpenAPI 只提供 `search_knowledge`（标题 / 高亮片段）与 `search_note`，**没有问答 / 生成接口**（`/openapi/chat/v1/*`、`/openapi/qa/v1/ask` 实测 404）；另有一个未公开的 `/openapi/rag/v1/search` 语义检索端点（实测存在、schema 未知，见 §10.3 ②）。用 ima 充当看板的 RAG 后端，会退化成「关键词命中列表」，且每次问答都要消耗外部额度并受频控影响。看板现有的 `/api/ai/ask`（本地检索 + 模型编排 + 引用）在延迟、成本、可控性上都更优。
 
 ### 3.4 四条硬边界
 
@@ -267,10 +277,194 @@ curl -sS https://ima.qq.com/openapi/wiki/v1/get_addable_knowledge_base_list \
 3. `search_knowledge` 的高亮片段能否用于低成本摘要，需实测召回质量。
 4. 订阅 / 公共库里「仅 AI 摘要」的条目，是否值得入图谱（信息量低，倾向不入）。
 5. 镜像目录是否纳入语义边（`/api/ai/relate`）——建议默认排除，单独开关。
+6. ~~`update_note` 的参数与并发语义~~ —— 已实测（§11.3）：块级补丁，`block_id` 不可得，覆盖方案作废；但 `list_notebook` 的版本握手仍未解（当前写笔记只能落「未分类」）。
+7. ~~`rag/v1/search` 的结构~~ —— 已实测（§11.2）：可用且返回原文片段，但**只覆盖公开知识库**；其日额度、公开库版权边界仍待确认。
+8. **删除语义**：ima 侧删除在看板只做「标记下架」，还是提供「全量 diff 后询问」；知识库条目无 `modify_time`，外部改动只能整体重拉。
+9. **双写真源**：看板创作的笔记写回 ima 后，是否允许在 ima 端再改（改了就产生第二真源，需决定是否检测并提示）。
 
 ---
 
-## 十、事实依据
+## 十、双向同步专项评估（v2 复核）
+
+### 10.1 复核方法
+
+**端点存在性探测**：对候选路径发 `POST {}` + 伪造凭证头。网关在鉴权阶段即返回，因此响应可区分三种情况：
+
+| 响应 | 含义 |
+|---|---|
+| `HTTP 401 {"code":200002,"msg":"skill auth failed","request_id":…}` | **端点存在**，只是凭证无效 |
+| `HTTP 404`（空响应体） | 路径不存在 |
+| `HTTP 200 {"code":…}` | 需要凭证才能走到业务层，观测不到 |
+
+共探测 60+ 条路径，覆盖笔记、知识库、rag、chat、agent、qa 六个命名空间。
+
+**文档侧对照**：`https://ima.qq.com/agent-interface` 控制台「核心功能」六项（读取笔记内容 / 写入笔记「新建笔记或追加内容」/ 检索笔记 / 检索知识库 / 导入知识库 / 获取知识库资料）**均未标注「即将上线」或「内测中」**，即控制台对外承诺的能力就是这六项；Skill 包 `ima-skills-1.1.10` 的接口文档与之完全一致。
+
+### 10.2 端点账本（实测）
+
+| 路径 | 官方文档 | 实测 | 用途 |
+|---|---|---|---|
+| `/openapi/note/v1/{search_note,list_note,get_doc_content,import_doc,append_doc,list_notebook}` | 有 | 401 存在 | 笔记读、检索、新建、追加 |
+| `/openapi/note/v1/update_note` | **无** | 401 **存在** | 实测为块级补丁：`user_request_id` + `updates[{action,block_id,content}]`，action∈{1,2,3}，都要求有效 `block_id` → 不能整篇覆盖（§11.2） |
+| `/openapi/wiki/v1/{get_knowledge_list,search_knowledge,get_knowledge_base,search_knowledge_base,get_addable_knowledge_base_list,get_media_info,create_media,add_knowledge,import_urls,check_repeated_names}` | 有 | 401 存在 | 知识库浏览、检索、原文、上传、导入 |
+| `/openapi/wiki/v1/move_knowledge`、`/rename_knowledge` | **无** | 401 **存在** | 移动 / 改名条目（可用于「新增版本后整理」） |
+| `/openapi/rag/v1/search` | **无** | 401 **存在** | 实测：`{strategy_id, query, limit(5-20)}` → 返回原文 chunk；**只覆盖公开知识库语料**（§11.2） |
+| `/openapi/note/v1/{update_doc,delete_doc,del_doc,rename_doc,move_doc,trash_doc,copy_doc,create_note,get_note,list_notes}` | — | 404 | **不存在** |
+| `/openapi/wiki/v1/{delete_knowledge,del_knowledge,remove_knowledge,update_knowledge,modify_knowledge,replace_knowledge,update_media,delete_media,replace_file,batch_move_knowledge,delete_folder}` | — | 404 | **不存在**：知识库条目不可更新、不可删除 |
+| `/openapi/rag/v1/{query,ask,retrieve,chat,completions,answer,get_chunks,context}`、`/openapi/chat/v1/*`、`/openapi/agent/v1/*`、`/openapi/qa/v1/ask` | — | 404 | **没有问答 / 生成接口** |
+
+结论：**写回面 = 新建 + 追加 + 更新笔记 + 移动/改名；没有删除，也没有知识库条目内容更新。**
+
+### 10.3 三项诉求逐条判定
+
+**① 看板查看 ima 库里的文件：✅ 可行**
+
+| 环节 | 接口 | 说明 |
+|---|---|---|
+| 列表 / 目录树 | `get_knowledge_list`（cursor + limit ≤50 + `folder_id`） | `current_path` 给面包屑；文件夹与文件同列表返回 |
+| 取原件入口 | `get_media_info` | 返回 `url_info.url` + `url_info.headers`（签名头） |
+| 下载 | 服务端带 `headers` GET 该 URL，流式转发 | 前端走同源 `/api/ima/raw?media_id=…`，避免跨域与签名头暴露 |
+| 预览能力 | 浏览器原生 | PDF、图片、HTML、TXT、Markdown 可预览；DOCX / PPTX / XLSX 零依赖前端无法渲染 → 只能「下载」或「抽文本」（`server/docparse.mjs`） |
+| 笔记类条目 | `get_doc_content`（`target_content_format=0`） | 纯文本渲染 |
+
+限界：订阅 / 公共知识库的条目只返回预览或 AI 摘要，原件不可得（§三 保真度矩阵）。
+
+**② 通过 AI 检索 ima 库内容：⚠️ 存在官方接口，但不宜作为主路径**
+
+| 路线 | 机制 | 评级 |
+|---|---|---|
+| A. 镜像 + 看板本地 RAG | 同步到 `06-个人知识库/ima/` → 走现有 `/api/ai/ask`（本地检索 + 引用 + 语义边） | ✅ **推荐**：可控、可引用、无外部依赖 |
+| B. 官方 `rag/v1/search` | 语义检索接口，未公开文档，schema 与额度均未知 | ⚠️ 待实测；适合做「找条目」增强，不适合作为唯一数据源 |
+| C. `search_knowledge` 关键词检索 | 只返回标题 + `highlight_content` 片段 | ❌ 不能支撑问答（片段不完整、无全文） |
+| D. 逆向 cookie 调 `/cgi-bin/assistant/qa` | 社区 MCP 的做法 | ❌ 凭证更重、能力更弱，官方 OpenAPI 出现后无必要 |
+
+关键判断：**看板的「AI 检索」本质是「全文进本地索引」**，所以 ② 实际依赖 ①（拉取），而不是依赖某个问答接口。
+
+**③ 看板编辑的内容同步回 ima：✅ 笔记可行，❌ 知识库文件不可行**
+
+| 目标 | 能力 | 结论 |
+|---|---|---|
+| ima 笔记（本人） | `import_doc` 新建、`append_doc` 追加、`update_note`（**块级补丁**） | ⚠️ 可做「新建 + 文末追加」式同步；原地覆盖不成立（block_id 不可得，见 §11.3） |
+| 知识库里的 Markdown / 文件条目 | 只有 `add_knowledge`（新增） | ❌ 无法覆盖同一 `media_id`；编辑只能「另存为一篇新条目」，旧条目在 ima 端手工删除 |
+| 知识库里的网页 / 公众号条目 | 只有 `import_urls`（新增） | ❌ 同上，且原文归属 ima 抓取结果，本地改动无处落 |
+| 条目整理 | `move_knowledge`、`rename_knowledge` | ✅ 可作为「新增版本 + 挪到归档文件夹」的补偿手段 |
+
+### 10.4 五个语义障碍（决定架构，不只是能力清单）
+
+1. **无删除接口**：看板删条目无法传到 ima，ima 删条目只能通过全量列表 diff 发现。删除必须保持「单向 + 只标记」。
+2. **知识库条目无 `modify_time`**：无法判断 ima 端是否被改过，回写就是盲写；只有笔记有 `modify_time`。
+3. **知识库内容不可替换**：同名新增 → 只能靠 `check_repeated_names` 查重后人工决策，自动化只能是「追加新版本」。
+4. **`update_note` 的并发语义未知**：`100008 版本冲突` 说明它可能要版本号或 mtime，必须在 P0 用它做一次真实写入才敢设计自动覆盖。
+5. **未公开接口无稳定性承诺**：`update_note`、`rag/v1/search`、`move/rename_knowledge` 都不在官方文档与「核心功能」六项里，随时可能变更；实现时必须可降级（探测失败即退回只读能力）。
+
+### 10.5 推荐形态：非对称双向
+
+| 方向 | 机制 | 真源 |
+|---|---|---|
+| ima 知识库 → 看板 `06-个人知识库/ima/` | 定时/手动拉取，`mediaId` 幂等，只读镜像，看板内禁用编辑 | **ima** |
+| 看板创作（灵感 / 制度 / 草稿） → ima 笔记 | 首次 `import_doc` 建档，之后 `update_note` 覆盖，冲突时提示 | **看板（vault）** |
+| 看板剪藏 → ima 知识库 | `import_urls` / `add_knowledge` 单向追加 | 双写但不可回改，视为分发 |
+| AI 检索 | 镜像内容进本地 RAG；`rag/v1/search` 作为可选增强 | 看板 |
+
+路由清单：
+
+```
+GET  /api/ima/status           凭证状态、库列表、上次同步
+GET  /api/ima/tree?kb=&folder= 目录树（含 media_type、是否有原件）
+GET  /api/ima/raw?media_id=    原件流式代理（带签名头，不暴露给前端）
+POST /api/ima/sync             ima → 看板 镜像任务（后台 + 进度）
+POST /api/ima/push             看板笔记 → ima 笔记（import_doc / update_note）
+POST /api/ima/collect          看板剪藏 → ima 知识库（import_urls）
+```
+
+前端只调同源 `/api/ima/*`，凭证只存在于 NAS 环境变量，符合项目既有约束。
+
+### 10.6 补充验证（在 §八 三步之上追加两项）
+
+1. 对一篇测试笔记调 `update_note`（先 `import_doc` 建一篇），确认请求参数与 `100008` 触发条件；
+2. 对一个已授权知识库调 `rag/v1/search`，记录请求字段、返回结构、是否返回原文片段与引用。
+
+这两项决定「写回」与「AI 检索」是走官方能力还是退回镜像方案——**在拿到凭证的 30 分钟内可判定**。
+
+---
+
+## 十一、真实凭证实测（2026-10-20 实跑）
+
+用真实 Client ID / API Key 跑了一遍读路径与写路径，共约 45 次调用，未触发频控。凭证只走环境变量，下文已脱敏（知识库名、note_id 部分截断、签名 URL 隐去）。
+
+### 11.1 读路径实测
+
+| 能力 | 端点 | 实测结果 |
+|---|---|---|
+| 知识库枚举 | `get_addable_knowledge_base_list` | ✅ 返回 4 个库（个人库 / 制度库 / 段子 / 微信收藏），`next_cursor` 分页正常 |
+| 目录与条目 | `get_knowledge_list` | ✅ 条目在 `data.knowledge_list`（**不是** `info_list`）；文件夹 `media_type=99` 且 id 形如 `folder_xxx`；`current_path` 给面包屑 |
+| 文件原件 | `get_media_info` → `url_info` | ✅ PDF 返回 CDN 签名 URL + `X-IMA-Sign` 等头；带头发起 GET 实测 **HTTP 200，599,599 字节，`application/pdf`，2 页** → **原件可下载** |
+| 网页/公众号 | `get_media_info` | ⚠️ `media_type=6` 只返回**原始** `mp.weixin.qq.com` 链接，`headers` 为空 → 拿不到 ima 抓取的正文，只能回原站 |
+| 笔记类条目 | `get_media_info` | ⚠️ `media_type=11` 的 `url` 是 `chrome://note?docid=…` 深链、`headers` 空；正文必须走 `get_doc_content` |
+| 笔记正文 | `get_doc_content`（`target_content_format=0`） | ✅ 返回**纯文本**（Markdown 结构被抹平，标题与列表连成一行） |
+| 自己库关键词检索 | `search_knowledge` | ⚠️ 只给 `title/media_type/parent_folder_id`；`highlight_content` 对笔记、文件夹、xlsx **全是空串** |
+
+### 11.2 检索（rag）实测：可用，但不是自己的库
+
+请求体：`{"strategy_id":"default","query":"…","limit":10}`（`limit` 校验区间 **[5,20]**；`strategy_id` 任意 1–128 字符串等价，缺省报 `invalid OpenapiSearchReq.StrategyId`）。
+
+返回 `data.chunks[]`，每个 chunk 含：
+
+| 字段 | 内容 |
+|---|---|
+| `content` | **原文片段**（Markdown 表格/正文都在，实测一次 300+ token） |
+| `chunk_abstract` | 该 chunk 的 AI 摘要 |
+| `chunk_url` | `https://ima.qq.com/wiki/?shareId=…&mediaId=…` 分享页 |
+| `kb_id` / `chunk_index` / `chunk_token` / `publish_time_format` | 归属与定位信息 |
+| `feature_scores` | `overall_score` / `semantic_score` / `kb_quality_score`（实测 0.84 / 0.54 / 0.11） |
+
+**关键限制（实测）**：命中的 `kb_id` 全是**公开共享知识库**的数字 id（4 位数以上），不是本账号 `get_addable_knowledge_base_list` 返回的 base64 风格 id；传 `knowledge_base_ids` / `kb_ids` / 个人库 id 完全不影响结果。用自己库里独有的措辞去搜，返回的仍是别人的公开库。
+
+结论：`rag/v1/search` = **公共语料语义检索**，能直接拿到原文片段（可作为问答上下文/补充素材），但**不能用来检索自己的库**。
+
+### 11.3 写路径实测
+
+| 操作 | 结果 | 说明 |
+|---|---|---|
+| `import_doc` | ✅ 成功 | `{content_format:1, content:"<markdown>"}` → 返回 `note_id`；`list_note` 立即可见（`modify_time` 为毫秒字符串） |
+| `append_doc` | ✅ 成功 | 追加到文末，`get_doc_content` 可见追加内容 |
+| `update_note` | ⚠️ 存在但不可用于覆盖 | 必填 `user_request_id`；`updates[]` 每项 `{action, block_id, content}`，`action` 合法值实测只有 **1/2/3**，且三者都要求有效 `block_id`（传 `""` 或 `"0"` → `BLOCK_NOT_FOUND`）；而 `get_doc_content` 不返回 block_id → **整篇覆盖走不通** |
+| `list_notebook` | ⚠️ 恒空 | 返回 `note_folder_infos: []` + `need_update: true`（需要客户端版本握手），所以 `import_doc` 只能落「未分类」；若要把看板内容写入指定笔记本，需补上这层握手 |
+
+### 11.4 知识库上传链路实测（create_media → COS → add_knowledge）
+
+用一个 412 字节的测试 Markdown（同看板 `06-个人知识库/*.md` 的 frontmatter 结构）跑完整链路：
+
+| 步骤 | 结果 |
+|---|---|
+| `check_repeated_names` | ✅ 首次 `is_repeated:false`；同名再查为 `true`（按文件名查重，跨条目有效） |
+| `create_media` | ✅ 返回 `media_id` + `cos_credential`（bucket `ima-share-kb-…` / region `ap-shanghai` / 临时 secret + token / `expired_time`） |
+| COS 上传 | ✅ 用官方自带 `knowledge-base/scripts/cos-upload.cjs`，HTTP 200 |
+| `add_knowledge` | ✅ `media_type=7` + `file_info{cos_key,file_size,file_name}` → 条目入根目录；**条目标题取文件名**，传 `title` 不生效 |
+| 回读 | ✅ `get_media_info` → 签名 URL → 下载得 **412 字节，frontmatter 与正文逐字节一致**（`.md` 往返无损） |
+| **覆盖尝试** | ❌ 复用旧 `media_id` + 新 `cos_key` 再 `add_knowledge` → 返回 `code:0`，但回读仍是 v1（412B）→ **静默 no-op，内容不更新、也不新增条目** |
+| 检索 | ❌ 上传后 `search_knowledge` 能按文件名命中，但 `highlight_content` 仍为空串 |
+| 删除 | ❌ 无接口 |
+
+结论：**上传链路成立**（看板 `.md` 能进 ima 知识库，且文件名即条目名，与项目「文件名即标题」的约定天然一致），但条目**一次写定：不可更新、不可删除**，重复 add 是空操作。所以「编辑同步」只能是**新增一个版本条目**（配合 `rename` 加版本号 + `move` 归档）。
+
+### 11.5 对三项诉求的最终判定（取代 §10.3 的预判）
+
+| 诉求 | 实测结论 | 可实现形态 |
+|---|---|---|
+| 看板查看 ima 库里的文件 | ✅ **文件类完全可行**，网页类受限 | 目录树 + `get_media_info` + 服务端代下载；PDF/Word/Excel/图片能拿到原件；公众号类只剩原链接 |
+| 通过 AI 检索 ima 库内容 | ❌ **自己库没有官方检索** | 必须镜像到自己库外的索引（看板 vault + `/api/ai/ask`）；`rag/v1/search` 只能补「公开语料」 |
+| 看板编辑同步回 ima | ⚠️ **只能新建 / 追加** | 笔记：`import_doc` 建档 + `append_doc` 追加；知识库：`add_knowledge` 新增（同 `media_id` 重复 add 为 no-op，见 §11.4）。均无法原地覆盖、无法删除 |
+
+### 11.6 遗留与安全
+
+1. 实测留下了两处**OpenAPI 删不掉**的测试物，需在 ima 客户端手工删：① 笔记「DSH 同步探针」（`note_id` 7518186165530698）；②「段子」知识库根目录的 `dsh-probe.md`（`media_id` `markdown_cls1_…1645165025897`）。
+2. 凭证已验证具备：4 个库的读权限、笔记读写、知识库上传。它同时是**写权限钥匙**，建议探测结束后在控制台**重置 API Key**。
+3. 未验证：`import_urls`（网页/公众号导入）实际抓取成功率、`move/rename_knowledge` 的整理手感、以及 IM 端删除后列表 diff 的时延。
+
+---
+
+## 十二、事实依据
 
 - 官方控制台：`https://ima.qq.com/agent-interface`（Client ID / API Key）
 - 官方 Skill 包：`ima-skills-1.1.10.zip`，字段与错误码引自包内 `knowledge-base/references/api.md`、`notes/references/api.md`

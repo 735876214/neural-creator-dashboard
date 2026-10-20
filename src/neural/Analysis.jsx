@@ -118,6 +118,9 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
         const dry = await aiAnalyze([rel], true);
         if (!dry.todo) return {msg: '这篇已经分析过了'};
         const job = await aiAnalyze([rel]);
+        // 服务端在「两步之间已经没待办了」时返回 200 {total:0}，没有 job：这里要兜住，
+        // 否则读 job.job.id 抛 TypeError，面板显示一条看不懂的失败。
+        if (!job?.job?.id) return {msg: job?.message || '这篇已经分析过了'};
         const r = await pollJob(job.job.id);
         // 写盘发生在后台任务里，指纹要等任务结束才稳定：此刻登记 + 刷新，轮询才不会误报外部改动
         markSelfWrite();
@@ -127,7 +130,9 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
       }, '标签与摘要已写入笔记')}>打标签 + 摘要 <em>Tag &amp; summarize</em></button>
       {embedOn && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
         const job = await aiRelate();
-        const r = await pollJob(job.job.id);
+        // relate 是「每条内容一次 embedding」的串行循环，上百条远超默认 60 秒；
+        // 按 total 放大上限，别让前端先超时、服务端还持有 409 闸。
+        const r = await pollJob(job.job.id, Math.max(120, (job.job.total || 0) * 8 + 240));
         const edges = r.result?.edges || [];
         // 写入运行时仓：主图谱立即重建，语义边不用刷新页面才出现。
         setSemantic(edges);
@@ -174,8 +179,12 @@ function AskBox({graph, node, onGo, aiEnabled}) {
     // NAS + 配了 AI：走 RAG（带引用）；否则用本地规则检索（不联网）
     if (ai) {
       try {
-        const r = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question: q})});
+        // 模型选择必须随请求发出去：服务端 pickModel(reqModel, 'ask') 优先用它，
+        // 不发就等于下拉框选了个寂寞（回答仍由默认模型生成）。
+        const r = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question: q, model: model || pickedModel()})});
         const j = await r.json();
+        // 401 会话过期 / 500 网管报错 / 501 未启用 都返回 {error}：不判 r.ok 会显示成「（空）」
+        if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
         setRes([{title: 'AI 回答', en: 'AI answer', tone: 'info', text: j.answer || '（空）', refs: j.refs || []}]);
       } catch (e2) {
         setRes([{title: 'AI 暂时不可用，本地检索结果', en: 'AI offline, local results', tone: 'warn', text: '', items: [], local: askGraph(graph, q, node.id)}]);
@@ -206,7 +215,13 @@ function AskBox({graph, node, onGo, aiEnabled}) {
 }
 
 function pollJob(id, tries = 120) {
-  const tick = () => fetch(apiUrl('/api/ai/jobs/' + id)).then(r => r.json());
+  // 状态码要判：401/404/500 时 r.json() 拿到的是 {error}，status 为 undefined，
+  // 不判状态码就会一直空转到 60 秒超时，还把「登录过期」报成「任务超时」。
+  const tick = () => fetch(apiUrl('/api/ai/jobs/' + id)).then(async r => {
+    const body = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(body?.error || `查询任务失败（${r.status}）`);
+    return body || {};
+  });
   return (async () => {
     for (let i = 0; i < tries; i++) {
       const j = await tick();

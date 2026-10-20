@@ -1,5 +1,6 @@
 import React, {useMemo} from 'react';
 import {Icon} from './icons';
+import {Modal} from './useModal';
 
 // —— 409 冲突 diff（obsidian-independence.md P1：冲突 diff 视图）——
 // 纯前端行级 LCS（零依赖）。左栏 = NAS 当前版本，右栏 = 本页待写版本；
@@ -36,8 +37,7 @@ function diffLines(aText, bText) {
 export function DiffModal({title, en = 'Conflict diff', aText, bText, aLabel, bLabel, onClose, onKeepServer, onKeepMine}) {
   const blocks = useMemo(() => diffLines(aText, bText), [aText, bText]);
   const changed = blocks.filter(b => b.type === 'change').length;
-  return <div className="veil" onClick={onClose}>
-    <section className="modal glass diff-modal" role="dialog" aria-modal="true" aria-label="冲突对比" onClick={e => e.stopPropagation()}>
+  return <Modal onClose={onClose} label="冲突对比" className="diff-modal">
       <header><h2>{title} <em>{en}</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭"><Icon name="close" size={16}/></button></header>
       <p className="quiet">NAS 上的文件在保存期间被其他编辑器改过。下面是两个版本的差异（{changed} 处）——采用哪边由你决定，不会静默覆盖。<em>{changed} changed block(s)</em></p>
       <div className="diff-cols" role="table" aria-label="差异对比">
@@ -56,6 +56,5 @@ export function DiffModal({title, en = 'Conflict diff', aText, bText, aLabel, bL
         {onKeepMine && <button className="pill primary" onClick={onKeepMine}>用我的版本覆盖 <em>Keep mine</em></button>}
         <button className="pill ghost" onClick={onClose}>稍后处理 <em>Later</em></button>
       </div>
-    </section>
-  </div>;
+  </Modal>;
 }

@@ -35,8 +35,15 @@ export const getSource = () => source;
 export const getError = () => error;
 export const getLoadedAt = () => loadedAt;
 
+// 装载世代：每次发起 /api/data 就 +1，只有最近一次发起的响应才允许覆盖数据。
+// 没有它的时候，上传/设置/阅读弹窗触发的 refresh 与 5s 轮询的 refresh 重叠、早发的响应后到时，
+// 界面会停在这份旧快照上；而版本号已经被推到新值，之后不再触发刷新，看起来就是「改了没生效」。
+let loadSeq = 0;
+export const beginLoad = () => ++loadSeq;
+
 // note-api 的 /api/data 返回的就是这份数据的形状，外加 files / figures / mtimes / settings / meta。
-export function setApiData(payload) {
+export function setApiData(payload, seq) {
+  if (seq != null && seq !== loadSeq) return false;
   const {files: f, figures: g, mtimes: t, settings: s, meta: m, ...rest} = payload || {};
   data = {...data, ...rest};
   files = f || {};
@@ -48,6 +55,7 @@ export function setApiData(payload) {
   error = null;
   loadedAt = Date.now();
   for (const fn of listeners) fn();
+  return true;
 }
 
 export function setError(e) {

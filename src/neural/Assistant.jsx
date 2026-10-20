@@ -30,24 +30,34 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
     const question = q.trim();
     setQ(''); setBusy(true);
     setThread(t => [...t, {role: 'q', text: question}]);
-    if (ai) {
-      try {
-        const res = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question})});
-        const j = await res.json();
-        if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
-        setThread(t => [...t, {role: 'a', text: j.answer || '（空）', refs: j.refs || []}]);
-      } catch (err) {
-        setThread(t => [...t, {role: 'a', text: 'AI 暂时不可用，下面是本地检索结果。', local: askGraph(graph, question)}]);
+    // 本地检索本身也可能出错（比如空库、数据形状异常）：包一层，绝不能让异常跳过 setBusy(false)，
+    // 否则发送按钮会永久禁用，用户只能重开抽屉。
+    const safeAsk = q => {
+      try { return askGraph(graph, q); }
+      catch (err) { console.error('[assistant] 本地检索失败：', err); return [{tone: 'info', title: '检索出错', en: 'Search failed', text: String(err?.message || err), items: []}]; }
+    };
+    try {
+      if (ai) {
+        try {
+          const res = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question})});
+          const j = await res.json();
+          if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+          setThread(t => [...t, {role: 'a', text: j.answer || '（空）', refs: j.refs || []}]);
+        } catch (err) {
+          setThread(t => [...t, {role: 'a', text: 'AI 暂时不可用，下面是本地检索结果。', local: safeAsk(question)}]);
+        }
+      } else {
+        setThread(t => [...t, {role: 'a', text: '未连接 AI（需要部署模式并配置 AI_API_KEY），这是本地规则检索结果。', local: safeAsk(question)}]);
       }
-    } else {
-      setThread(t => [...t, {role: 'a', text: '未连接 AI（需要部署模式并配置 AI_API_KEY），这是本地规则检索结果。', local: askGraph(graph, question)}]);
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   const upload = async files => {
     if (readOnly || !files?.length) return;
     setUpBusy(true); setNote('');
+    let okCount = 0, failCount = 0;
     for (const file of files) {
       try {
         const res = await fetch(apiUrl('/api/knowledge/upload'), {
@@ -59,13 +69,18 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
         if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
         markSelfWrite();
         setNote(n => (n ? n + '\n' : '') + `✓ ${file.name} → ${j.path}（${j.chars} 字）`);
+        okCount++;
       } catch (err) {
         setNote(n => (n ? n + '\n' : '') + `✗ ${file.name}：${err.message}`);
+        failCount++;
       }
     }
     setUpBusy(false);
     await refreshData().catch(() => {});
-    showToast?.('上传完成，已写入个人知识库');
+    // 全部失败时不能再报成功：明细里全是 ✗、Toast 却说「已入库」，用户会以为写进去了
+    if (!okCount) showToast?.(`上传失败：${failCount} 个文件都没入库`);
+    else if (failCount) showToast?.(`已入库 ${okCount} 个，${failCount} 个失败（见明细）`);
+    else showToast?.(`上传完成：${okCount} 个文件已写入个人知识库`);
   };
 
   return <>

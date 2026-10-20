@@ -10,6 +10,7 @@ import {useSaveState, draftKey, apiUrl, refreshData, markSelfWrite} from './pers
 import {getFiles} from '../data/store';
 import {SaveBadge} from './SaveStatus';
 import {Assistant} from './Assistant';
+import {Modal} from './useModal';
 import {PublishModal, insertImageAtCursor} from './NoteModal';
 
 const fmt = v => v == null ? '—' : Number(v).toLocaleString('zh-CN');
@@ -88,21 +89,25 @@ function MiniGraph({graph, node}) {
   </svg>;
 }
 
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule, onPublish, onToPost, aiEnabled}) {
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule, onPublish, onToPost, aiEnabled, hydrateErr, onHydrateRetry}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const [suggest, setSuggest] = useState(null);
   const [pick, setPick] = useState(0);
   const saveState = useSaveState(draftKey(draft?.id));
+  // 正文被服务端截断（> 6000 字）时这份缓存不是全文：全文还没拉回来就不许编辑，
+  // 否则第一个按键就会把截断后的正文写回 .md，6000 字之后的内容永久丢失。
+  const truncated = !!draft?.truncated;
+  const locked = readOnly || truncated;
   const change = (key, value) => {
-    if (readOnly) return;
+    if (locked) return;
     const updated = {...draft, [key]: value};
     setDrafts(drafts.map(d => d.id === draft.id ? updated : d));
     onDirty?.(updated);
   };
   const titles = useMemo(() => graph.nodes.filter(n => CONTENT.has(n.kind) && n.id !== 'draft:' + draft?.id).map(n => ({id: n.id, title: n.path?.split('/').pop().replace(/\.md$/, '') || n.title, short: n.short || n.title, kind: n.kind})), [graph, draft?.id]);
   const check = el => {
-    if (readOnly) return;
+    if (locked) return;
     const before = el.value.slice(0, el.selectionStart);
     const m = before.match(/\[\[([^\]\n]*)$/);
     if (!m) { setSuggest(null); return; }
@@ -149,11 +154,13 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
               <button type="button" className="icon-btn" disabled={readOnly} onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片"><Icon name="save" size={14}/></button>
             </label>
           </span>
-          {readOnly ? <span><Icon name="info" size={13}/>只读演示 · Read-only</span> : <SaveBadge state={saveState}/>}
+          {hydrateErr ? <span><Icon name="info" size={13}/>读取全文失败：{hydrateErr} <button type="button" className="pill ghost" onClick={onHydrateRetry}>重试</button></span>
+            : truncated ? <span><Icon name="info" size={13}/>正在载入全文，稍候可编辑 · Loading full text</span>
+            : readOnly ? <span><Icon name="info" size={13}/>只读演示 · Read-only</span> : <SaveBadge state={saveState}/>}
         </div>
-        <input className="editor-title" readOnly={readOnly} value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题"/>
+        <input className="editor-title" readOnly={locked} value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题"/>
         <div className="editor-area">
-          <textarea ref={area} readOnly={readOnly} value={draft.body} aria-label="草稿正文" placeholder="开始写… 输入 [[ 链接到其他笔记 Type [[ to link a note"
+          <textarea ref={area} readOnly={locked} value={draft.body} aria-label="草稿正文" placeholder="开始写… 输入 [[ 链接到其他笔记 Type [[ to link a note"
             onChange={e => { change('body', e.target.value); check(e.target); }} onClick={e => check(e.target)}
             onKeyDown={e => {
               if (!suggest?.list.length) return;
@@ -278,6 +285,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
       setComposing(null);
+      setFormTitle(''); setFormBody(''); // 不复位的话下次「新建灵感」会带着上一次的标题/正文，直接保存就重复入库
       markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
       await refreshData();
       showToast('已保存到个人知识库（06-个人知识库/）');
@@ -289,7 +297,8 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
     if (!window.confirm(`删除「${n.short || n.title}」？NAS 上的 .md 文件会先备份到 vault/.trash/ 再删除。`)) return;
     try {
       const res = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(relOf(n))), {method: 'DELETE'});
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
       markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
       await refreshData();
       showToast('已删除，原文件备份在 vault/.trash/');
@@ -352,8 +361,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
       })}
       {!list.length && <div className="empty kempty"><Icon name="personal" size={30}/><p>{cat === '推文' ? '还没有剪藏。粘贴一个链接试试。' : `还没有「${cat}」条目。`}<em>Nothing here yet</em></p></div>}
     </div>
-    {composing && <div className="veil" onClick={() => setComposing(null)}>
-      <section className="modal glass" role="dialog" aria-modal="true" aria-label="新建知识库条目" onClick={e => e.stopPropagation()}>
+    {composing && <Modal onClose={() => setComposing(null)} label={'新建' + composing + '条目'}>
         <header><h2>新建{composing} <em>New {composing === '灵感' ? 'spark' : 'policy'}</em></h2><button className="icon-btn" onClick={() => setComposing(null)} aria-label="关闭"><Icon name="close" size={16}/></button></header>
         <div className="form">
           <label>标题 <em>Title</em><input autoFocus value={formTitle} onChange={e => setFormTitle(e.target.value)} placeholder={composing === '制度' ? '如：2026 年度安全检查通报' : '一句话标题'}/></label>
@@ -363,8 +371,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
             <button className="pill primary" disabled={busy || !formTitle.trim()} onClick={saveComposed}>保存到知识库 <em>Save</em></button>
           </div>
         </div>
-      </section>
-    </div>}
+    </Modal>}
     <Assistant graph={graph} readOnly={readOnly} aiEnabled={aiEnabled} showToast={showToast} defaultCategory="制度" goNote={onGraph}/>
   </div>;
 }

@@ -1,6 +1,7 @@
 import React, {useRef, useState} from 'react';
 import {Icon} from './icons';
 import {apiUrl, refreshData, markSelfWrite} from './persist';
+import {Modal} from './useModal';
 
 // —— 脱离外部编辑器的独立创作入口（obsidian-independence.md P0）——
 // uploadAttachment：上传图片到 vault 附件目录（99-附件/），返回 ![[名称]] 插入文本。
@@ -66,8 +67,7 @@ export function NewNoteModal({onClose, onDone}) {
     } catch (e) { setErr(e.message); setBusy(false); }
   };
 
-  return <div className="veil" onClick={onClose}>
-    <section className="modal glass" role="dialog" aria-modal="true" aria-label="新建方法笔记" onClick={e => e.stopPropagation()}>
+  return <Modal onClose={onClose} label="新建方法笔记">
       <header><h2>新建方法笔记 <em>New note</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭"><Icon name="close" size={16}/></button></header>
       <div className="form">
         <p className="quiet">保存后写入 NAS 笔记库（05-方法库/），方法库星座即时多一颗星（刷新后可见）<em>Saved to vault on NAS</em></p>
@@ -92,8 +92,7 @@ export function NewNoteModal({onClose, onDone}) {
           <button className="pill primary" disabled={busy || !title.trim()} onClick={save}>保存到方法库 <em>Save</em></button>
         </div>
       </div>
-    </section>
-  </div>;
+  </Modal>;
 }
 
 // 草稿发布为作品：移动文件 + 指标表单（全部可空，发布后可在作品库补填）
@@ -118,8 +117,7 @@ export function PublishModal({draft, onClose, onDone}) {
     } catch (e) { setErr(e.message); setBusy(false); }
   };
 
-  return <div className="veil" onClick={onClose}>
-    <section className="modal glass" role="dialog" aria-modal="true" aria-label="发布为作品" onClick={e => e.stopPropagation()}>
+  return <Modal onClose={onClose} label="发布为作品">
       <header><h2>发布为作品 <em>Publish</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭"><Icon name="close" size={16}/></button></header>
       <div className="form">
         <p className="quiet">「{draft?.title}」将移入 NAS 笔记库的 02-作品库/，成为作品库星座的一颗星；指标现在可以不填，稍后在作品页补 <em>Moves the draft into 02-作品库/</em></p>
@@ -135,6 +133,5 @@ export function PublishModal({draft, onClose, onDone}) {
           <button className="pill primary" disabled={busy} onClick={publish}>{busy ? '发布中…' : <>{'发布'} <em>Publish</em></>}</button>
         </div>
       </div>
-    </section>
-  </div>;
+  </Modal>;
 }

@@ -71,22 +71,39 @@ class Index {
 
   // 把当前笔记库同步进索引：新增、改动的写入，消失的删掉。返回变更条数。
   syncNotes(rows) {
-    const existing = new Map(this.db.prepare('SELECT id, hash FROM notes').all().map(r => [r.id, r.hash]));
+    const existing = new Map(this.db.prepare('SELECT id, hash, path FROM notes').all().map(r => [r.id, r]));
     const ins = this.db.prepare('INSERT INTO notes(id,path,title,kind,body,hash,mtime,indexed_at) VALUES(?,?,?,?,?,?,?,?)');
     const upd = this.db.prepare('UPDATE notes SET path=?,title=?,kind=?,body=?,hash=?,mtime=?,indexed_at=? WHERE id=?');
     const del = this.db.prepare('DELETE FROM notes WHERE id=?');
     const seen = new Set();
+    // id 不变但 path/hash 变了 = 这个位置 id 现在指向另一篇（作品按日期重编号、增删笔记都会位移）：
+    // 挂在它上面的语义边必须作废，否则 /api/data 会把「连到别的节点」的边发给前端。
+    const moved = [];
     let changed = 0;
     this.db.exec('BEGIN');
     try {
       for (const r of rows) {
         seen.add(r.id);
-        if (!existing.has(r.id)) { ins.run(r.id, r.path, r.title, r.kind, r.body, r.hash, r.mtime, now()); changed++; }
-        else if (existing.get(r.id) !== r.hash) { upd.run(r.path, r.title, r.kind, r.body, r.hash, r.mtime, now(), r.id); changed++; }
+        const cur = existing.get(r.id);
+        if (!cur) { ins.run(r.id, r.path, r.title, r.kind, r.body, r.hash, r.mtime, now()); changed++; }
+        else if (cur.hash !== r.hash || cur.path !== r.path) {
+          upd.run(r.path, r.title, r.kind, r.body, r.hash, r.mtime, now(), r.id);
+          changed++;
+          moved.push(r.id);
+        }
       }
-      for (const id of existing.keys()) if (!seen.has(id)) { del.run(id); changed++; }
+      for (const id of existing.keys()) if (!seen.has(id)) { del.run(id); changed++; moved.push(id); }
+      // 位移/改名/改内容过的节点：边、向量、AI 摘要都过期了，一起清掉让下次 relate/analyze 重算。
+      const dropEdge = this.db.prepare('DELETE FROM semantic_edges WHERE a = ? OR b = ?');
+      const dropVec = this.db.prepare('DELETE FROM embeddings WHERE note_id = ?');
+      const dropCache = this.db.prepare('DELETE FROM ai_cache WHERE note_id = ?');
+      for (const id of moved) { dropEdge.run(id, id); dropVec.run(id); dropCache.run(id); }
       // 笔记删掉后，指向它的语义边也一起清掉，避免 /api/data 带着悬空 id。
       this.db.prepare('DELETE FROM semantic_edges WHERE a NOT IN (SELECT id FROM notes) OR b NOT IN (SELECT id FROM notes)').run();
+      // embeddings / ai_cache 同理：已删笔记的向量还会参与 relate 的两两余弦，
+      // 产出的悬空边挤占「最多 400 条」的预算，把真实边挤出去。
+      this.db.prepare('DELETE FROM embeddings WHERE note_id NOT IN (SELECT id FROM notes)').run();
+      this.db.prepare('DELETE FROM ai_cache WHERE note_id NOT IN (SELECT id FROM notes)').run();
       this.db.exec('COMMIT');
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     return changed;
@@ -181,6 +198,11 @@ class Index {
     this.db.prepare('UPDATE jobs SET status=?, done=?, message=?, error=?, result=?, updated_at=? WHERE id=?')
       .run(patch.status ?? j.status, patch.done ?? j.done, patch.message ?? j.message, patch.error ?? j.error,
         patch.result !== undefined ? (patch.result == null ? null : JSON.stringify(patch.result)) : j.result, now(), id);
+  }
+  // 任务结果只在轮询那几秒有用：一直留着会无限占 /data（relate 一次几百条边、analyze 是全量逐篇结果）
+  pruneJobs(maxAgeMs = 24 * 3600 * 1000) {
+    try { this.db.prepare('DELETE FROM jobs WHERE created_at < ?').run(new Date(Date.now() - maxAgeMs).toISOString()); }
+    catch {}
   }
   job(id) {
     const r = this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);

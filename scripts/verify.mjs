@@ -285,6 +285,224 @@ if (!/persist\.refreshData\(\)/.test(wMain)) {
 if (!/name: posix\.basename\(rel\)/.test(wServer)) fail('附件上传返回的 name 必须等于落盘文件名（posix.basename(rel)）');
 else ok('附件上传返回的 name 就是落盘文件名');
 
+// —— 健壮性契约（第四轮审查）——
+// 弹窗统一走 useModal：Esc 关闭、Tab 不跑出弹窗、关闭后焦点还原。手写 veil 就会丢掉这些。
+const modalSrc = readFileSync(join(ROOT, 'src/neural/useModal.jsx'), 'utf8');
+if (!/key === 'Escape'/.test(modalSrc) || !/addEventListener\('keydown', key, true\)/.test(modalSrc)) {
+  fail('src/neural/useModal.jsx 必须在捕获阶段处理 Esc 与 Tab 焦点陷阱');
+}
+const rawVeils = ['NoteModal.jsx', 'DiffModal.jsx', 'pages.jsx']
+  .filter(f => /className="veil"/.test(readFileSync(join(ROOT, 'src/neural', f), 'utf8')));
+if (rawVeils.length) fail('这些文件手写了 veil 弹窗（缺 Esc/焦点陷阱），应改用 useModal 的 <Modal>：' + rawVeils.join('、'));
+else ok('弹窗统一走 useModal（Esc 关闭 + 焦点陷阱 + 焦点还原）');
+
+// 星图画布每帧画上百个光点，径向渐变必须烘成精灵图复用，不能逐帧 createRadialGradient。
+const ncSrc = readFileSync(join(ROOT, 'src/neural/NetworkCanvas.jsx'), 'utf8');
+if (!/const sprites = new Map\(\)/.test(ncSrc) || !/drawImage\(glowOf\(color\)/.test(ncSrc) || !/drawImage\(bodyOf\(color\)/.test(ncSrc)) {
+  fail('NetworkCanvas 的节点光晕/球体光粒没有走精灵缓存（每帧 createRadialGradient 会拖慢帧率）');
+} else if (!/dustSprite\(p\.c\)/.test(readFileSync(join(ROOT, 'src/neural/Home.jsx'), 'utf8'))) {
+  fail('Home.jsx 的尘埃光点没有走 dustSprite 缓存（每帧 130 次 createRadialGradient）');
+} else ok('星图光晕与尘埃光点走精灵缓存，不再逐帧建渐变');
+
+// 月目标算的是「这个月」，不能永远停在数据里最后一个有作品的月份。
+const worksSrc = readFileSync(join(ROOT, 'src/neural/works.js'), 'utf8');
+if (!/getFullYear\(\)/.test(worksSrc)) fail('monthPostsOf 必须按当前自然月统计（否则月目标永远显示旧月份）');
+else ok('月目标按当前自然月统计（旧快照才退回最新月份）');
+
+// 后台任务轮询必须判状态码，否则 401/500 会空转到超时，还把错误报成「任务超时」。
+const analysisSrc = readFileSync(join(ROOT, 'src/neural/Analysis.jsx'), 'utf8');
+if (!/if \(!r\.ok\) throw new Error/.test(analysisSrc)) fail('pollJob 必须判 r.ok，否则 401/500 会一直重试到超时');
+else ok('AI 任务轮询会判状态码');
+
+// 新建但还没落盘的选题不能被自动刷新抹掉（草稿分支已有 kept，选题分支也不能漏）。
+// kept 还必须判 isPending，否则外部删掉的条目会一直复活（见下面的 r7 检查）。
+if (!/本地还有未落盘改动/.test(wMain) || !/const kept = list\.filter/.test(wMain)) {
+  fail('自动刷新时未落盘的新建选题会被抹掉（选题分支缺少 kept 合并）');
+} else ok('自动刷新不会抹掉未落盘的新建选题/草稿');
+
+// 服务端：坏 auth.json 必须拒绝启动（authed() 把 null 当免登录）、fm/body 必须是对象、并发 AI 任务 409。
+if (!/auth\.json 不是合法 JSON/.test(wServer) || !/process\.exit\(1\)/.test(wServer)) {
+  fail('auth.json 损坏时必须拒绝启动，不能降级成「未开启登录」');
+} else if (!/请求体必须是 JSON 对象/.test(wServer) || !/fm 必须是对象/.test(wServer)) {
+  fail('服务端必须拒绝非对象的请求体 / fm（否则 500 或写出 0: a 这种脏键）');
+} else if (!/if \(runningJob\) fail\(409/.test(wServer)) {
+  fail('同一时刻只允许一个 AI 后台任务（并发 relate 会互相覆盖语义边）');
+} else ok('服务端拒绝坏登录配置、非对象 fm/body，并限制并发 AI 任务');
+
+// —— 第五轮审查：部署模式下的断裂点 ——
+// 公众号凭据的键名：设置面板/cleanPlatforms 写「公众号」，早期配置写 wechat，平台模块两种都要认。
+const r5Platforms = readFileSync(join(ROOT, 'server/platforms.mjs'), 'utf8');
+if (!/platforms\['公众号'\]/.test(r5Platforms)) {
+  fail("server/platforms.mjs 只认 platforms.wechat，设置面板存下的「公众号」凭据永远不生效");
+} else ok('公众号凭据两种键名都认（公众号 / wechat）');
+// compose 必须把部署变量文件里的公众号凭据转发进容器，否则文档里的配置方式静默失效。
+const r5Compose = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8');
+if (!/WECHAT_APPID:/.test(r5Compose) || !/WECHAT_SECRET:/.test(r5Compose)) {
+  fail('docker-compose.yml 没有转发 WECHAT_APPID / WECHAT_SECRET（部署变量里填了也不会生效）');
+} else ok('compose 转发了公众号凭据');
+
+// 空作品库时 askGraph 的「作品表现」分支不能直接取 ps[0]（纯静态模式/新 vault 会崩，助手永久卡在检索中）。
+const r5Graph = readFileSync(join(ROOT, 'src/neural/graph.js'), 'utf8');
+if (!/cards\.push\(ps\.length/.test(r5Graph)) {
+  fail('askGraph 的「作品表现」分支没有判空（空库时 ps[0].short 会抛错，助手卡在检索中）');
+} else ok('本地检索在空作品库时不会抛错');
+// 个人知识库必须复用 FOLDERS 的 f:personal，不能再造一个 f:个人知识库 的重复目录节点。
+if (!/isPersonal \? 'f:personal' : 'f:' \+ sub/.test(r5Graph)) {
+  fail("个人知识库的目录节点 id 没有复用 f:personal（会多出重复目录节点并锚到方法库方向）");
+} else ok('个人知识库复用 f:personal 目录节点');
+
+// 设置面板保存月目标后要回写 App 的 goal（否则首页进度环与重开的面板都是旧值）。
+const r5Settings = readFileSync(join(ROOT, 'src/neural/SettingsPanel.jsx'), 'utf8');
+if (!/onGoal\?\.\(n\)/.test(r5Settings)) fail('设置面板保存月目标后没有回写 App 的 goal 状态');
+else ok('设置面板保存月目标后回写 goal 状态');
+
+// 上传全部失败不能说「已写入」；AI 问答异常不能跳过 setBusy(false)。
+const r5Assistant = readFileSync(join(ROOT, 'src/neural/Assistant.jsx'), 'utf8');
+if (!/if \(!okCount\) showToast/.test(r5Assistant)) fail('上传全部失败时仍提示「上传完成」（明细与 Toast 矛盾）');
+else if (!/finally \{\s*setBusy\(false\)/.test(r5Assistant)) fail('Assistant 的 ask 没有用 finally 复位 busy（异常会让发送按钮永久禁用）');
+else ok('上传失败如实提示，AI 问答异常不会卡住 busy');
+
+// —— 第六轮审查：解析边界与保存状态机 ——
+const r6FmSrc = readFileSync(join(ROOT, 'server/frontmatter.mjs'), 'utf8');
+if (!/uFEFF/.test(r6FmSrc)) fail('server/frontmatter.mjs 没有跳过 BOM：带 BOM 的笔记保存正文会把整块属性抹掉');
+else if (!/uFEFF/.test(readFileSync(join(ROOT, 'src/neural/mdfront.js'), 'utf8'))) {
+  fail('src/neural/mdfront.js 的 stripFrontmatter 没跳过 BOM：阅读弹窗会把属性当正文显示并回写两份');
+} else ok('frontmatter 解析跳过 BOM、空属性块仍算有属性');
+const r6PersistSrc = readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8');
+if (!/visibilityState === 'hidden'[\s\S]{0,200}outbox\.size \|\| timers\.size/.test(r6PersistSrc)) {
+  fail("persist.js 的 visibilitychange 没在切后台时落盘（防抖窗口里的编辑会丢）");
+} else ok('页面切到后台时立即落盘');
+const r6StoreSrc = readFileSync(join(ROOT, 'src/data/store.js'), 'utf8');
+if (!/beginLoad/.test(r6StoreSrc) || !/seq !== loadSeq/.test(r6StoreSrc)) {
+  fail('setApiData 没有装载序号：并发 refresh 乱序返回时界面会停在旧快照');
+} else ok('数据装载有请求序号，乱序响应不会覆盖新数据');
+const r6IdxSrc = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+if (!/String\(v\.appid \?\? ''\)\.trim\(\) && cur\[k\]\?\.secret/.test(r6IdxSrc)) {
+  fail('清空公众号凭据会被「沿用旧 secret」逻辑拦成 400（用户无法关掉同步）');
+} else ok('清空公众号凭据可以关掉同步');
+
+// 外部删除的选题/草稿不能被本地的 kept 分支复活（只有未落盘改动才保留）
+const r7MainSrc = readFileSync(join(ROOT, 'src/neural/main.jsx'), 'utf8');
+const r7Kept = r7MainSrc.match(/const kept = list\.filter\([^\n]*\)/g) || [];
+if (r7Kept.length < 2 || !r7Kept.every(l => /persist\.isPending\(/.test(l))) {
+  fail('自动刷新的 kept 分支没有判 isPending：外部删掉的选题/草稿会一直复活');
+} else ok('外部删除的选题/草稿不会被本地合并复活');
+
+// —— 第八轮审查：内页与设置面板的功能缺口 ——
+const r8VaultSrc = readFileSync(join(ROOT, 'server/vault.mjs'), 'utf8');
+const r8PagesSrc = readFileSync(join(ROOT, 'src/neural/pages.jsx'), 'utf8');
+if (!/truncated: draftBody\.length < draftFull\.length/.test(r8VaultSrc)) {
+  fail('server/vault.mjs 没有给被截断的草稿标 truncated（前端会把 6000 字缓存当全文写回）');
+} else if (!/const locked = readOnly \|\| truncated/.test(r8PagesSrc)) {
+  fail('创作台的编辑器没有锁住被截断的正文（编辑第一个字就会写回截断内容）');
+} else ok('超长草稿先拉全文再允许编辑');
+const r8SetSrc = readFileSync(join(ROOT, 'src/neural/SettingsPanel.jsx'), 'utf8');
+if (!/!appid\.trim\(\) && !secret\.trim\(\) && !configured/.test(r8SetSrc)) {
+  fail('清空公众号凭据的保存按钮被禁用：前端没有关掉同步的入口');
+} else if (!/saveSettings\(\{aiApiKey: ''\}\)/.test(r8SetSrc)) {
+  fail('设置面板没有清除已存 AI key 的入口');
+} else ok('清空公众号凭据与 AI key 都有入口');
+if (!/setFormTitle\(''\); setFormBody\(''\)/.test(r8PagesSrc)) {
+  fail('知识库新建表单保存后没复位：下次新建会带着旧内容重复入库');
+} else if (!/const j = await res\.json\(\)\.catch\(\(\) => \(\{\}\)\);\s*\n\s*if \(!res\.ok\) throw new Error\(j\.error/.test(r8PagesSrc)) {
+  fail('知识库删除失败时没有带上服务端原因（登录过期/路径越界都显示成 HTTP 4xx）');
+} else ok('知识库表单复位、删除失败带出服务端原因');
+
+// —— 第九轮审查：AI 动作链路的契约 ——
+const r9AiSrc = readFileSync(join(ROOT, 'server/ai.mjs'), 'utf8');
+const r9AnalysisSrc = readFileSync(join(ROOT, 'src/neural/Analysis.jsx'), 'utf8');
+const r9DbSrc = readFileSync(join(ROOT, 'server/db.mjs'), 'utf8');
+if (!/\? \{enabled: true, model: EMBED_MODEL/.test(r9AiSrc)) {
+  fail('aiInfo().embed 启用时没带 enabled:true：前端永远认为 embedding 没开，语义关联按钮不出现');
+} else if (!/if \(!job\?\.job\?\.id\) return \{msg:/.test(r9AnalysisSrc)) {
+  fail('/api/ai/analyze 返回 200 无 job 时前端会 TypeError');
+} else if (!/DELETE FROM embeddings WHERE note_id NOT IN \(SELECT id FROM notes\)/.test(r9DbSrc)) {
+  fail('删除笔记后 embeddings 没清理：悬空向量挤占 400 条语义边预算');
+} else if (!/body: JSON\.stringify\(\{question: q, model: model \|\| pickedModel\(\)\}\)/.test(r9AnalysisSrc)) {
+  fail('追问没把选中的模型发给服务端：下拉框选了也不生效');
+} else if (!/if \(!r\.ok\) throw new Error\(j\.error \|\| 'HTTP ' \+ r\.status\)/.test(r9AnalysisSrc)) {
+  fail('追问不判 r.ok：401/500 会显示成「（空）」');
+} else if (!/const r = await pollJob\(job\.job\.id, Math\.max\(120,/.test(r9AnalysisSrc)) {
+  fail('语义关联的轮询上限没按任务总量放大（上百条内容必然前端超时 + 409 卡死）');
+} else ok('AI 动作链路的契约（embed 标记 / analyze 空任务 / 向量清理 / 追问模型与错误 / relate 超时）');
+
+// —— 第十轮审查：写盘原子性与多端冲突 ——
+const r10SrvSrc = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+const r10PersistSrc = readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8');
+const r10MainSrc = readFileSync(join(ROOT, 'src/neural/main.jsx'), 'utf8');
+if (!/writeFileSync\(tmp, after, 'utf8'\);\s*\n\s*renameSync\(tmp, abs\);/.test(r10SrvSrc)) {
+  fail('笔记写盘还是原地覆盖：进程被杀会留下半截 .md（应临时文件 + rename）');
+} else if (/index\.putAi\('note:' \+ n\.id/.test(r10SrvSrc)) {
+  fail('AI 分析缓存用 note: 前缀：个人知识库（personal:）缓存永远对不上又会被清理删掉');
+} else if (!/if \(setApiData\(payload, seq\) === false\) return;/.test(r10PersistSrc)
+  || !/for \(const \[key, r\] of refs\)/.test(r10PersistSrc)) {
+  fail('采纳远端快照后没有重播 refs 乐观锁基线：外部改动后本地必然撞一次假 409');
+} else if (!/onHydrateRetry/.test(r10MainSrc)) {
+  fail('拉全文失败被静默吞掉：编辑器会一直锁在「正在载入全文」');
+} else ok('写盘原子性与多端冲突（临时文件 + rename / 缓存 id / 基线重播 / 全文重试）');
+
+// —— 第十一轮审查：平台同步链路 ——
+const r11PlatSrc = readFileSync(join(ROOT, 'server/platforms.mjs'), 'utf8');
+const r11SetSrc = readFileSync(join(ROOT, 'src/neural/SettingsPanel.jsx'), 'utf8');
+const r11SrvSrc = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+const r11ComposeSrc = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8');
+if (!/onSaved=\{onRefresh\}/.test(r11SetSrc)) {
+  fail('平台设置保存后没有重拉设置：configured 不更新，同一会话里关不掉公众号同步');
+} else if (!/if \(lastRunYmd === today\) return;/.test(r11PlatSrc)) {
+  fail('平台定时器没有当日去重：每 30 分钟全量重拉一次，逐篇产生 git commit');
+} else if (!/公众号数据接口错误：/.test(r11PlatSrc)) {
+  fail('公众号接口的 errcode/HTTP 错误被当成「最近 3 天没有数据」');
+} else if (!/SYNC_TZ_OFFSET/.test(r11ComposeSrc) || !/const TZ_OFFSET = /.test(r11PlatSrc)) {
+  fail('同步时间按容器 UTC 判定（容器默认 UTC，「21 点后」实际是次日 05:00）');
+} else if (!/cleanPlatforms\(raw\?\.platforms, \{strict: false\}\)/.test(r11SrvSrc)) {
+  fail('设置读取路径不宽容历史键：有英文键 wechat 时整份设置回落默认值');
+} else ok('平台同步链路（设置重拉 / 当日去重 / errcode / 时区 / 宽容读取）');
+
+// —— 第十二轮审查：日报链路 ——
+const r12NewsSrc = readFileSync(join(ROOT, 'server/news.mjs'), 'utf8');
+const r12SrvSrc = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+if (!/const TZ_OFFSET = Number\.isFinite\(TZ_OFFSET_RAW\) \? TZ_OFFSET_RAW : 8;/.test(r12NewsSrc)
+  || !/if \(now\.getUTCHours\(\) < NEWS_HOUR\) return;/.test(r12NewsSrc)) {
+  fail('日报定时按容器 UTC 判定：NEWS_HOUR=8 实际在北京时间 16:00 触发');
+} else if (!/function writeMdAtomic\(path, text\)/.test(r12NewsSrc)
+  || /writeFileSync\(mdPath, /.test(r12NewsSrc)) {
+  fail('日报 .md 仍是原地覆盖写：写坏会留下半截文件且被当成已生成');
+} else if (!/if \(auto && news\.ideasAt\) return \{candidates: \[\], written: \[\], skipped/.test(r12NewsSrc)) {
+  fail('选题落盘的幂等闸在 AI 调用之后：cron 与手动并发会重复落盘 + 双倍计费');
+} else if (!/runningJob = 'news-refresh';/.test(r12SrvSrc) || !/runningJob = 'news-ideas';/.test(r12SrvSrc)) {
+  fail('/api/news/* 绕开「同时只跑一个 AI 任务」的闸');
+} else if (!/const limit = Number\.isFinite\(raw\) \? Math\.min\(Math\.max\(Math\.trunc\(raw\), 1\), 90\) : 14;/.test(r12SrvSrc)) {
+  fail('/api/news 的 limit 没校验：NaN 会导致 500');
+} else ok('日报链路（时区 / 原子写 / 幂等闸 / 互斥 / limit 校验）');
+
+// —— 第十三轮审查：登录与回退链路 ——
+const r13BootSrc = readFileSync(join(ROOT, 'src/neural/boot.js'), 'utf8');
+const r13MainSrc = readFileSync(join(ROOT, 'src/neural/main.jsx'), 'utf8');
+if (!/if \(e\.status\) serverSeen = true;/.test(r13BootSrc)
+  || !/if \(EXPECT_API \|\| serverSeen\) \{/.test(r13BootSrc)
+  || !/function selfHeal\(\)/.test(r13BootSrc)) {
+  fail('部署模式连通失败只靠构建期 VITE_API_BASE 判断：生产镜像不传 build-arg，提示与自愈都不会出现');
+} else if (!/for \(let attempt = 0; attempt < 4 && !json; attempt\+\+\)/.test(r13BootSrc)) {
+  fail('/api/data 没有重试：容器刚起来时一次超时就永久落到示例数据');
+} else if (!/if \(!activeTruncated\) \{ setHydrateErr\(null\); return; \}/.test(r13MainSrc)) {
+  fail('hydrate effect 没按 truncated 收口：新建草稿的 refs 尚未登记，会立刻误报「读取全文失败」');
+} else ok('登录与回退链路（连不上时的自愈 / 取数重试 / hydrate 收口）');
+
+// —— 第十四轮审查：数据一致性的交叉面 ——
+const r14VaultSrc = readFileSync(join(ROOT, 'server/vault.mjs'), 'utf8');
+const r14DbSrc = readFileSync(join(ROOT, 'server/db.mjs'), 'utf8');
+const r14PersistSrc = readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8');
+if (!/const uniqIdea = uniqueId\(\);/.test(r14VaultSrc)
+  || !/id: uniqIdea\(stableId \|\| i \+ 1\)/.test(r14VaultSrc)
+  || !/id: uniqDraft\(stableId \|\| 'draft-' \+ \(i \+ 1\)\)/.test(r14VaultSrc)) {
+  fail('重复 fm id 没去重：files 被覆盖 + 索引撞主键，/api/data 会整个 500');
+} else if (!/const moved = \[\];/.test(r14DbSrc)
+  || !/DELETE FROM semantic_edges WHERE a = \? OR b = \?/.test(r14DbSrc)) {
+  fail('位置 id 位移后旧语义边不会作废：图谱会连到别的节点');
+} else if (!/if \(files\[key\] !== r\.path\) \{ if \(!isPending\(key\)\) refs\.delete\(key\); continue; \}/.test(r14PersistSrc)) {
+  fail('refreshData 重播基线不校验 path：id 位移后会把正文写进另一个文件');
+} else ok('数据一致性（重复 id 去重 / 位移作废语义边 / 基线按 path 校验）');
+
 for (const w of warnings) console.log('  ! ' + w);
 if (errors.length) { console.error('\n未通过：'); errors.forEach(e => console.error('  ✗ ' + e)); process.exit(1); }
 console.log('\n全部通过。');

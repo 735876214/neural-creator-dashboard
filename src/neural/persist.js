@@ -9,7 +9,7 @@
 // 写入调度：1.2s 防抖、同一 key 串行、失败进内存 outbox 并按指数退避重试。
 // 按「数据不保存在浏览器」的要求，outbox 只在内存里；刷新/关闭页面前会提示。
 import {useSyncExternalStore} from 'react';
-import {getMeta, getFiles, getMtimes, getSettings, setApiData} from '../data/store.js';
+import {getMeta, getFiles, getMtimes, getSettings, setApiData, beginLoad} from '../data/store.js';
 import {FM_RE, stripFrontmatter} from './mdfront.js';
 
 // 兼容既有调用方（main.jsx 用 persist.stripFrontmatter）。
@@ -444,9 +444,22 @@ export async function deleteDraft(id) {
 
 // 重新拉全量数据（知识库新增剪藏 / 删除后调用）：setApiData 触发订阅者，图谱与列表即时重建。
 export async function refreshData() {
+  const seq = beginLoad();
   const res = await fetch(API + '/api/data?fresh');
   if (!res.ok) throw new Error('HTTP ' + res.status);
-  setApiData(await res.json());
+  const payload = await res.json();
+  // 只接受最近一次发起的装载：并发的 refresh 乱序返回时不能让旧快照盖掉新数据
+  if (setApiData(payload, seq) === false) return;
+  // 采纳远端快照后必须把乐观锁基线同步过来：refs 里还是页面装载时的旧 mtime，
+  // 用户在别处（另一标签页/另一台设备）改过之后，本地再敲一个字就会撞一次假 409。
+  const t = payload?.mtimes || {};
+  const files = payload?.files || {};
+  for (const [key, r] of refs) {
+    // 位置 id（draft-N / idea:序号）会随增删位移：此时 files[key] 已经指向另一个文件，
+    // 直接重播旧 path 会把正文写进别人的文件。丢了基线，refFor() 会按新 files 重新解析。
+    if (files[key] !== r.path) { if (!isPending(key)) refs.delete(key); continue; }
+    if (t[key] != null && !isPending(key)) refs.set(key, {path: r.path, mtime: t[key]});
+  }
 }
 
 function fmValue(text, keys) {
@@ -505,7 +518,12 @@ seedRefs({files: getFiles(), mtimes: getMtimes()});
 if (typeof window !== 'undefined') {
   window.addEventListener('online', () => { attempts.clear(); flushNow(); });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && pendingCount()) { attempts.clear(); flushNow(); }
+    // 切到后台/锁屏：还在 1.2s 防抖窗口里的编辑状态是 saving，pendingCount() 不统计它，
+    // 原来这里只在「变回可见」时才 flush → 移动端后台标签被系统回收时这次编辑就丢了。
+    // 落盘口径与 beforeunload 保持一致（outbox 或 pending 定时器都算）。
+    if (document.visibilityState === 'hidden') {
+      if (outbox.size || timers.size) { attempts.clear(); flushNow(); }
+    } else if (pendingCount()) { attempts.clear(); flushNow(); }
   });
   window.addEventListener('beforeunload', e => {
     if (outbox.size || timers.size) { e.preventDefault(); e.returnValue = ''; }

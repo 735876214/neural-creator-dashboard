@@ -98,8 +98,10 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     const isNews = n.kind === 'news';
     const isPersonal = n.kind === 'personal';
     const sub = isNews ? parts[0] : isPersonal ? '06-个人知识库' : parts[1];
-    const subId = 'f:' + sub;
-    add({id: subId, kind: 'folder', title: sub.replace(/^\d+-/, '').replace(/\s+[a-z-]+$/i, ''), path: isPersonal ? parts[0] : parts.slice(0, 2).join('/'), level: 2});
+    // 个人知识库的目录节点 id 必须复用 FOLDERS 里的 f:personal：
+    // 否则会多出一个 f:个人知识库 的重复目录节点，还被当方法库子目录锚到 0° 方向。
+    const subId = isPersonal ? 'f:personal' : 'f:' + sub;
+    if (!isPersonal) add({id: subId, kind: 'folder', title: sub.replace(/^\d+-/, '').replace(/\s+[a-z-]+$/i, ''), path: isNews ? parts[0] : parts.slice(0, 2).join('/'), level: 2});
     link(isNews ? 'f:00-AI热点' : isPersonal ? 'f:personal' : 'f:methods', subId, 'contain');
     const kind = isNews ? 'news' : isPersonal ? 'personal' : 'note';
     // 前缀必须和 note-api 的 noteNodeId() 一致：日报也是 note:（服务端 /api/note 的 id 映射、
@@ -405,7 +407,11 @@ export function askGraph(graph, question, scope) {
     }
   } else if (/表现|观看|最好|数据|收藏/.test(q)) {
     const ps = C.filter(n => n.kind === 'post').sort((a, b) => b.post.views - a.post.views);
-    cards.push({tone: 'gold', title: '作品表现', en: 'Performance', text: `观看最高：${ps[0].short}（${ps[0].post.views}）。下面按观看排序。`, items: ps.map(n => n.id), meta: ps.map(n => `${n.post.views} 观看 · ${n.post.saves} 收藏`)});
+    // 空库必须给文案而不是 ps[0].short：纯静态模式/新 vault 里没有已发布作品，
+    // 这里一抛错，Assistant 的 busy 状态就再也回不来（发送按钮永久禁用）。
+    cards.push(ps.length
+      ? {tone: 'gold', title: '作品表现', en: 'Performance', text: `观看最高：${ps[0].short}（${ps[0].post.views}）。下面按观看排序。`, items: ps.map(n => n.id), meta: ps.map(n => `${n.post.views} 观看 · ${n.post.saves} 收藏`)}
+      : {tone: 'info', title: '作品表现', en: 'Performance', text: '还没有已发布的作品，发布并回填指标后再看。', items: []});
   } else {
     const words = q.replace(/[？?。，,！!]/g, ' ').split(/\s+/).filter(w => w.length >= 1);
     const hits = graph.nodes.filter(n => n.kind !== 'core').map(n => {

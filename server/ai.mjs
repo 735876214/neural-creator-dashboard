@@ -54,11 +54,19 @@ export const embedEnabled = () => !!(EMBED_KEY_ENV || CHAT_KEY) && !!EMBED_MODEL
 export const aiInfo = () => ({
   enabled: aiEnabled(), model: CHAT_MODEL, protocol: PROTOCOL,
   taskModels: taskModelsSnapshot(),
-  embed: embedEnabled() ? {model: EMBED_MODEL, sameBase: (EMBED_BASE_ENV || CHAT_BASE) === CHAT_BASE} : {enabled: false}
+  // 启用分支必须带 enabled: true —— 前端只认 aiInfo.embed.enabled，
+  // 少这个字段会让「语义关联」按钮与设置面板提示永远不渲染（relate 从 UI 上完全不可达）。
+  embed: embedEnabled()
+    ? {enabled: true, model: EMBED_MODEL, sameBase: (EMBED_BASE_ENV || CHAT_BASE) === CHAT_BASE}
+    : {enabled: false}
 });
 
 // —— 模型列表（前端下拉用）：/v1/models，缓存 10 分钟 ——
 const modelCache = {at: 0, list: []};
+
+// 模型返回的摘要/要点可能带换行：frontmatter 是逐行 YAML，多行值会把笔记属性写坏，
+// 所以在落库前就折叠成单行（yamlString 也会转义，但单行更可读）。
+const oneLine = v => String(v ?? '').replace(/\s+/g, ' ').trim();
 modelCacheRef = modelCache;
 export async function listModels() {
   if (Date.now() - modelCache.at < 10 * 60_000) return modelCache.list;
@@ -115,12 +123,16 @@ async function call(base, key, path, payload) {
         }
         if (!res.ok) {
           const text = await res.text().catch(() => '');
-          throw new Error(`AI 接口 ${res.status}：${text.slice(0, 200)}`);
+          // 4xx 是确定性失败（key 失效、模型不存在、参数不合法）：重试只会把一次失败放大成三次，
+          // 在 relate 这种「每条一次调用」的循环里等于任务长时间无进展。标成 fatal 直接抛。
+          const err = new Error(`AI 接口 ${res.status}：${text.slice(0, 200)}`);
+          err.fatal = res.status < 500 && res.status !== 429;
+          throw err;
         }
         return await res.json();
       } catch (e) {
         if (e.name === 'AbortError') throw new Error('AI 请求超时（' + TIMEOUT / 1000 + 's）');
-        if (attempt >= 2) throw e;
+        if (e.fatal || attempt >= 2) throw e;
         await new Promise(r => setTimeout(r, 1000 * 2 ** attempt));
       } finally { clearTimeout(timer); }
     }
@@ -223,7 +235,7 @@ export async function analyzeNote(title, body, {model} = {}) {
     {role: 'user', content: `标题：${title}\n\n正文：\n${text}\n\n给这篇笔记 3-6 个话题标签（优先用正文里的词）和一句 30 字以内的中文摘要。`}
   ], {json: true, model});
   const tags = [...new Set((out.tags || []).map(t => String(t).replace(/^#/, '').trim()).filter(Boolean))].slice(0, 6);
-  return {tags, summary: String(out.summary || '').slice(0, 120)};
+  return {tags, summary: oneLine(out.summary).slice(0, 120)};
 }
 
 // ③ 选题候选
@@ -250,8 +262,8 @@ export async function analyzeWebPage({url, title, text}, {model} = {}) {
     {role: 'user', content: `URL：${url || '（无）'}\n标题：${title || '（无）'}\n\n正文：\n${body}\n\n分析这个网页：给一句 40 字以内的中文摘要、3-6 条要点（保留原文关键信息与数据）、3-6 个话题标签（优先用正文里的词）${title ? '' : '，再从正文提炼一个 30 字以内、能当文件名的标题（title 字段）'}。`}
   ], {json: true, model});
   const tags = [...new Set((out.tags || []).map(t => String(t).replace(/^#/, '').trim()).filter(Boolean))].slice(0, 6);
-  const keyPoints = (out.keyPoints || []).map(p => String(p).trim()).filter(Boolean).slice(0, 6);
-  return {summary: String(out.summary || '').slice(0, 160), keyPoints, tags, title: String(out.title || '').trim().slice(0, 60) || null};
+  const keyPoints = (out.keyPoints || []).map(oneLine).filter(Boolean).slice(0, 6);
+  return {summary: oneLine(out.summary).slice(0, 160), keyPoints, tags, title: oneLine(out.title).slice(0, 60) || null};
 }
 
 // ④ 问答（返回文本；上下文由调用方拼好，这里不检索）

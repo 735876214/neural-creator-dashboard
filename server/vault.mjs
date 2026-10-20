@@ -23,12 +23,16 @@ export function walk(dir, out = []) {
 }
 
 // 简化的 YAML frontmatter：key: value、key: [a, b]、以及「- 项」列表。
-export function parse(text) {
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+export function parse(rawText) {
+  // 跳过 UTF-8 BOM：带 BOM 的文件 `^---` 匹配不上，整块属性被当正文，标题与指标全部丢失。
+  const bom = String(rawText).startsWith('\uFEFF') ? 1 : 0;
+  const text = bom ? String(rawText).slice(1) : String(rawText);
+  // 组 1 允许为空：`---\n---\n正文` 是空属性块
+  const m = text.match(/^---\r?\n(?:([\s\S]*?)\r?\n)?---\r?\n?/);
   const fm = {};
   if (m) {
     let key = null;
-    for (const raw of m[1].split(/\r?\n/)) {
+    for (const raw of (m[1] ?? '').split(/\r?\n/)) {
       const item = raw.match(/^\s*-\s+(.*)$/);
       if (item && key) { if (!Array.isArray(fm[key])) fm[key] = []; fm[key].push(unquote(item[1])); continue; }
       const kv = raw.match(/^([^:#][^:]*):\s*(.*)$/);
@@ -190,12 +194,34 @@ export function readVault(opts = {}) {
     });
   });
 
+  // 同一个 fm id 出现两次（Obsidian 的「制作副本」、Syncthing 的 X.sync-conflict-….md、
+  // 从 .trash 里恢复出的同名文件都会保留 id:）会让 files['idea:'+id] 被后者静默覆盖，
+  // 索引还会撞 notes 主键让 /api/data 整个 500。给后来者加后缀，保持两份都能读写。
+  const uniqueId = () => {
+    const used = new Set();
+    return raw => {
+      let id = String(raw);
+      // 老数据的序号 id 保持数字类型（示例数据与前端契约都按数字用），只在真撞车时改成带后缀的字符串
+      let out = raw;
+      if (used.has(id)) {
+        let n = 2;
+        while (used.has(id + '-' + n)) n++;
+        id = id + '-' + n;
+        out = id;
+      }
+      used.add(id);
+      return out;
+    };
+  };
+  const uniqIdea = uniqueId();
+  const uniqDraft = uniqueId();
+
   // —— 选题 ——
   const ideas = bucket.ideas.map((x, i) => {
     const status = String(pick(x.fm, ['status', '状态']) || '待写');
     // 稳定 ID：创建时写入的 fm id 优先（增删文件不会位移）；老数据回落到序号
     const stableId = String(pick(x.fm, ['id', '编号']) || '').trim();
-    return {id: stableId || i + 1, title: x.title, platform: String(pick(x.fm, ['platform', '平台']) || '小红书'), priority: ['高', '中', '低'].includes(String(pick(x.fm, ['priority', '优先级']))) ? String(pick(x.fm, ['priority', '优先级'])) : '中',
+    return {id: uniqIdea(stableId || i + 1), title: x.title, platform: String(pick(x.fm, ['platform', '平台']) || '小红书'), priority: ['高', '中', '低'].includes(String(pick(x.fm, ['priority', '优先级']))) ? String(pick(x.fm, ['priority', '优先级'])) : '中',
       status: ['待写', '待扩展', '已转草稿'].includes(status) ? status : '待写', note: String(pick(x.fm, ['note', '备注', 'description', '简介']) || clean(x.body).replace(/^#.*\n/, '').trim().slice(0, 120)), sourceNews: String(pick(x.fm, ['sourceNews', '来源热点', '热点日期', 'newsDate']) || '') || undefined, rel: norm(x.rel)};
   });
 
@@ -206,7 +232,11 @@ export function readVault(opts = {}) {
     const srcId = String(pick(x.fm, ['sourceIdeaId']) || '').trim();
     const idea = (srcId && ideas.find(d => String(d.id) === srcId)) || ideas.find(d => d.title === src);
     const stableId = String(pick(x.fm, ['id', '编号']) || '').trim();
-    return {id: stableId || 'draft-' + (i + 1), title: x.title, body: clean(x.body), source: idea ? idea.id : null,
+    // truncated：clean() 把正文截到 6000 字，前端据此判断「这份缓存不是全文」，
+    // 必须先把全文拉回来才允许编辑，否则随便敲一个字就把后面的内容截掉写回磁盘。
+    const draftBody = clean(x.body);
+    const draftFull = x.body.replace(/\r/g, '').trim();
+    return {id: uniqDraft(stableId || 'draft-' + (i + 1)), title: x.title, body: draftBody, truncated: draftBody.length < draftFull.length || undefined, source: idea ? idea.id : null,
       platform: String(pick(x.fm, ['platform', '平台']) || '').trim() || undefined, rel: norm(x.rel)};
   });
 

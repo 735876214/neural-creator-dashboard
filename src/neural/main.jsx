@@ -109,11 +109,16 @@ function App() {
     if (isLive()) {
       if (Array.isArray(d.seedIdeas)) setIdeas(list => {
         const byId = new Map(list.map(x => [x.id, x]));
-        return (d.seedIdeas || []).map(x => (byId.get(x.id) && persist.isPending(persist.ideaKey(x.id))) ? byId.get(x.id) : x);
+        const freshIds = new Set((d.seedIdeas || []).map(x => x.id));
+        // 只有「本地还有未落盘改动」的条目才能在服务端快照里消失后继续留着；
+        // 否则外部（Obsidian / 另一台设备）删掉的选题会一直复活，再编辑还会被写回 vault。
+        const kept = list.filter(x => !freshIds.has(x.id) && persist.isPending(persist.ideaKey(x.id)));
+        return [...(d.seedIdeas || []).map(x => (byId.get(x.id) && persist.isPending(persist.ideaKey(x.id))) ? byId.get(x.id) : x), ...kept];
       });
       if (Array.isArray(d.seedDrafts)) setDrafts(list => {
         const freshIds = new Set((d.seedDrafts || []).map(x => x.id));
-        const kept = list.filter(x => !freshIds.has(x.id)); // store 里已消失的本地草稿保留（未落盘的新建稿）
+        // 同上：未落盘的新建/编辑草稿才保留，外部删掉的草稿不能复活
+        const kept = list.filter(x => !freshIds.has(x.id) && persist.isPending(persist.draftKey(x.id)));
         return [...(d.seedDrafts || []).map(x => {
           const prev = list.find(y => y.id === x.id);
           return (prev && persist.isPending(persist.draftKey(x.id))) ? prev : x;
@@ -184,16 +189,28 @@ function App() {
 
   // 打开草稿时补拉完整正文：/api/data 里的正文被服务端截断到 6000 字，
   // 直接写回会丢内容。用户在这期间已经开始改的话就不覆盖。
+  // 服务端在 /api/data 里给被截断的草稿打 truncated，冲突后 refreshData 会重新把它标上：
+  // 所以这个 effect 既要覆盖「切换草稿」，也要覆盖「这份缓存重新变成非全文」。
+  const activeTruncated = !!(drafts.find(d => d.id === active)?.truncated);
+  // 拉全文失败时必须让用户看见并能重试：锁死的编辑器 + 一句「正在载入」等于看起来卡死。
+  const [hydrateErr, setHydrateErr] = useState(null);
+  const [hydrateTry, setHydrateTry] = useState(0);
   useEffect(() => {
     if (!live || !active) return;
+    // 只有正文确实被截断时才需要补拉：新建草稿的 body 本来就是全文，且 refs 要等 create 的 PUT
+    // 返回才登记，此时 readFull() 会返回 null —— 不判 truncated 就会在「新建草稿」后立刻误报读取失败。
+    if (!activeTruncated) { setHydrateErr(null); return; }
     const before = draftsRef.current.find(x => x.id === active)?.body ?? '';
     let on = true;
     persist.hydrateDraft(active).then(full => {
-      if (!on || !full) return;
-      setDrafts(list => list.map(x => x.id === active && (x.body ?? '') === before ? {...x, body: full.body} : x));
-    }).catch(() => {});
+      if (!on) return;
+      if (!full) { setHydrateErr({id: active, msg: '读不到这篇的完整正文（文件可能已被改名或删除）'}); return; }
+      setHydrateErr(null);
+      setDrafts(list => list.map(x => (x.id === active && (x.body ?? '') === before)
+        ? {...x, body: full.body, truncated: false} : x));
+    }).catch(e => { if (on) setHydrateErr({id: active, msg: e.message || String(e)}); });
     return () => { on = false; };
-  }, [active, live]);
+  }, [active, live, activeTruncated, hydrateTry]);
 
   useEffect(() => { history.replaceState(null, '', page === 'home' ? location.pathname : '#' + page); window.scrollTo({top: 0}); }, [page]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2800); return () => clearTimeout(t); }, [toast]);
@@ -359,7 +376,8 @@ function App() {
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} monthCount={monthPosts.length}/>
       </>}
       {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled}/>}
-      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost} aiEnabled={aiInfo?.enabled}/>}
+      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost} aiEnabled={aiInfo?.enabled}
+        hydrateErr={hydrateErr?.id === active ? hydrateErr.msg : null} onHydrateRetry={() => { setHydrateErr(null); setHydrateTry(n => n + 1); }}/>}
       {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onModule={goModule} readOnly={!live} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
       {page === 'methods' && <Methods graph={graph} readOnly={!live} onGo={openInGraph} onAction={onAction} onModule={goModule} showToast={setToast} onNew={() => setModal('new-note')} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled}/>}
       {page === 'knowledge' && <Knowledge graph={graph} readOnly={!live} onGraph={openInGraph} onModule={goModule} onAction={onAction} onNewDraft={newDraft} onEditIdea={editIdea} ideas={ideas} drafts={drafts} onDeleteDraft={deleteDraft} showToast={setToast} aiEnabled={aiInfo?.enabled}/>}
@@ -422,6 +440,7 @@ function App() {
         goal={goal}
         monthCount={monthPosts.length}
         readOnly={!live}
+        onGoal={n => setGoal(n)}
         onClose={close}
         onRefresh={() => {
           // 只需重拉 aiInfo / settings（AI 配置的单一事实源）；全量 refreshData 已无必要——

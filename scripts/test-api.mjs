@@ -4,7 +4,7 @@
 // 不联网、不依赖测试框架；用 examples/vault 的临时副本，测试完自动清理。
 import {strict as assert} from 'node:assert';
 import {spawn} from 'node:child_process';
-import {cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
 import {createServer as createNetServer} from 'node:net';
 import {tmpdir} from 'node:os';
@@ -349,6 +349,15 @@ try {
   const pubMd = readFileSync(join(vault, pubRes.body.path), 'utf8');
   assert.match(pubMd, /views: 100/, '指标应写入 frontmatter');
   assert.match(pubMd, /date: \d{4}-\d{2}-\d{2}/, '发布日期应写入');
+  // 一个指标都不填（默认路径）也必须写 date：否则发布时间退化成文件 mtime，之后任何编辑都会改掉它
+  const pubDraft2 = await put('/api/draft', {title: 'e2e 无指标发布稿', body: '只有正文'});
+  assert.equal(pubDraft2.status, 201);
+  const pubRes2 = await json('/api/publish', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({path: pubDraft2.body.path})});
+  assert.equal(pubRes2.status, 201, '无指标发布应 201：' + JSON.stringify(pubRes2.body));
+  assert.match(readFileSync(join(vault, pubRes2.body.path), 'utf8'), /date: \d{4}-\d{2}-\d{2}/,
+    '没填指标时也要写入发布日期（否则会退化成文件 mtime）');
+  assert.equal(pubRes2.body.metricsWritten, false, '没填指标时 metricsWritten 应为 false');
   // 非 03-创作台 的文件不能发布
   const pubBad = await json('/api/publish', {method: 'POST', headers: {'content-type': 'application/json'},
     body: JSON.stringify({path: newNote.body.path})});
@@ -434,6 +443,47 @@ try {
   assert.match(fmAfter, /回归：正文改写/);
   ok('回写正文剥离 frontmatter 后不复制（回归）');
 
+  // 6h2. 回归：带 BOM / 空属性块的笔记，改正文时不能把整块属性（含标题、指标）抹掉
+  const bomRel = '05-方法库/01-流程/回归-bom.md';
+  writeFileSync(join(vault, bomRel), '\uFEFF---\ntitle: BOM 笔记\nviews: 12\n---\n原正文\n', 'utf8');
+  const bomGet = await json('/api/note?path=' + encodeURIComponent(bomRel));
+  assert.equal(bomGet.status, 200);
+  const bomPut = await put('/api/note', {
+    path: bomRel, body: stripFrontmatter(bomGet.body.text) + '\nBOM 改写', mtime: bomGet.body.mtime,
+  });
+  assert.equal(bomPut.status, 200, 'BOM 笔记回写应 200：' + JSON.stringify(bomPut.body));
+  const bomAfter = readFileSync(join(vault, bomRel), 'utf8');
+  assert.match(bomAfter, /title: BOM 笔记/, '带 BOM 的笔记回写正文后 frontmatter 不能被整块丢弃：' + JSON.stringify(bomAfter));
+  assert.match(bomAfter, /views: 12/);
+  assert.match(bomAfter, /BOM 改写/);
+  // BOM 保留在文件最前面，第 1 行的 `---` 前面带 BOM，判断份数时先剥掉
+  assert.equal(((bomAfter.replace(/^\uFEFF/, '').match(/^---$/gm) || []).length), 2, 'frontmatter 只能有一份');
+
+  const emptyRel = '05-方法库/01-流程/回归-空属性.md';
+  writeFileSync(join(vault, emptyRel), '---\n---\n空属性正文\n', 'utf8');
+  const emptyGet = await json('/api/note?path=' + encodeURIComponent(emptyRel));
+  assert.equal(emptyGet.status, 200);
+  const emptyPut = await put('/api/note', {
+    path: emptyRel, fm: {tags: ['e2e']}, body: '空属性正文改写', mtime: emptyGet.body.mtime,
+  });
+  assert.equal(emptyPut.status, 200, '空属性笔记回写应 200：' + JSON.stringify(emptyPut.body));
+  const emptyAfter = readFileSync(join(vault, emptyRel), 'utf8');
+  assert.match(emptyAfter, /tags:\s*\[e2e\]/, '空属性块也能写入新键：' + JSON.stringify(emptyAfter));
+  assert.equal(((emptyAfter.match(/^---$/gm) || []).length), 2);
+  ok('带 BOM / 空属性块的笔记回写不丢属性（回归）');
+
+  // 6h3. 回归：改写多行标量（| / >）时旧内容必须被一起替换，不能残留在新值后面
+  const mlRel = '05-方法库/01-流程/回归-多行.md';
+  writeFileSync(join(vault, mlRel), '---\ntitle: 多行\nsummary: |\n  第一行\n  第二行\n---\n正文\n', 'utf8');
+  const mlGet = await json('/api/note?path=' + encodeURIComponent(mlRel));
+  const mlPut = await put('/api/note', {path: mlRel, fm: {summary: '新摘要'}});
+  assert.equal(mlPut.status, 200, '多行笔记改写应 200：' + JSON.stringify(mlPut.body));
+  const mlAfter = readFileSync(join(vault, mlRel), 'utf8');
+  assert.ok(!/第一行|第二行/.test(mlAfter), '旧的多行值应被整体替换：' + JSON.stringify(mlAfter));
+  assert.match(mlAfter, /summary: 新摘要/);
+  assert.match(mlAfter, /title: 多行/);
+  ok('改写多行标量不留残行（回归）');
+
   // 6i. 回归：正文里有畸形图片链接（裸 %）时 GET /api/note 不能 500
   const badRel = '05-方法库/01-流程/回归-图片.md';
   writeFileSync(join(vault, badRel), '---\ntags: [回归]\n---\n![图](100%.png)\n正文\n', 'utf8');
@@ -449,6 +499,145 @@ try {
   assert.equal(health.body.ok, true);
   assert.ok(!('vault' in health.body), '健康检查不应返回 vault 绝对路径');
   ok('/api/health 只返回 ok');
+
+  // 6k. fm 非对象必须 400（否则 'abc' 会被 Object.entries 拆成 0/1/2 三行写进 frontmatter）
+  const FM_REL = '05-方法库/01-流程/回归-frontmatter.md';
+  const fmRead = async () => (await json('/api/note?path=' + encodeURIComponent(FM_REL))).body;
+  const fmInit = await fmRead();
+  const fmBad = await put('/api/note', {path: FM_REL, fm: 'abc', mtime: fmInit.mtime});
+  assert.equal(fmBad.status, 400, 'fm 是非对象时应 400，实际 ' + JSON.stringify(fmBad.body).slice(0, 120));
+  const fmText = (await fmRead()).text;
+  assert.ok(!/^0: a/m.test(fmText), '脏键 0: a 不应写进 frontmatter');
+  assert.equal(fmText, fmInit.text, 'fm 非法时文件不应被改动');
+  ok('PUT /api/note 拒绝非对象 fm（回归）');
+
+  // 6l. frontmatter 值含换行：必须转义成单行，不能写出非法 YAML
+  const nlDoc = await fmRead();
+  const nlPut = await put('/api/note', {path: FM_REL, fm: {summary: '第一行\n第二行'}, mtime: nlDoc.mtime});
+  assert.equal(nlPut.status, 200, JSON.stringify(nlPut.body).slice(0, 120));
+  const nlText = (await fmRead()).text;
+  assert.match(nlText, /summary: "第一行\\n第二行"/, '多行摘要应转义成一行：' + nlText.slice(0, 200));
+  assert.ok(!/^第二行$/m.test(nlText), '不能留下裸的续行');
+  ok('frontmatter 值含换行时转义成单行（回归）');
+
+  // 6m. 请求体顶层不是对象 → 400，不是 500（且不回传内部报错文本）
+  const badBody = await json('/api/settings', {method: 'PUT', headers: {'content-type': 'application/json'}, body: '"abc"'});
+  assert.equal(badBody.status, 400, '非对象请求体应 400，实际 ' + badBody.status);
+  assert.ok(!/Cannot use 'in' operator/.test(JSON.stringify(badBody.body || '')), '不应回传 JS 内部报错');
+  ok('非对象请求体返回 400 而不是 500（回归）');
+
+  // 6n. 平台凭据只改 AppID：应沿用已存 secret，不能 400
+  const wx1 = await put('/api/settings', {platforms: {公众号: {appid: 'wx-one', secret: 'secret-one'}}});
+  assert.equal(wx1.status, 200, JSON.stringify(wx1.body).slice(0, 120));
+  const wx2 = await put('/api/settings', {platforms: {公众号: {appid: 'wx-two', secret: ''}}});
+  assert.equal(wx2.status, 200, '只改 AppID 不应 400：' + JSON.stringify(wx2.body).slice(0, 160));
+  const savedSettings = JSON.parse(readFileSync(join(vault, '.dashboard/settings.json'), 'utf8'));
+  assert.equal(savedSettings.platforms['公众号'].appid, 'wx-two');
+  assert.equal(savedSettings.platforms['公众号'].secret, 'secret-one', 'secret 应沿用旧值');
+  ok('只改公众号 AppID 时沿用已存 secret（回归）');
+
+  // 6n-2. 设置面板存下的凭据必须被平台模块认出来（键名 platforms.公众号 vs platforms.wechat）
+  const pInfo = await json('/api/settings');
+  assert.equal(pInfo.status, 200);
+  assert.equal(pInfo.body.platforms?.['公众号']?.configured, true, '设置面板应回显「已配置」');
+  const pData = await json('/api/data?fresh');
+  assert.equal(pData.body.platforms?.configured?.['公众号'], true,
+    '设置面板存了凭据，平台模块却认为未配置（platforms.公众号 与 platforms.wechat 键名对不上）');
+  assert.equal(pData.body.platforms?.pull?.['公众号']?.pullable, true);
+  ok('设置面板保存的公众号凭据对平台模块可见（回归）');
+
+  // 6n-3. 回归：两个输入框都清空 = 关掉公众号同步，不能 400（否则用户没有关掉同步的入口）
+  const clearCreds = await put('/api/settings', {platforms: {'公众号': {appid: '', secret: ''}}});
+  assert.equal(clearCreds.status, 200, '清空凭据应成功：' + JSON.stringify(clearCreds.body));
+  const afterClear = await json('/api/settings');
+  assert.ok(!afterClear.body.platforms?.['公众号'], '清空后不应再回显公众号凭据');
+  ok('清空公众号凭据可以关掉同步（回归）');
+
+  // 6n-4. 回归：超过 6000 字的草稿在 /api/data 里必须标 truncated，
+  // 前端据此先拉全文再允许编辑（否则第一个按键就把截断正文写回，尾部内容永久丢失）。
+  const longBody = '长'.repeat(6500);
+  const longDraft = await put('/api/draft', {title: 'e2e 超长草稿', body: longBody});
+  assert.equal(longDraft.status, 201, '超长草稿创建应 201：' + JSON.stringify(longDraft.body));
+  const longData = await json('/api/data?fresh');
+  const longEntry = (longData.body.seedDrafts || []).find(d => d.title === 'e2e 超长草稿');
+  assert.ok(longEntry, '超长草稿应出现在 /api/data');
+  assert.equal(longEntry.body.length, 6000, '/api/data 的正文被截到 6000 字');
+  assert.equal(longEntry.truncated, true, '被截断的草稿必须标 truncated，否则前端会把截断正文写回');
+  const shortEntry = (longData.body.seedDrafts || []).find(d => d.title === 'e2e 草稿');
+  assert.ok(!shortEntry || !shortEntry.truncated, '没被截断的草稿不应带 truncated');
+  ok('超长草稿在 /api/data 里标出 truncated（回归）');
+
+  // 6n-5. 回归：写盘走「同目录临时文件 + rename」，写完目录里不能留下 .tmp 残骸
+  // （原地覆盖写在进程被杀时会把 .md 截成半截，残骸还会被当成笔记索引）。
+  const putAgain = await put('/api/note', {path: FM_REL, fm: {summary: '原子写回归'}});
+  assert.equal(putAgain.status, 200, '原子写回归的写入应 200：' + JSON.stringify(putAgain.body));
+  const leftovers = readdirSync(join(vault, '05-方法库/01-流程')).filter(f => f.endsWith('.tmp'));
+  assert.deepEqual(leftovers, [], '写完不应留下临时文件');
+  ok('写盘走临时文件 + rename 且不留残骸（回归）');
+
+  // 6n-6. 回归：settings.json 里存在早期英文键 wechat / 半填凭据时，
+  // 读取路径不能让整个 readSettings 抛错回落到默认值（否则月目标、全局模型被静默重置），
+  // 而且要能把能归一化的凭据认成「公众号」。
+  const settingsPath = join(vault, '.dashboard/settings.json');
+  mkdirSync(dirname(settingsPath), {recursive: true});
+  writeFileSync(settingsPath, JSON.stringify({
+    version: 1, goal: 12, aiModel: 'legacy-model', syncHour: 7,
+    platforms: {wechat: {appid: 'wx-legacy', secret: 's3cret'}, 小红书: {appid: 'x'}}
+  }), 'utf8');
+  const tolerant = await json('/api/settings');
+  assert.equal(tolerant.status, 200, '带历史键的设置应能读取：' + JSON.stringify(tolerant.body));
+  assert.equal(tolerant.body.goal, 12, '月目标不能被静默重置');
+  assert.equal(tolerant.body.aiModel, 'legacy-model', '全局模型不能被静默重置');
+  assert.equal(tolerant.body.platforms?.['公众号']?.appid, 'wx-legacy', '英文键 wechat 的凭据要归一化成公众号');
+  assert.equal(tolerant.body.platforms?.['公众号']?.configured, true);
+  ok('历史英文键 settings 读取不丢配置（回归）');
+
+  // 6n-7. 回归：limit 传垃圾值不能让只读接口 500（NaN 绑进 LIMIT ? 会 datatype mismatch）
+  const newsBadLimit = await json('/api/news?limit=abc');
+  assert.equal(newsBadLimit.status, 200, '/api/news?limit=abc 应回落到默认值：' + JSON.stringify(newsBadLimit.body));
+  assert.ok(Array.isArray(newsBadLimit.body.days), '/api/news 应返回 days 数组');
+  const searchBadLimit = await json('/api/search?q=' + encodeURIComponent('笔记') + '&limit=abc');
+  assert.equal(searchBadLimit.status, 200, '/api/search?limit=abc 应回落到默认值：' + JSON.stringify(searchBadLimit.body));
+  ok('limit 传垃圾值不会 500（回归）');
+
+  // 6n-8. 回归：fm id 重复（Obsidian「制作副本」/ Syncthing 冲突副本会保留 id:）
+  // 原来 readVault 不去重 → files['idea:'+id] 被覆盖、INSERT 撞主键、/api/data 直接 500
+  writeFileSync(join(vault, '04-选题池/重复 id A.md'), '---\nid: dup-1\ntitle: 重复 id A\n---\nA\n', 'utf8');
+  writeFileSync(join(vault, '04-选题池/重复 id B.md'), '---\nid: dup-1\ntitle: 重复 id B\n---\nB\n', 'utf8');
+  const dupId = await json('/api/data?fresh');
+  assert.equal(dupId.status, 200, '重复 fm id 不能让 /api/data 500：' + JSON.stringify(dupId.body));
+  const dupIdeas = (dupId.body.seedIdeas || []).filter(i => String(i.title).startsWith('重复 id '));
+  assert.equal(dupIdeas.length, 2, '两份同 id 的选题都要保留：' + JSON.stringify(dupIdeas));
+  assert.notEqual(dupIdeas[0].id, dupIdeas[1].id, '重复 id 必须去重成两个不同的 id');
+  for (const i of dupIdeas) assert.ok(dupId.body.files['idea:' + i.id], '去重后两份都要能写回：' + i.id);
+  rmSync(join(vault, '04-选题池/重复 id A.md'), {force: true});
+  rmSync(join(vault, '04-选题池/重复 id B.md'), {force: true});
+  ok('fm id 重复不会 500 且两份都可读写（回归）');
+
+  // 6o. auth.json 损坏必须拒绝启动，绝不能降级成「未开启登录」
+  const badAuthDir = join(tmp, 'auth-bad');
+  mkdirSync(badAuthDir, {recursive: true});
+  const badAuthFile = join(badAuthDir, 'auth.json');
+  writeFileSync(badAuthFile, '{oops truncated');
+  const badPort = await freePort();
+  const badChild = spawn(process.execPath, [join(ROOT, 'server/index.mjs')], {
+    env: {
+      ...process.env, VAULT_DIR: vault, DATA_DIR: join(tmp, 'data-bad'), PORT: String(badPort),
+      HOST: '127.0.0.1', VAULT_GIT: '0', NEWS_CRON: '0', PLATFORM_SYNC_CRON: '0',
+      DASHBOARD_PASSWORD: '', AUTH_FILE: badAuthFile, API_TOKEN: ''
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let badLog = '';
+  badChild.stdout.on('data', d => { badLog += d; });
+  badChild.stderr.on('data', d => { badLog += d; });
+  const badCode = await new Promise(res => {
+    badChild.once('exit', c => res(c));
+    setTimeout(() => { badChild.kill(); res('timeout'); }, 8000);
+  });
+  assert.notEqual(badCode, 0, 'auth.json 损坏时应拒绝启动，实际退出码 ' + badCode);
+  assert.match(badLog, /auth\.json/, '日志应说明 auth.json 有问题');
+  ok('auth.json 损坏时拒绝启动，不降级成无鉴权（回归）');
 
   // 7. 登录：未登录 401 → /api/login 换 Cookie → 带 Cookie 可读 → auth-check 204
   const authPort = await freePort();

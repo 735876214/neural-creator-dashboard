@@ -123,6 +123,26 @@ function spring(st, target, dt, k = 62) {
 const sp = x => ({x, v: 0});
 
 // 星核向外飘散的星尘（星核本地坐标，画布 1012×1012，中心 506）
+// 尘埃光点的径向渐变不逐帧新建（130 个/帧会一直制造 GC 压力）：按颜色烘一张精灵图，
+// 每帧只改 globalAlpha 再 drawImage，观感不变但少了每帧 130 次 createRadialGradient。
+const dustSprites = new Map();
+function dustSprite(color) {
+  let sp = dustSprites.get(color);
+  if (!sp) {
+    const SZ = 64;
+    sp = document.createElement('canvas');
+    sp.width = sp.height = SZ;
+    const g2 = sp.getContext('2d');
+    const g = g2.createRadialGradient(SZ / 2, SZ / 2, 0, SZ / 2, SZ / 2, SZ / 2);
+    g.addColorStop(0, `rgba(${color},1)`);
+    g.addColorStop(1, `rgba(${color},0)`);
+    g2.fillStyle = g;
+    g2.fillRect(0, 0, SZ, SZ);
+    dustSprites.set(color, sp);
+  }
+  return sp;
+}
+
 const DUST = Array.from({length: 130}, (_, i) => ({a: i * 2.39996, v: .035 + (i * 37 % 100) / 100 * .06, o: (i * .618034) % 1, w: (i % 2 ? 1 : -1) * (.15 + (i % 7) * .05), s: .7 + (i % 5) * .32, b: .45 + (i % 3) * .25, c: T.dust[i % T.dust.length]}));
 
 // —— 星团 = 七个真实星座（v7.0 落地第 7 个）——
@@ -231,10 +251,10 @@ function Scene({graph, items, more, onModule, onItem, live, sel}) {
             const ph = ((t * p.v + p.o) % 1 + 1) % 1, r = 300 + ph * 190, a = p.a + ph * p.w;
             const x = 506 + Math.cos(a) * r, y = 506 + Math.sin(a) * r * .96;
             const al = di * Math.pow(Math.max(0, Math.sin(ph * Math.PI)), 1.3) * p.b * .6, rad = p.s / sc * 2.2;
-            const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
-            g.addColorStop(0, `rgba(${p.c},${al})`); g.addColorStop(1, `rgba(${p.c},0)`);
-            ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.fill();
+            ctx.globalAlpha = al;
+            ctx.drawImage(dustSprite(p.c), x - rad, y - rad, rad * 2, rad * 2);
           }
+          ctx.globalAlpha = 1;
           ctx.globalCompositeOperation = 'source-over';
         }
       }
@@ -433,14 +453,22 @@ function Dock({graph, onGo}) {
   const [q, setQ] = useState('');
   const [cards, setCards] = useState(null);
   const typing = useRef(null);
+  const after = useRef(null); // 打字结束后延迟出结果的那一次定时器，卸载时也要清
   const ask = text => { if (text.trim()) setCards({q: text, list: askGraph(graph, text)}); };
   const typeAsk = text => {
     clearInterval(typing.current);
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { setQ(text); ask(text); return; }
     let i = 0; setQ('');
-    typing.current = setInterval(() => { i++; setQ(text.slice(0, i)); if (i >= text.length) { clearInterval(typing.current); setTimeout(() => ask(text), 220); } }, 45);
+    typing.current = setInterval(() => {
+      i++; setQ(text.slice(0, i));
+      if (i >= text.length) {
+        clearInterval(typing.current);
+        typing.current = null;
+        after.current = setTimeout(() => { after.current = null; ask(text); }, 220);
+      }
+    }, 45);
   };
-  useEffect(() => () => clearInterval(typing.current), []);
+  useEffect(() => () => { clearInterval(typing.current); clearTimeout(after.current); }, []);
   const kpis = [['内容节点', 'Notes', s.content], ['连接', 'Links', s.links], ['双向共振', 'Mutual', s.mutual], ['未创建', 'Unresolved', s.ghosts]];
   return <div className="dock">
     {cards && <section className="ask-results glass" aria-live="polite">
