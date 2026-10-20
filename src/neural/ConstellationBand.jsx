@@ -48,7 +48,7 @@ export function ConstellationBand({page, onGo}) {
       g.drawImage(src, 0, 0);
     }
   }, [figs]);
-  return <section className="const-band glass" aria-label="七个星座 · 七个模块">
+  return <section className="const-band glass" aria-label="七个星座 · 七个模块 Seven constellations · seven modules">
     <div className="cb-copy">
       <p className="cb-title">七个星座 <em>Seven constellations</em></p>
       <p className="cb-note">真实星位与经典连线 · 与工作台同一套<em>Real sky positions, classic lines</em></p>

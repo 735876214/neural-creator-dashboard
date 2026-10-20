@@ -210,7 +210,8 @@
 <script>
 (() => {
   'use strict';
-  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const motionQuery = matchMedia('(prefers-reduced-motion: reduce)');
+  let reduced = motionQuery.matches;
   const $ = id => document.getElementById(id);
   const panel = $('panel'), checking = $('checking'), card = $('card');
   const form = $('form'), user = $('username'), pass = $('password');
@@ -416,6 +417,12 @@
   addEventListener('resize', build);
   if (!reduced) raf = requestAnimationFrame(frame);
   else cancelAnimationFrame(raf);
+  // 系统里切换开关后立即生效：关掉动画就停帧补一张静态图，打开就重新起循环。
+  motionQuery.addEventListener('change', e => {
+    reduced = e.matches;
+    if (reduced) { cancelAnimationFrame(raf); raf = 0; draw(0); }
+    else if (!raf) raf = requestAnimationFrame(frame);
+  });
 })();
 </script>
 </body>

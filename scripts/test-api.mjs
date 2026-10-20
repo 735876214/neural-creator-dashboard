@@ -4,7 +4,7 @@
 // 不联网、不依赖测试框架；用 examples/vault 的临时副本，测试完自动清理。
 import {strict as assert} from 'node:assert';
 import {spawn} from 'node:child_process';
-import {cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
+import {cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
 import {createServer as createNetServer} from 'node:net';
 import {tmpdir} from 'node:os';
@@ -533,7 +533,12 @@ try {
   assert.equal(wx2.status, 200, '只改 AppID 不应 400：' + JSON.stringify(wx2.body).slice(0, 160));
   const savedSettings = JSON.parse(readFileSync(join(vault, '.dashboard/settings.json'), 'utf8'));
   assert.equal(savedSettings.platforms['公众号'].appid, 'wx-two');
-  assert.equal(savedSettings.platforms['公众号'].secret, 'secret-one', 'secret 应沿用旧值');
+  // secret 不进 vault（settings.json 会被 gitCommit 进 git 历史并随 Syncthing 分发），改存 DATA_DIR
+  assert.equal(savedSettings.platforms['公众号'].secret, undefined, 'settings.json 里不能出现平台 secret');
+  assert.ok(!readFileSync(join(vault, '.dashboard/settings.json'), 'utf8').includes('secret-one'), 'vault 文件里不得残留明文凭据');
+  const platSecretFile = JSON.parse(readFileSync(join(tmp, 'data', 'platform-secrets.json'), 'utf8'));
+  assert.equal(platSecretFile['公众号'], 'secret-one', 'secret 应沿用旧值并存在 DATA_DIR');
+  assert.equal(statSync(join(tmp, 'data', 'platform-secrets.json')).mode & 0o777, 0o600, '凭据文件必须是 0600');
   ok('只改公众号 AppID 时沿用已存 secret（回归）');
 
   // 6n-2. 设置面板存下的凭据必须被平台模块认出来（键名 platforms.公众号 vs platforms.wechat）
@@ -600,6 +605,29 @@ try {
   assert.equal(searchBadLimit.status, 200, '/api/search?limit=abc 应回落到默认值：' + JSON.stringify(searchBadLimit.body));
   ok('limit 传垃圾值不会 500（回归）');
 
+  // 6n-8. 传输层：/api/data 必须支持 gzip（部署模式没有 nginx，压缩只能在服务里做）
+  const gzRes = await fetch(base + '/api/data', {headers: {'accept-encoding': 'gzip'}});
+  assert.equal(gzRes.status, 200);
+  assert.equal(gzRes.headers.get('content-encoding'), 'gzip', '/api/data 应按 accept-encoding 压缩');
+  const gzBody = await gzRes.json();
+  assert.ok(Array.isArray(gzBody.posts) && gzBody.posts.length, '压缩后的响应仍应是完整 JSON');
+  const plainRes = await fetch(base + '/api/data', {headers: {'accept-encoding': 'identity'}});
+  assert.equal(plainRes.headers.get('content-encoding'), null, '不声明 gzip 时不能压缩');
+  ok('大响应按 accept-encoding 压缩（回归）');
+
+  // 6n-9. /api/version 是轻量指纹：只 walk + stat，不读全库正文
+  const verA = await json('/api/version');
+  assert.equal(verA.status, 200);
+  assert.equal(typeof verA.body.v, 'number', '/api/version 的 v 应为数字');
+  assert.ok(verA.body.files > 0, '/api/version 应报文件数');
+
+  // 6o. 失败路径的契约：非 2xx 必须带中文 {error}，前端才有话可说（sync.js 现在会读它）
+  const noAi = await json('/api/ai/ask', {method: 'POST', body: {question: '测试'}});
+  assert.ok(noAi.status >= 400, '未配置 AI 时 /api/ai/ask 不应返回成功：' + JSON.stringify(noAi.body));
+  assert.equal(typeof noAi.body.error, 'string');
+  assert.ok(noAi.body.error.length >= 4, '失败响应必须带可读原因：' + JSON.stringify(noAi.body));
+  ok('失败响应带可读原因（回归）');
+
   // 6n-8. 回归：fm id 重复（Obsidian「制作副本」/ Syncthing 冲突副本会保留 id:）
   // 原来 readVault 不去重 → files['idea:'+id] 被覆盖、INSERT 撞主键、/api/data 直接 500
   writeFileSync(join(vault, '04-选题池/重复 id A.md'), '---\nid: dup-1\ntitle: 重复 id A\n---\nA\n', 'utf8');
@@ -613,6 +641,26 @@ try {
   rmSync(join(vault, '04-选题池/重复 id A.md'), {force: true});
   rmSync(join(vault, '04-选题池/重复 id B.md'), {force: true});
   ok('fm id 重复不会 500 且两份都可读写（回归）');
+
+  // 6n-9. 回归：快照缓存窗口里文件被外部删/改名，GET /api/data 不能因 statSync ENOENT 变 500
+  const cacheRel = '05-方法库/01-流程/缓存窗口回归.md';
+  writeFileSync(join(vault, cacheRel), '---\ntags: [回归]\n---\n缓存窗口\n', 'utf8');
+  const cacheFresh = await json('/api/data?fresh');
+  assert.equal(cacheFresh.status, 200);
+  rmSync(join(vault, cacheRel));
+  const cacheAfter = await json('/api/data');
+  assert.equal(cacheAfter.status, 200, '缓存窗口内文件消失不能让 /api/data 500：' + JSON.stringify(cacheAfter.body));
+  ok('快照缓存窗口内文件被删不会 500（回归）');
+
+  // 6n-10. 回归：新建请求重试（响应丢了）不能写出第二份「标题 2.md」
+  const rid = 'e2e-rid-' + Date.now();
+  const idem1 = await put('/api/draft', {title: 'e2e 幂等草稿', body: 'x', requestId: rid});
+  const idem2 = await put('/api/draft', {title: 'e2e 幂等草稿', body: 'x', requestId: rid});
+  assert.equal(idem1.status, 201);
+  assert.equal(idem2.status, 200, '同一 requestId 的重试应回 200 复用：' + JSON.stringify(idem2.body));
+  assert.equal(idem2.body.path, idem1.body.path, '同一 requestId 必须复用第一次的文件');
+  assert.ok(!existsSync(join(vault, '03-创作台/e2e 幂等草稿 2.md')), '重试不能多写一份孤儿文件');
+  ok('新建请求带 requestId 时幂等（回归）');
 
   // 6o. auth.json 损坏必须拒绝启动，绝不能降级成「未开启登录」
   const badAuthDir = join(tmp, 'auth-bad');

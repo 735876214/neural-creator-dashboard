@@ -555,7 +555,10 @@ button.chip:hover { background: color-mix(in srgb, var(--kc, #9db3af) 22%, trans
   .site-foot { padding-bottom: 90px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .neural *, .neural *::before, .neural *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+  /* 只压缩 duration 不够：animation-iteration-count 仍是 infinite 的动画会每 0.01ms 走完一轮，
+     每帧采样落在周期内任意位置 —— 星云会随机抖动、光晕会随机旋转，比正常模式更有害。
+     这里把循环次数也压到 1，有 both/forwards 的停在终态，没有的停在起始态。 */
+  .neural *, .neural *::before, .neural *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
 

@@ -209,12 +209,15 @@ export function Cosmos({reduced}) {
       });
     };
     build();
-    const ro = new ResizeObserver(build); ro.observe(cv);
+    // reduced 下没有持续的帧循环，窗口尺寸变化后要补画一帧，否则会留下一块空白。
+    const ro = new ResizeObserver(() => { build(); if (reduced) frame(performance.now()); }); ro.observe(cv);
 
     const meteors = [];
     let nextMeteor = 2.4 + Math.random() * 4;
     const frame = now => {
-      raf = requestAnimationFrame(frame);
+      // 减少动态效果时画面是静止的，画完这一帧就不再排帧（否则每帧 clearRect + 620 颗星白烧 CPU）。
+      // 仍然「先排下一帧再进 try」，本帧出错不会让背景停住。
+      raf = reduced ? 0 : requestAnimationFrame(frame);
       try {
         const dt = Math.max(0, Math.min(.05, (now - last) / 1000)); last = Math.max(last, now);
         if (document.hidden) return;

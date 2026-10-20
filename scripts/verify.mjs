@@ -2,7 +2,7 @@
 // 校验：skill 格式、导入脚本、当前数据结构、页面素材。
 // 用法：npm run verify              日常检查
 //       npm run verify -- --release  发布前检查（另外要求仓库地址占位符已替换）
-import {readFileSync, existsSync, mkdtempSync, rmSync} from 'node:fs';
+import {readFileSync, existsSync, mkdtempSync, rmSync, readdirSync} from 'node:fs';
 import {execSync} from 'node:child_process';
 import {join, resolve, dirname, basename} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -31,6 +31,12 @@ else {
     else if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) || name.length > 64) fail(`name「${name}」只能用小写字母、数字和单个连字符，且不超过 64 个字符`);
     else if (name !== basename(skillDir)) fail(`name「${name}」必须与文件夹名「${basename(skillDir)}」一致`);
     else ok(`name：${name}`);
+    const ver = (m[1].match(/^\s*version:\s*(.*)$/m) || [])[1]?.trim();
+    if (ver) {
+      const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
+      if (ver.replace(/^["']|["']$/g, '') !== pkg) fail(`SKILL.md 的 version「${ver}」与 package.json「${pkg}」不一致`);
+      else ok(`version：${ver}`);
+    }
     if (!desc) fail('SKILL.md 缺少 description');
     else if (desc.length > 1024) fail(`description 超过 1024 个字符（${desc.length}）`);
     else ok(`description：${desc.length} 个字符`);
@@ -67,7 +73,12 @@ function check(m, label, {allowEmptyPosts = false} = {}) {
         : /^05-方法库 methods\/[^/]+\/.+/.test(n.path || '');
     if (!okPath) errs.push(`笔记 path 格式不对：${n.title}`);
   }
-  for (const i of m.seedIdeas) if (typeof i.id !== 'number' || !['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题 id 须为数字、status 须为 待写/待扩展/已转草稿：${i.title}`);
+  // 老数据（导入脚本）用序号数字 id，看板里新建的选题是服务端生成的稳定字符串 id，两者都合法。
+  const okId = v => (typeof v === 'number' && Number.isFinite(v)) || (typeof v === 'string' && v.trim() !== '');
+  for (const i of m.seedIdeas) {
+    if (!okId(i.id)) errs.push(`选题 id 须为非空字符串或数字：${i.title}`);
+    else if (!['待写', '待扩展', '已转草稿'].includes(i.status)) errs.push(`选题 status 须为 待写/待扩展/已转草稿：${i.title}`);
+  }
   for (const d of m.seedDrafts) if (d.source != null && !m.seedIdeas.some(i => i.id === d.source)) errs.push(`草稿的来源选题不存在：${d.title}`);
   for (const c of m.concepts) if (!Array.isArray(c) || typeof c[0] !== 'string' || !Array.isArray(c[1])) errs.push('concepts 格式应为 [概念名, [关键词…]]');
   return errs;
@@ -502,6 +513,113 @@ if (!/const uniqIdea = uniqueId\(\);/.test(r14VaultSrc)
 } else if (!/if \(files\[key\] !== r\.path\) \{ if \(!isPending\(key\)\) refs\.delete\(key\); continue; \}/.test(r14PersistSrc)) {
   fail('refreshData 重播基线不校验 path：id 位移后会把正文写进另一个文件');
 } else ok('数据一致性（重复 id 去重 / 位移作废语义边 / 基线按 path 校验）');
+
+// —— 第十五轮审查：并发与幂等 ——
+const r15SrvSrc = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+const r15PersistSrc = readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8');
+if (!/const at = rel => \{ try \{ return new Date\(statSync\(join\(VAULT, rel\)\)\.mtimeMs\)\.toISOString\(\); \} catch \{ return null; \} \};/.test(r15SrvSrc)
+  || !/if \(!mtime\) return;/.test(r15SrvSrc)) {
+  fail('reindex 的 statSync 没兜底：快照缓存窗口里文件被外部删掉会让 /api/data 整个 500');
+} else if (!/function createMemoHit\(requestId\)/.test(r15SrvSrc) || !/createMemoPut\(requestId, rel\);/.test(r15SrvSrc)
+  || !/fm: fmClean, requestId\}/.test(r15SrvSrc)) {
+  fail('新建接口没有幂等键：响应丢失后的重试会在库里多写一份「标题 2.md」');
+} else if (!/requestId: requestIdFor\(key\)\}/.test(r15PersistSrc)
+  || !/const clearCreateId = key => \{ createIds\.delete\(key\); \};/.test(r15PersistSrc)) {
+  fail('前端新建没带 requestId（或删除后没清掉幂等键）：重试会重复建文件');
+} else ok('并发与幂等（reindex 兜底 / create 幂等键前后端）');
+
+// —— 第十六轮审查：减少动态效果与中英双语 ——
+const r16Css = readFileSync(join(ROOT, 'src/neural/neural.css'), 'utf8');
+const r16Main = readFileSync(join(ROOT, 'src/neural/main.jsx'), 'utf8');
+const r16Cosmos = readFileSync(join(ROOT, 'src/neural/Cosmos.jsx'), 'utf8');
+const r16Pages = readFileSync(join(ROOT, 'src/neural/pages.jsx'), 'utf8');
+const r16Login = readFileSync(join(ROOT, 'public/login.html'), 'utf8');
+const r16Hook = join(ROOT, 'src/neural/useReducedMotion.js');
+if (!existsSync(r16Hook)) {
+  fail('缺少 useReducedMotion：系统切换「减少动态效果」后页面不跟随');
+} else if (!/animation-iteration-count: 1 !important/.test(r16Css)) {
+  fail('reduced-motion 只压了 animation-duration：infinite 动画仍会每 0.01ms 循环，星云会随机抖动');
+} else if (/const reduced = useMemo\(\(\) => window\.matchMedia\('\(prefers-reduced-motion: reduce\)'\)\.matches/.test(r16Main)
+  || !/const reduced = useReducedMotion\(\)/.test(r16Main)) {
+  fail('主界面 reduced 只在挂载时读一次，系统开关变化不生效');
+} else if (!/raf = reduced \? 0 : requestAnimationFrame\(frame\);/.test(r16Cosmos)) {
+  fail('reduced 下 Cosmos 仍在逐帧重绘静止画面（白烧 CPU）');
+} else if (!/!reduced && x\.dir !== 'in'/.test(r16Pages) || !/!reduced && x\.dir !== 'out'/.test(r16Pages)) {
+  fail('MiniGraph 的 SMIL 光粒没受 reduced 控制（CSS 管不到 SMIL）');
+} else if (!/const motionQuery = matchMedia\('\(prefers-reduced-motion: reduce\)'\)/.test(r16Login)
+  || !/motionQuery\.addEventListener\('change'/.test(r16Login)) {
+  fail('登录页 reduced 只在加载时读一次，系统开关变化不生效');
+} else if (!/n\.closest\('\.visually-hidden'\)/.test(r16Main)) {
+  fail('自建 Modal 的 Tab 循环没有过滤不可见控件（会停在 file input 上）');
+} else ok('减少动态效果（CSS 停循环 / 跟随系统 / Canvas 停帧 / SMIL）');
+
+// aria-label 是全站唯一的可访问名：Canvas 上没有任何可读文本，只剩这些标签。
+// 可见文案都是「中文 + <em>English</em>」，标签只有一个语言就等于对读屏用户少了一半。
+const r16Mono = [];
+for (const f of readdirSync(join(ROOT, 'src/neural'))) {
+  if (!f.endsWith('.jsx')) continue;
+  const src = readFileSync(join(ROOT, 'src/neural', f), 'utf8');
+  for (const m of src.matchAll(/aria-label="([^"]*)"/g)) {
+    if (!/[A-Za-z]{3,}/.test(m[1])) r16Mono.push(f + ' → ' + m[1]);
+  }
+}
+if (r16Mono.length) fail('这些 aria-label 只有中文：' + r16Mono.slice(0, 6).join(' / '));
+else ok('所有 aria-label 都是中英双语');
+
+// —— 第十七轮审查：失败必须可见 ——
+const r17Sync = readFileSync(join(ROOT, 'src/neural/sync.js'), 'utf8');
+const r17Ana = readFileSync(join(ROOT, 'src/neural/Analysis.jsx'), 'utf8');
+const r17Pages = readFileSync(join(ROOT, 'src/neural/pages.jsx'), 'utf8');
+const r17Main = readFileSync(join(ROOT, 'src/neural/main.jsx'), 'utf8');
+if (!/async function fail\(res, what\)/.test(r17Sync) || /throw new Error\(`AI \w+：HTTP \$\{res\.status\}`\)/.test(r17Sync)) {
+  fail('sync.js 只抛 HTTP 状态码：服务端的中文原因（未启用 / 未知模型）被丢掉');
+} else if (!/const m = r\?\.msg \|\| okMsg;/.test(r17Ana)) {
+  fail('AI 面板用固定成功文案覆盖动作结果：写回失败 / 已分析过 / 候选选题 都会被报成成功');
+} else if (!/one\?\.written === false/.test(r17Ana)) {
+  fail('frontmatter 写回失败（written:false）仍显示「已写入笔记」');
+} else if (!/if \(bad\.length\) \{ setMsg\(`这些字段不是数字/.test(r17Ana)) {
+  fail('指标里有非数字时先提示跳过、随后被「已写入」覆盖，用户以为整体成功');
+} else if (!/let local = \[\];/.test(r17Ana) || !/catch \(e4\)/.test(r17Ana)) {
+  fail('AskBox 的本地检索抛错会让发送按钮永久禁用（setBusy(false) 执行不到）');
+} else if (!/setImgErr\(err \|\| ''\)/.test(r17Pages)) {
+  fail('草稿插图失败只打 console，界面没有任何提示');
+} else if (!/if \(!r\.ok\) \{ setSettingsErr/.test(r17Main)) {
+  fail('/api/settings 读取失败被吞：401 时设置面板显示成「未配置」');
+} else ok('失败必须可见（错误体原因 / 写回结果 / 指标校验 / 检索兜底 / 插图 / 设置读取）');
+
+// —— 第十八轮审查：平台凭据不得进 vault 的 git 历史 ——
+const r18Srv = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+if (!/const PLATFORM_SECRETS_FILE = join\(DATA_DIR, 'platform-secrets\.json'\);/.test(r18Srv)
+  || !/function savePlatformSecrets\(map\)/.test(r18Srv)
+  || !/\{mode: 0o600\}/.test(r18Srv)) {
+  fail('平台 Secret 没有落到 DATA_DIR 的 0600 秘密文件');
+} else if (!/next\.platforms = Object\.fromEntries\(Object\.entries\(next\.platforms \|\| \{\}\)\.map\(\(\[k, v\]\) => \[k, \{appid: v\.appid\}\]\)\);/.test(r18Srv)) {
+  fail('settings.json 落盘前没有剥掉平台 secret（会被 gitCommit 进 vault 历史）');
+} else if (!/^migratePlatformSecrets\(\);$/m.test(r18Srv)) {
+  fail('没有把历史 settings.json 里的平台 secret 迁出 vault 的启动迁移');
+} else ok('平台凭据出 vault（0600 秘密文件 / 落盘剥离 / 启动迁移）');
+
+// —— 第十九轮审查：规模与性能 ——
+const r19Srv = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
+const r19Graph = readFileSync(join(ROOT, 'src/neural/graph.js'), 'utf8');
+const r19Net = readFileSync(join(ROOT, 'src/neural/NetworkCanvas.jsx'), 'utf8');
+const r19Vault = readFileSync(join(ROOT, 'server/vault.mjs'), 'utf8');
+if (!/export function vaultStamp\(dir\)/.test(r19Vault)
+  || !/\{v: v \+ n, n\}/.test(r19Vault)) {
+  fail('/api/version 没有轻量指纹（每 5 秒轮询会把整个 vault 读两遍）');
+} else if (/loadData\(\)/.test((r19Srv.match(/if \(p === '\/api\/version' && req\.method === 'GET'\) \{([\s\S]*?)\n  \}/) || [])[1] || '')) {
+  fail('/api/version 又走回 loadData()：轮询会重新全库读盘');
+} else if (!/function acceptsGzip\(req\)/.test(r19Srv) || !/head\['content-encoding'\] = 'gzip';/.test(r19Srv)) {
+  fail('JSON / 静态资源没有 gzip 协商（手机上下载几 MB 中文 JSON）');
+} else if (!/const iters = N\.length > 1200 \? 90 : N\.length > 700 \? 160 : N\.length > 400 \? 300 : 520;/.test(r19Graph)) {
+  fail('力导向布局没有按节点数分档：N² 在主线程同步跑，上千节点会白帧');
+} else if (!/for \(const o of adj\.get\(id\) \|\| \[\]\) if \(!depth\.has\(o\)\)/.test(r19Net)) {
+  fail('NetworkCanvas 的层级 BFS 又变成 O(N×L) 的连线全扫');
+} else if (!/const heavy = links\.length > 320 \|\| drawNodes\.length > 900;/.test(r19Net)) {
+  fail('星图没有规模降级开关（每帧上万次 canvas 调用）');
+} else if (!/const FLOW_LIMIT = 300;/.test(r19Vault) || !/ideasTotal: bucket\.ideas\.length, drafts: draftsOut\.length, draftsTotal: bucket\.drafts\.length/.test(r19Vault)) {
+  fail('选题/草稿桶没有上限：payload 与图谱节点数会无界增长');
+} else ok('规模与性能（指纹 / gzip / 布局分档 / 邻接表 BFS / 绘制降级 / 桶上限）');
 
 for (const w of warnings) console.log('  ! ' + w);
 if (errors.length) { console.error('\n未通过：'); errors.forEach(e => console.error('  ✗ ' + e)); process.exit(1); }

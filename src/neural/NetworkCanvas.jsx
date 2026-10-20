@@ -45,13 +45,18 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
     const ro = new ResizeObserver(resize); ro.observe(canvas);
 
     // 按与创作空间的链接层数决定蔓延顺序。
+    // 先建邻接表再 BFS：原来是「每个出队节点扫一遍全部连线」＝ O(N×L)，
+    // 1500 节点 / 4000 条边时约 600 万次比较，同步跑在 effect 里会紧跟布局再来一次卡顿。
+    const adj = new Map();
+    for (const l of graph.links) {
+      if (!adj.has(l.a)) adj.set(l.a, []);
+      if (!adj.has(l.b)) adj.set(l.b, []);
+      adj.get(l.a).push(l.b); adj.get(l.b).push(l.a);
+    }
     const depth = new Map([['core', 0]]), q = ['core'];
     while (q.length) {
       const id = q.shift();
-      for (const l of graph.links) {
-        const o = l.a === id ? l.b : l.b === id ? l.a : null;
-        if (o && !depth.has(o)) { depth.set(o, depth.get(id) + 1); q.push(o); }
-      }
+      for (const o of adj.get(id) || []) if (!depth.has(o)) { depth.set(o, depth.get(id) + 1); q.push(o); }
     }
     const nodes = graph.nodes.filter(n => n.kind !== 'core').map((n, i) => ({
       n, p: layout[n.id], d: depth.get(n.id) ?? 4, seed: (i * 9301 + 49297) % 233280 / 233280,
@@ -126,7 +131,10 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
       }
 
       // 星座线光粒：单向连接只朝出链方向，双向连接往返传递。
-      if (!reduced && !L.paused && grow > .6) {
+      // 规模降级：连线或节点过多时，光粒与光晕是最贵的部分（每帧上千次 drawImage），
+      // 低配设备会掉到 10–20fps 并持续发热；这里直接跳过，节点仍用纯色圆点保持可读。
+      const heavy = links.length > 320 || drawNodes.length > 900;
+      if (!reduced && !L.paused && grow > .6 && !heavy) {
         ctx.globalCompositeOperation = ADD;
         for (const k of links) {
           if (k.l.kind === 'contain' || k.l.kind === 'tag') continue;
@@ -159,11 +167,17 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
         const a = p * (on ? .50 : .11) * (.5 + .5 * x.z) * soft;
         const r = x.r * (hl && on ? 1.35 : 1) * (.82 + .22 * x.z);
         ctx.globalAlpha = a;
-        ctx.globalCompositeOperation = ADD;
-        // 渐变跨度按原来的 3.6r 铺开（不是 5r），观感才和逐帧画时一致
-        ctx.drawImage(glowOf(color), px - r * 3.6, py - r * 3.6, r * 7.2, r * 7.2);
-        ctx.globalCompositeOperation = 'source-over';
-        if (x.n.kind === 'ghost') { ctx.setLineDash([2, 2]); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(px, py, r + 1, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
+        if (heavy) {
+          // 降级：单色圆点代替「光晕 + 球体」两次位图绘制
+          ctx.beginPath(); ctx.arc(px, py, Math.max(1, r * .9), 0, 7); ctx.fillStyle = `rgb(${color})`; ctx.fill();
+        } else {
+          ctx.globalCompositeOperation = ADD;
+          // 渐变跨度按原来的 3.6r 铺开（不是 5r），观感才和逐帧画时一致
+          ctx.drawImage(glowOf(color), px - r * 3.6, py - r * 3.6, r * 7.2, r * 7.2);
+          ctx.globalCompositeOperation = 'source-over';
+        }
+        if (heavy) { /* 降级模式：上面已画圆点，不再画球体位图 */ }
+        else if (x.n.kind === 'ghost') { ctx.setLineDash([2, 2]); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(px, py, r + 1, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
         else ctx.drawImage(bodyOf(color), px - r, py - r, r * 2, r * 2);
         // 文字只给少数节点：悬停时全亮，平时只有最常被提及的几个概念、且必须离开中央主角区
         const away = Math.hypot(px - cx, py - cy) > Math.min(W, H) * .27;

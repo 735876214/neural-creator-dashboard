@@ -20,7 +20,8 @@ import {createServer} from 'node:http';
 import {readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, renameSync} from 'node:fs';
 import {join, resolve, sep, dirname, extname, basename, posix} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {readVault, parse, ATTACHMENTS_DIR} from './vault.mjs';
+import {gzipSync} from 'node:zlib';
+import {readVault, vaultStamp, parse, ATTACHMENTS_DIR} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
 import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateIdeas, answer, embed, listModels, validModel, taskModel, taskModelsSnapshot} from './ai.mjs';
@@ -75,9 +76,17 @@ class HttpError extends Error {
 }
 const fail = (code, message, extra) => { throw new HttpError(code, message, extra); };
 
+// 部署模式下静态资源与 /api 都由 note-api 直出（镜像里没有 nginx），所以压缩必须在这里做：
+// /api/data 在真实库上常是 1–3 MB 中文 JSON（压缩比 6–10×），手机上不压缩就是几秒白屏。
+function acceptsGzip(req) {
+  return /\bgzip\b/.test(String(req?.headers?.['accept-encoding'] || ''));
+}
 function json(res, code, obj) {
-  const body = Buffer.from(JSON.stringify(obj));
-  res.writeHead(code, {'content-type': 'application/json; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store'});
+  let body = Buffer.from(JSON.stringify(obj));
+  const head = {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'vary': 'accept-encoding'};
+  if (body.length > 1024 && acceptsGzip(res.req)) { body = gzipSync(body); head['content-encoding'] = 'gzip'; }
+  head['content-length'] = body.length;
+  res.writeHead(code, head);
   res.end(body);
 }
 
@@ -335,6 +344,27 @@ function gitCommitMulti(rels, message) {
 // 只存少量不属于笔记的看板偏好：月目标、用户选的 AI 模型、发布平台凭据与同步时间。
 const SETTINGS_DEFAULTS = {version: 1, goal: 8, aiModel: null, aiBaseUrl: null, platforms: {}, syncHour: null};
 const SETTINGS_KEYS = new Set(['goal', 'aiModel', 'aiBaseUrl', 'platforms', 'syncHour']);
+// 平台凭据的 secret 与 AI key 同策略：存 DATA_DIR（0o600），不进 vault。
+// settings.json 会被 gitCommit 进 vault 并随 Syncthing 分发，明文 AppSecret 一旦进 git 历史就删不掉，
+// 用户只能去微信后台重置——所以 platform-secrets.json 是唯一的存放处，settings.json 只留 appid。
+const PLATFORM_SECRETS_FILE = join(DATA_DIR, 'platform-secrets.json');
+function loadPlatformSecrets() {
+  try {
+    const raw = JSON.parse(readFileSync(PLATFORM_SECRETS_FILE, 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch { return {}; }
+}
+function savePlatformSecrets(map) {
+  mkdirSync(DATA_DIR, {recursive: true});
+  const tmp = join(DATA_DIR, `.platform-secrets-${process.pid}-${Date.now()}.tmp`);
+  try {
+    writeFileSync(tmp, JSON.stringify(map, null, 2) + '\n', {mode: 0o600});
+    renameSync(tmp, PLATFORM_SECRETS_FILE);
+  } catch (e) {
+    try { rmSync(tmp, {force: true}); } catch {}
+    throw new Error(`写入平台凭据失败：${e.message}`);
+  }
+}
 // AI key 存 DATA_DIR/ai-secrets.json（0o600）：settings.json 会 gitCommit 进 vault 并随 Syncthing 分发，key 不能放那里。
 const AI_SECRETS_FILE = join(DATA_DIR, 'ai-secrets.json');
 function loadAiSecret() {
@@ -387,6 +417,8 @@ function cleanPlatforms(raw, {strict = true} = {}) {
     const secret = typeof cfg.secret === 'string' ? cfg.secret.trim() : '';
     if (appid && secret) out[name] = {appid, secret};
     else if ((appid || secret) && strict) fail(400, '公众号 AppID 和 Secret 要一起填');
+    // 非严格读取：settings.json 里只存 appid，secret 在 DATA_DIR；先收下，由 readSettings 补 secret 后判定。
+    else if ((appid || secret) && !strict) out[name] = {appid, secret};
   }
   return out;
 }
@@ -399,6 +431,12 @@ function readSettings() {
     const aiModel = typeof raw?.aiModel === 'string' && raw.aiModel ? raw.aiModel : null;
     const aiBaseUrl = typeof raw?.aiBaseUrl === 'string' ? raw.aiBaseUrl : null;
     const platforms = cleanPlatforms(raw?.platforms, {strict: false});
+    // 补上 DATA_DIR 里的 secret，并把「配了一半」的条目丢掉（否则 platforms.mjs 会拿空 secret 去换 token）
+    const storedSecrets = loadPlatformSecrets();
+    for (const [k, v] of Object.entries(platforms)) {
+      if (!v.secret && typeof storedSecrets[k] === 'string') v.secret = storedSecrets[k];
+      if (!v.appid || !v.secret) delete platforms[k];
+    }
     const syncHour = Number.isInteger(raw?.syncHour) && raw.syncHour >= 0 && raw.syncHour <= 23 ? raw.syncHour : null;
     return {version: 1, goal, aiModel, aiBaseUrl, platforms, syncHour, ...(raw?.updatedAt ? {updatedAt: String(raw.updatedAt)} : {})};
   } catch {
@@ -439,10 +477,18 @@ function writeSettings(patch) {
             && String(v.appid ?? '').trim() && cur[k]?.secret
             ? {...v, secret: cur[k].secret} : v]))
       : raw;
-    patch = {...patch, platforms: cleanPlatforms(filled)};
+    // secret 分流到 DATA_DIR：settings.json 只留 appid，避免明文凭据进 vault 的 git 历史
+    const clean = cleanPlatforms(filled);
+    const secrets = loadPlatformSecrets();
+    for (const [k, v] of Object.entries(clean)) secrets[k] = v.secret;
+    for (const k of Object.keys(secrets)) if (!(k in clean)) delete secrets[k];
+    savePlatformSecrets(secrets);
+    patch = {...patch, platforms: Object.fromEntries(Object.entries(clean).map(([k, v]) => [k, {appid: v.appid}]))};
   }
   if ('syncHour' in patch && !(patch.syncHour === null || (Number.isInteger(patch.syncHour) && patch.syncHour >= 0 && patch.syncHour <= 23))) fail(400, '同步时间必须是 0–23 的整数或 null');
   const next = {...readSettings(), ...patch, version: 1, updatedAt: new Date().toISOString()};
+  // readSettings 会把 DATA_DIR 的 secret 合进来供 platforms.mjs 使用；写回文件前必须剥掉
+  next.platforms = Object.fromEntries(Object.entries(next.platforms || {}).map(([k, v]) => [k, {appid: v.appid}]));
   mkdirSync(SETTINGS_DIR, {recursive: true});
   const tmp = join(SETTINGS_DIR, `.settings-${process.pid}-${Date.now()}.tmp`);
   try {
@@ -460,6 +506,36 @@ function writeSettings(patch) {
 // idea / draft 的 frontmatter 白名单校验：只接受约定字段，非法值直接 400，
 // 避免把前端的临时状态写进笔记文件。
 bindSettingsReader(readSettings);
+// 一次性迁移：旧版本把平台 secret 明文写进了 settings.json（已进 vault 的 git 历史）。
+// 这里搬到 DATA_DIR 并从 settings.json 删掉；历史里的旧值无法回滚，提示用户去平台后台重置。
+function migratePlatformSecrets() {
+  try {
+    if (!existsSync(SETTINGS_FILE)) return;
+    const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
+    const ps = raw && typeof raw.platforms === 'object' && raw.platforms ? raw.platforms : null;
+    if (!ps) return;
+    const secrets = loadPlatformSecrets();
+    const keep = {};
+    let moved = false;
+    for (const [k, v] of Object.entries(ps)) {
+      const appid = typeof v?.appid === 'string' ? v.appid.trim() : '';
+      const secret = typeof v?.secret === 'string' ? v.secret.trim() : '';
+      if (secret) { secrets[k] = secret; moved = true; }
+      if (appid) keep[k] = {appid};
+    }
+    if (!moved) return;
+    savePlatformSecrets(secrets);
+    raw.platforms = keep;
+    const tmp = join(SETTINGS_DIR, `.settings-${process.pid}-${Date.now()}.tmp`);
+    writeFileSync(tmp, JSON.stringify(raw, null, 2) + '\n', 'utf8');
+    renameSync(tmp, SETTINGS_FILE);
+    gitCommit('.dashboard/settings.json', '平台 Secret 移出 vault（改存 DATA_DIR）');
+    console.error('[note-api] 平台 Secret 已移到 DATA_DIR；vault 的 git 历史里仍有旧值，建议在平台后台重置一次');
+  } catch (e) {
+    console.error('[note-api] 平台凭据迁移失败（沿用 settings.json 里的旧值）：', e.message);
+  }
+}
+migratePlatformSecrets();
 function cleanFm(kind, fm) {
   if (fm == null) return {};
   if (typeof fm !== 'object' || Array.isArray(fm)) fail(400, 'fm 必须是对象');
@@ -544,8 +620,33 @@ function writeExisting(rel, {body, fm, mtime}) {
   return {path: rel, mtime: mtimeOf(abs), changed: true, text: after};
 }
 
+// create 的幂等键：请求已在服务端落盘但响应丢了（nginx 504、切后台断连）时，客户端的重试
+// 不能再写第二份 —— 否则库里会多出一份没人编辑的「标题 2.md」孤儿文件。同一个 requestId
+// 在 10 分钟内重复出现就返回第一次写的那个文件。
+const createMemo = new Map();
+const CREATE_MEMO_TTL = 10 * 60_000;
+function createMemoHit(requestId) {
+  if (!requestId) return null;
+  const hit = createMemo.get(requestId);
+  if (!hit) return null;
+  if (Date.now() - hit.at > CREATE_MEMO_TTL) { createMemo.delete(requestId); return null; }
+  return existsSync(join(VAULT, hit.path)) ? hit.path : null;
+}
+function createMemoPut(requestId, rel) {
+  if (!requestId || !rel) return;
+  if (createMemo.size > 512) {
+    for (const [k, v] of createMemo) if (Date.now() - v.at > CREATE_MEMO_TTL) createMemo.delete(k);
+  }
+  createMemo.set(requestId, {path: rel, at: Date.now()});
+}
+
 // 新建一篇笔记。标题做文件名，重名时加序号；正文与 frontmatter 用固定模板写出。
-function createNote(kind, {title, body = '', fm = {}}) {
+function createNote(kind, {title, body = '', fm = {}, requestId}) {
+  const reused = createMemoHit(requestId);
+  if (reused) {
+    invalidate();
+    return {path: reused, mtime: mtimeOf(join(VAULT, reused)), text: readFileSync(join(VAULT, reused), 'utf8'), reused: true};
+  }
   const dir = KIND_DIR[kind] || KIND_DIR.note;
   const name = safeName(title);
   let rel = posix.join(dir, name + '.md');
@@ -554,6 +655,7 @@ function createNote(kind, {title, body = '', fm = {}}) {
   const abs = join(VAULT, rel);
   mkdirSync(dirname(abs), {recursive: true});
   writeFileSync(abs, text, 'utf8');
+  createMemoPut(requestId, rel);
   gitCommit(rel, `新增 ${rel}`);
   invalidate();
   return {path: rel, mtime: mtimeOf(abs), text};
@@ -585,8 +687,14 @@ function parseFrontmatter(text) {
 // —— 索引 ——
 function reindex(data = loadData()) {
   const rows = [];
-  const at = rel => new Date(statSync(join(VAULT, rel)).mtimeMs).toISOString();
-  const push = (id, rel, title, kind, body) => rows.push({id, path: rel, title, kind, body, hash: hashOf(body), mtime: at(rel)});
+  // 1.5s 快照缓存里的文件可能刚被外部删掉/改名：statSync 抛 ENOENT 会让整个 /api/data 500，
+  // 这里按 loadData 收集 mtimes 的同一策略兜底，缺文件的行跳过（下一次 loadData 就不再包含它）。
+  const at = rel => { try { return new Date(statSync(join(VAULT, rel)).mtimeMs).toISOString(); } catch { return null; } };
+  const push = (id, rel, title, kind, body) => {
+    const mtime = at(rel);
+    if (!mtime) return;
+    rows.push({id, path: rel, title, kind, body, hash: hashOf(body), mtime});
+  };
   for (const w of data.works) push('post:' + w.post.id, w.rel, w.post.title, 'post', w.content.body);
   let personalSeq = 0;
   for (const n of data.notes) push(n.kind === 'personal' ? 'personal:p' + (++personalSeq) : 'note:' + n.id, n.rel, n.title, n.kind, n.body);
@@ -608,8 +716,16 @@ function serveStatic(req, res, pathname) {
   if (!abs.startsWith(STATIC_DIR)) return false;
   if (!existsSync(abs) || statSync(abs).isDirectory()) abs = join(STATIC_DIR, 'index.html'); // SPA 回退
   if (!existsSync(abs)) return false;
-  const body = readFileSync(abs);
-  res.writeHead(200, {'content-type': MIME[extname(abs).toLowerCase()] || 'application/octet-stream', 'content-length': body.length});
+  let body = readFileSync(abs);
+  const type = MIME[extname(abs).toLowerCase()] || 'application/octet-stream';
+  const head = {'content-type': type, 'cache-control': 'no-cache'};
+  // 文本类资源（js/css/html/svg/json）压缩后再发；图片字体不需要
+  if (body.length > 1024 && /^(text\/|application\/(json|javascript|manifest))/.test(type) && acceptsGzip(req)) {
+    body = gzipSync(body); head['content-encoding'] = 'gzip';
+  }
+  head['vary'] = 'accept-encoding';
+  head['content-length'] = body.length;
+  res.writeHead(200, head);
   res.end(body);
   return true;
 }
@@ -685,9 +801,10 @@ async function route(req, res, url) {
   // 轻量指纹：外部编辑器改动 vault 后前端轮询这里决定要不要重新拉 /api/data。
   // v = 各文件 mtime 汇总（+ 条目数），不精确到单文件但足够发现「有变化」。
   if (p === '/api/version' && req.method === 'GET') {
-    const d = loadData();
-    const v = Object.values(d.mtimes || {}).reduce((a, b) => a + b, 0) + Object.keys(d.mtimes || {}).length;
-    return json(res, 200, {v, generatedAt: d.generatedAt});
+    // 前端每 5 秒轮询一次：这里只能做 walk + stat 的轻量指纹。
+    // 以前走全量数据装载（1.5s 缓存永远命中不了）＝ 每个标签页每 5 秒把整个 vault 读两遍。
+    const stamp = vaultStamp(VAULT);
+    return json(res, 200, {v: stamp.v, files: stamp.n, generatedAt: new Date().toISOString()});
   }
 
   if (p === '/api/data' && req.method === 'GET') {
@@ -781,7 +898,7 @@ async function route(req, res, url) {
 
   if ((p === '/api/idea' || p === '/api/draft') && req.method === 'PUT') {
     const kind = p === '/api/idea' ? 'idea' : 'draft';
-    const {path, id, title, body, fm, mtime} = await readBody(req);
+    const {path, id, title, body, fm, mtime, requestId} = await readBody(req);
     // 有 path / id 就是改现有的；都没有就新建
     if (path || (id && loadData().files[id])) {
       const rel = target({path, id});
@@ -797,13 +914,13 @@ async function route(req, res, url) {
     const fmClean = cleanFm(kind, fm);
     // 选题创建时写一次稳定 id：此后增删其他文件、改名都不影响关联
     if (kind === 'idea' && !fmClean.id) fmClean.id = randomUUID().slice(0, 8);
-    const r = createNote(kind, {title, body, fm: fmClean});
-    return json(res, 201, {path: r.path, mtime: r.mtime, created: true, id: fmClean.id});
+    const r = createNote(kind, {title, body, fm: fmClean, requestId});
+    return json(res, r.reused ? 200 : 201, {path: r.path, mtime: r.mtime, created: true, id: fmClean.id, reused: r.reused || undefined});
   }
 
   // 新建方法笔记（脱离编辑器独立创作）：作品不在这里建——作品的唯一入口是草稿发布。
   if (p === '/api/note-new' && req.method === 'POST') {
-    const {kind, title, body, fm} = await readBody(req);
+    const {kind, title, body, fm, requestId} = await readBody(req);
     if (kind && kind !== 'note') fail(400, 'note-new 只支持新建方法笔记（kind: note）；作品请从草稿发布');
     if (typeof title !== 'string' || !title.trim()) fail(400, '需要一个标题');
     if (fm != null && (typeof fm !== 'object' || Array.isArray(fm))) fail(400, 'fm 必须是对象');
@@ -816,7 +933,7 @@ async function route(req, res, url) {
         } else clean[k] = String(fm[k]);
       }
     }
-    const r = createNote('note', {title: title.trim(), body: String(body || ''), fm: clean});
+    const r = createNote('note', {title: title.trim(), body: String(body || ''), fm: clean, requestId});
     gitCommit(r.path, `新建方法笔记 ${r.path}`);
     invalidate();
     return json(res, 201, {path: r.path, mtime: r.mtime, created: true});

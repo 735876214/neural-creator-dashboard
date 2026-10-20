@@ -436,7 +436,7 @@ function Scene({graph, items, more, onModule, onItem, live, sel}) {
     })}
     {items.map((n, i) => {
       const meta = itemMeta(n);
-      return <button key={n.id} className={`fan-item ${sel === n.id ? 'active' : ''} kind-${n.kind}`} ref={el => { itemRefs.current[i] = el; }} onClick={() => onItem(n.id)} style={{'--kc': KINDS[n.kind].color}} aria-label={`打开 ${n.title} 的分析`}>
+      return <button key={n.id} className={`fan-item ${sel === n.id ? 'active' : ''} kind-${n.kind}`} ref={el => { itemRefs.current[i] = el; }} onClick={() => onItem(n.id)} style={{'--kc': KINDS[n.kind].color}} aria-label={`打开 ${n.title} 的分析 Open analysis`}>
         <span className="fi-dot"/>
         <span className="fi-body">
           <span className="fi-title">{n.short || n.title}</span>
@@ -472,7 +472,7 @@ function Dock({graph, onGo}) {
   const kpis = [['内容节点', 'Notes', s.content], ['连接', 'Links', s.links], ['双向共振', 'Mutual', s.mutual], ['未创建', 'Unresolved', s.ghosts]];
   return <div className="dock">
     {cards && <section className="ask-results glass" aria-live="polite">
-      <header><span><Icon name="spark" size={14}/>图谱分析 <em>Graph analysis</em></span><small>本地规则检索 · Local rules, no AI</small><button className="icon-btn" aria-label="关闭分析" onClick={() => setCards(null)}><Icon name="close" size={14}/></button></header>
+      <header><span><Icon name="spark" size={14}/>图谱分析 <em>Graph analysis</em></span><small>本地规则检索 · Local rules, no AI</small><button className="icon-btn" aria-label="关闭分析 Close analysis" onClick={() => setCards(null)}><Icon name="close" size={14}/></button></header>
       <div className="ask-cards">{cards.list.map((c, i) => <article key={i} className={`ask-card tone-${c.tone}`} style={{animationDelay: i * 90 + 'ms'}}>
         <h4>{c.title} <em>{c.en}</em></h4>
         <p>{c.text}</p>
@@ -483,8 +483,8 @@ function Dock({graph, onGo}) {
     <div className="dock-panel glass">
       <div className="dock-kpis">{kpis.map(([k, en, v]) => <div key={k}><span>{k} <em>{en}</em></span><strong className="mono">{v}</strong></div>)}</div>
       <form className="ask" onSubmit={e => { e.preventDefault(); ask(q); }}>
-        <input value={q} onChange={e => setQ(e.target.value)} placeholder="问问你的创作图谱… Ask your graph" aria-label="向图谱提问"/>
-        <button className="send" aria-label="提交问题"><Icon name="send" size={16}/></button>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="问问你的创作图谱… Ask your graph" aria-label="向图谱提问 Ask your graph"/>
+        <button className="send" aria-label="提交问题 Send question"><Icon name="send" size={16}/></button>
       </form>
       <div className="dock-chips">
         <span className="me"><Icon name="agent" size={13}/>我的图谱 <em>My graph</em></span>
@@ -559,7 +559,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
   const m = MODULES.find(x => x.id === mod);
   const s = stats(graph);
 
-  return <section ref={stageRef} className={`home-stage stage-${stage} ${live.current.introSeen ? 'intro-done' : ''}`} aria-label="创作星图">
+  return <section ref={stageRef} className={`home-stage stage-${stage} ${live.current.introSeen ? 'intro-done' : ''}`} aria-label="创作星图 Creator graph">
     <div className="stage-bg"/>
     <NetworkCanvas graph={graph} layout={layout} live={live} reduced={reduced}/>
     <Scene graph={graph} items={stage === 'hub' ? [] : shown} more={stage === 'hub' ? 0 : more} sel={sel} live={live} onModule={id => setFocus({mod: id === mod && stage !== 'hub' ? mod : id, sel: null})} onItem={id => setFocus({mod, sel: id})}/>
@@ -572,21 +572,21 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
       <p className="hub-hint">点击星团，展开星座 · <em>Tap a cluster to expand</em></p>
     </div>
 
-    {stage !== 'hub' && <nav className="crumbs" aria-label="图谱路径">
-      <button className="crumb-back" onClick={() => setFocus(sel ? {mod, sel: null} : {mod: null, sel: null})} aria-label="返回上一层"><Icon name="back" size={16}/></button>
+    {stage !== 'hub' && <nav className="crumbs" aria-label="图谱路径 Graph path">
+      <button className="crumb-back" onClick={() => setFocus(sel ? {mod, sel: null} : {mod: null, sel: null})} aria-label="返回上一层 Back one level"><Icon name="back" size={16}/></button>
       <button onClick={() => setFocus({mod: null, sel: null})}>创作空间 <em>Core</em></button>
       <span>/</span>
       <button onClick={() => setFocus({mod, sel: null})} style={{color: MOD_STYLE[mod].color}}>{m.title} <em>{m.en}</em></button>
       {node && <><span>/</span><b>{node.short || node.title}</b></>}
     </nav>}
 
-    <div className="stage-tools glass" role="toolbar" aria-label="动画控制">
-      <button onClick={replay} data-tip="重播开场 Replay" aria-label="重播开场"><Icon name="replay" size={15}/><span>重播 <em>Replay</em></span></button>
+    <div className="stage-tools glass" role="toolbar" aria-label="动画控制 Animation controls">
+      <button onClick={replay} data-tip="重播开场 Replay" aria-label="重播开场 Replay intro"><Icon name="replay" size={15}/><span>重播 <em>Replay</em></span></button>
       <button onClick={() => setPaused(!paused)} data-tip={paused ? '继续（环系与呼吸继续走）Resume' : '暂停（定格在当前相位）Pause'} aria-pressed={paused} aria-label={paused ? '继续' : '暂停'}><Icon name={paused ? 'play' : 'pause'} size={15}/><span>{paused ? '继续' : '暂停'} <em>{paused ? 'Resume' : 'Pause'}</em></span></button>
-      <button onClick={onAbout} data-tip="数据来源与图谱推导 About" aria-label="数据来源"><Icon name="info" size={15}/><span>数据来源 <em>Sources</em></span></button>
+      <button onClick={onAbout} data-tip="数据来源与图谱推导 About" aria-label="数据来源 Data source"><Icon name="info" size={15}/><span>数据来源 <em>Sources</em></span></button>
     </div>
 
-    {stage === 'hub' && <div className="legend glass" aria-label="图例">
+    {stage === 'hub' && <div className="legend glass" aria-label="图例 Legend">
       <h3>图例 <em>Legend</em></h3>
       {['post', 'note', 'personal', 'idea', 'draft', 'concept', 'tag', 'ghost'].map(k => <div key={k}><i style={{'--kc': KINDS[k].color}} className={k === 'ghost' ? 'ghost' : ''}/>{KINDS[k].label} <em>{KINDS[k].en}</em><b className="mono">{graph.nodes.filter(n => n.kind === k).length}</b></div>)}
       <div className="legend-lines"><span><i className="ln mutual"/>双向 <em>Mutual</em></span><span><i className="ln one"/>单向 <em>One-way</em></span></div>

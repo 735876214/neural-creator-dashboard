@@ -68,7 +68,7 @@ export function NewNoteModal({onClose, onDone}) {
   };
 
   return <Modal onClose={onClose} label="新建方法笔记">
-      <header><h2>新建方法笔记 <em>New note</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭"><Icon name="close" size={16}/></button></header>
+      <header><h2>新建方法笔记 <em>New note</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭 Close"><Icon name="close" size={16}/></button></header>
       <div className="form">
         <p className="quiet">保存后写入 NAS 笔记库（05-方法库/），方法库星座即时多一颗星（刷新后可见）<em>Saved to vault on NAS</em></p>
         <label>标题 <em>Title</em><input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="如：每周复盘的四步流程"/></label>
@@ -118,7 +118,7 @@ export function PublishModal({draft, onClose, onDone}) {
   };
 
   return <Modal onClose={onClose} label="发布为作品">
-      <header><h2>发布为作品 <em>Publish</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭"><Icon name="close" size={16}/></button></header>
+      <header><h2>发布为作品 <em>Publish</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭 Close"><Icon name="close" size={16}/></button></header>
       <div className="form">
         <p className="quiet">「{draft?.title}」将移入 NAS 笔记库的 02-作品库/，成为作品库星座的一颗星；指标现在可以不填，稍后在作品页补 <em>Moves the draft into 02-作品库/</em></p>
         <label>作品标题 <em>Title</em><input autoFocus value={title} onChange={e => setTitle(e.target.value)}/></label>

@@ -29,7 +29,8 @@ notes-vault/
 └── 05-方法库/    ← 方法笔记（可再分子目录，子目录会出现在图谱里）
 ```
 
-note-api 还会在 vault 根目录自动创建隐藏目录 `.dashboard/settings.json`，保存月目标与 AI 模型选择；它不会出现在 Obsidian 文件树或图谱里，随 vault 一起备份。
+note-api 还会在 vault 根目录自动创建隐藏目录 `.dashboard/settings.json`，保存月目标、AI 模型选择与平台 AppID；它不会出现在 Obsidian 文件树或图谱里，随 vault 一起备份。
+**AI key 与公众号 AppSecret 不在那里**：`settings.json` 会被自动 commit 进 vault 的 git 历史并随 Syncthing 分发，所以这两类凭据存放在 `DATA_DIR`（默认容器内 `/data`）下的 `ai-secrets.json` 与 `platform-secrets.json`，权限 `0600`。`DATA_DIR` 一定要是持久卷，否则重启后要重填。旧版本曾把 AppSecret 写进 `settings.json`，升级后首次启动会自动搬到 `DATA_DIR` 并从该文件删除；但已经进过 git 历史的旧值无法自动清除，建议去微信后台重置一次 AppSecret。
 
 作品笔记的 frontmatter 中英文字段都认：
 

@@ -41,7 +41,7 @@ export function PublishDialog({draft, defaultPlatform, sourcePlatform, onClose, 
     <p className="quiet">发布是手动的：复制发布包 → 打开平台创作页粘贴发布 → 回填链接。链接会写入草稿，发布后同名作品自动带上来源。<em>Publish manually — paste the pack, then link back.</em></p>
 
     <label>目标平台 <em>Platform</em>
-      <select value={platform} onChange={e => { setPlatform(e.target.value); setCopied(''); }} aria-label="选择平台">
+      <select value={platform} onChange={e => { setPlatform(e.target.value); setCopied(''); }} aria-label="选择平台 Choose platform">
         {PLATFORM_KEYS.map(k => <option key={k} value={k}>{PLATFORMS[k].zh} <em>{PLATFORMS[k].en}</em></option>)}
       </select>
     </label>
@@ -57,8 +57,8 @@ export function PublishDialog({draft, defaultPlatform, sourcePlatform, onClose, 
     </div>
 
     <div className="form">
-      <label>原文链接 <em>Post URL</em><input value={url} onChange={e => setUrl(e.target.value)} placeholder="发布后把链接粘到这里…" aria-label="作品链接"/></label>
-      <label>平台内容 ID <em>Content ID</em><input value={platformId || ''} onChange={e => setPlatformId(e.target.value)} placeholder="选填，便于后续自动拉数据" aria-label="平台内容 ID"/></label>
+      <label>原文链接 <em>Post URL</em><input value={url} onChange={e => setUrl(e.target.value)} placeholder="发布后把链接粘到这里…" aria-label="作品链接 Post URL"/></label>
+      <label>平台内容 ID <em>Content ID</em><input value={platformId || ''} onChange={e => setPlatformId(e.target.value)} placeholder="选填，便于后续自动拉数据" aria-label="平台内容 ID Platform content ID"/></label>
       {err && <p className="quiet" role="alert">{err}</p>}
       <div className="form-actions">
         <SaveBadge state={saveState}/>

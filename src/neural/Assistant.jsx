@@ -84,17 +84,17 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
   };
 
   return <>
-    {!open && <button className="as-fab glass" onClick={() => setOpen(true)} aria-label="打开 AI 助手">
+    {!open && <button className="as-fab glass" onClick={() => setOpen(true)} aria-label="打开 AI 助手 Open AI assistant">
       <Icon name="agent" size={18}/><span>AI 助手</span>
     </button>}
-    {open && <section className="as-drawer glass" role="dialog" aria-label="AI 助手">
+    {open && <section className="as-drawer glass" role="dialog" aria-label="AI 助手 AI assistant">
       <header>
         <span className="as-title"><Icon name="agent" size={15}/>AI 助手 <em>Assistant</em></span>
         <div className="as-tabs">
           <button className={tab === 'ask' ? 'on' : ''} onClick={() => setTab('ask')}>提问 <em>Ask</em></button>
           <button className={tab === 'upload' ? 'on' : ''} onClick={() => setTab('upload')} disabled={readOnly}>上传 <em>Upload</em></button>
         </div>
-        <button className="icon-btn" onClick={() => setOpen(false)} aria-label="关闭助手"><Icon name="close" size={15}/></button>
+        <button className="icon-btn" onClick={() => setOpen(false)} aria-label="关闭助手 Close assistant"><Icon name="close" size={15}/></button>
       </header>
 
       {tab === 'ask' && <>
@@ -123,14 +123,14 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
           {busy && <p className="as-busy">检索中…</p>}
         </div>
         <form className="as-ask" onSubmit={ask}>
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder="问你的笔记库…" aria-label="向 AI 助手提问"/>
-          <button className="send" aria-label="发送" disabled={busy}>{busy ? '…' : <Icon name="send" size={15}/>}</button>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="问你的笔记库…" aria-label="向 AI 助手提问 Ask the AI assistant"/>
+          <button className="send" aria-label="发送 Send" disabled={busy}>{busy ? '…' : <Icon name="send" size={15}/>}</button>
         </form>
       </>}
 
       {tab === 'upload' && <div className="as-upload">
         <p className="as-hint">支持 md / txt / docx / pdf（≤{Math.round(4)} MB），提取文本后存进个人知识库，自动进搜索与 AI 问答。</p>
-        <div className="as-cats" role="group" aria-label="上传分类">
+        <div className="as-cats" role="group" aria-label="上传分类 Upload category">
           {CATS.map(c => <button key={c} className={cat === c ? 'on' : ''} onClick={() => setCat(c)}>{c}</button>)}
         </div>
         <label className={`as-drop ${upBusy ? 'busy' : ''}`}>

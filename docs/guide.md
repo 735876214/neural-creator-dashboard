@@ -95,7 +95,7 @@
 | `src/neural/constellations.js` | 七个真实星座（J2000 星表 + 经典连线）与固定模块映射 |
 | `src/neural/Cosmos.jsx` | 星穹背景：星云、星尘、流星 |
 | `src/neural/NetworkCanvas.jsx` | 背景神经网络层 |
-| `src/neural/ConstellationBand.jsx` | 三个内页顶部的星座轨 |
+| `src/neural/ConstellationBand.jsx` | 五个内页顶部的星座轨 |
 | `src/neural/theme.js` | 配色与素材路径（全站唯一一套深空配色） |
 | `src/neural/icons.jsx` | 内联 SVG 图标 |
 | `src/neural/neural.css` | 全部样式；顶部 CSS 变量是配色的另一处入口 |
@@ -111,12 +111,12 @@
 | 文件 | 职责 |
 |---|---|
 | `src/neural/main.jsx` | 路由（`#home/#library/#drafts/#ideas`）、顶栏、弹窗（关于、目标、选题、阅读/编辑）、只读模式、同步横幅、toast |
-| `src/neural/pages.jsx` | 三个内页：作品库（搜索 + 四种排序 + 选中分析）、创作台（编辑器、`[[` 双链补全、删除草稿）、选题池（新建/编辑/转草稿）；保存状态就地展示 |
+| `src/neural/pages.jsx` | 五个内页：作品库（搜索 + 四种排序 + 选中分析）、创作台（编辑器、`[[` 双链补全、删除草稿）、选题池（新建/编辑/转草稿）、知识库（剪藏/上传）、方法库（浏览笔记）；保存状态就地展示 |
 | `src/neural/Analysis.jsx` | 右侧分析栏：指标、收藏率等级、出链/反链/双向、话题、二度关联；AI 面板（打标签、语义关联、生成选题、模型选择、任务轮询） |
 | `src/neural/persist.js` | 选题/草稿/目标/AI 模型的 NAS 读写：1.2s 防抖、同 key 串行、内存 outbox 重试、409 冲突、新建回填 path/mtime、完整正文 hydrate |
 | `src/neural/sync.js` | AI 请求封装（`aiModels / aiAnalyze / aiRelate / aiIdeas`）；模型选择转存 NAS 设置 |
 
-三个内页的功能：
+五个内页的功能：
 
 - **作品库**：按标题搜索；按最新/观看/收藏率/涨粉排序；点击一行在右侧分析栏看全部指标与连接；可跳回工作台在图中定位。
 - **创作台**：左侧草稿列表，右侧编辑器；标题与正文停止输入 1.2s 后自动写回 vault（`03-创作台/`），新建草稿立即落盘；删除会调用 `DELETE /api/note`，原文件先备份到 `.trash/`。断网时改动只在内存 outbox，恢复后自动重试。
@@ -227,18 +227,25 @@ notes-vault/
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `VAULT_DIR` | 必填 | 笔记库目录 |
-| `DATA_DIR` | `.note-api` | SQLite 与运行时数据目录（可删可重建；看板设置不在里面，见 `vault/.dashboard/settings.json`） |
+| `DATA_DIR` | `.note-api` | SQLite 索引（可删可重建）与**必须持久化**的运行时文件：`session.key`、`auth.json`（未设 `DASHBOARD_PASSWORD` 时生成的登录密码）、`ai-secrets.json`（AI key）、`platform-secrets.json`（公众号 Secret，0600）。看板配置在 `vault/.dashboard/settings.json` |
 | `PORT` / `HOST` | `8787` / `0.0.0.0` | 监听地址 |
-| `STATIC_DIR` | 无 | 同时托管 `dist/`，省掉 nginx |
+| `STATIC_DIR` | 无 | 同时托管 `dist/`；静态资源由 note-api 自己鉴权后直出（镜像里没有 nginx） |
 | `API_TOKEN` | 无 | 仅用于 curl / 脚本等非浏览器客户端；浏览器看板不携带，填了会导致看板请求 401。看板部署用登录页 + 会话 Cookie |
 | `VAULT_GIT` | 开 | vault 是 git 仓库时每次写入自动 commit；`0` 关闭 |
-| `MAX_BODY` | 2 MB | 请求体上限（字节）；compose 部署版设为 4 MB，与 nginx `client_max_body_size 4m` 对齐 |
+| `MAX_BODY` | 2 MB | 请求体上限（字节）；compose 部署版设为 4 MB |
 | `AI_PROTOCOL` | `openai` | 或 `anthropic` |
 | `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` | DeepSeek | chat 网关与默认模型 |
 | `AI_MODEL_ASK/ANALYZE/IDEAS/NEWS` | 回落 `AI_MODEL` | 任务级模型覆盖 |
 | `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_MODEL` / `EMBED_PROTOCOL` | 跟随 chat | embedding（DeepSeek 无 embedding，需另配，如硅基流动 bge-m3）；Cloudflare 方案还需 `CF_ACCOUNT_ID` |
 | `AI_TIMEOUT` / `AI_CONCURRENCY` | 60s / 4 | 单次 AI 调用超时（毫秒）与并发上限 |
 | `NEWS_SOURCE` / `NEWS_HOUR` / `NEWS_CRON` | 见上 | 热点日报 |
+| `NEWS_TZ_OFFSET` / `SYNC_TZ_OFFSET` | `8` | 日报与平台同步按哪个时区算「今天」（容器默认 UTC，必须设成 `8` 才是北京时间） |
+| `DASHBOARD_USER` / `DASHBOARD_PASSWORD` | `admin` / 自动生成 | 登录账号；不设密码时启动生成随机密码写进 `AUTH_FILE` |
+| `AUTH_FILE` | `<DATA_DIR>/auth.json` | 登录密码与 salt 的落盘位置，必须持久化 |
+| `SESSION_DAYS` / `TRUST_PROXY` | `30` / 关 | 会话有效天数；前面有反向代理时才把 `TRUST_PROXY` 设为 `1`（否则限流按 socket 地址算） |
+| `WECHAT_APPID` / `WECHAT_SECRET` | 无 | 公众号同步的兜底凭据（设置面板里填过则以面板为准） |
+| `SYNC_HOUR` / `PLATFORM_SYNC_CRON` | `21` / 开 | 每天几点后自动同步；`PLATFORM_SYNC_CRON=0` 关闭 |
+| `WEB_FETCH_TIMEOUT` / `WEB_FETCH_MAX_BYTES` | `20000` / 2 MB | 知识库剪藏的抓取超时与体积上限 |
 
 ### 6.2 前端变量
 
@@ -260,7 +267,11 @@ notes-vault/
 |---|---|---|
 | GET | `/api/health` | 健康检查（免鉴权） |
 | GET | `/api/data` | 全量数据（1.5s 缓存；`?fresh` 强制刷新），含 `files` / `mtimes` / `settings` |
-| GET / PUT | `/api/settings` | 看板设置（`goal` 1–100、`aiModel`），存 `vault/.dashboard/settings.json` |
+| GET | `/api/version` | 轻量指纹（`v` / `files`），前端每 5 秒轮询用 |
+| GET / PUT | `/api/settings` | 看板设置（`goal` 1–100、`aiModel`、`aiBaseUrl`、`platforms`、`syncHour`），存 `vault/.dashboard/settings.json`；Secret 与 AI key 只在 `DATA_DIR` |
+| GET / POST | `/api/session`、`/api/login`、`/api/logout` | 登录态查询、登录（限流）、登出 |
+| GET | `/api/auth-check` | 仅给显式反向代理做 `auth_request` 兼容判断 |
+| POST | `/api/note-new` | 按标题新建笔记（带 `requestId` 时幂等） |
 | GET | `/api/note?path=&id=` | 读取单篇原文、mtime、附件 |
 | PUT | `/api/note` | 写正文 / frontmatter（`mtime` 乐观锁） |
 | DELETE | `/api/note` | 删除（先备份到 `.trash/`） |
@@ -274,6 +285,10 @@ notes-vault/
 | POST | `/api/ai/ask` | RAG 问答 |
 | GET | `/api/ai/jobs/:id` | 后台任务进度 |
 | GET | `/api/news` / POST `/api/news/refresh` / POST `/api/news/ideas` | 日报查询、刷新、筛选题 |
+| POST | `/api/publish` | 半自动发布回填（写入平台指标） |
+| POST | `/api/attachment` | 上传附件到 `attachments/`，返回相对路径与新文件名 |
+| GET | `/api/knowledge`、`/api/knowledge/snapshot` | 个人知识库列表与单条剪藏快照 |
+| POST | `/api/platforms/pull` | 手动拉取平台指标（与 AI 任务共用互斥闸） |
 
 ---
 
@@ -341,6 +356,6 @@ npm run build
 npm run test:api
 ```
 
-再跑 `npm run dev` 打开页面，确认：星核与六星座出现、星穹背景缓慢流动；点「作品库」星团星座线展开到每篇内容；点一篇右侧弹出分析栏；三个内页正常；控制台无报错。
+再跑 `npm run dev` 打开页面，确认：星核与七个星座出现、星穹背景缓慢流动；点「作品库」星团星座线展开到每篇内容；点一篇右侧弹出分析栏；五个内页正常；控制台无报错。
 
 涉及 note-api 的改动，`npm run test:api` 已覆盖 `/api/data` 形状、正常写入、409、settings 与删除备份；再按需用示例库手工确认 AI 与热点日报。

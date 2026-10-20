@@ -231,6 +231,16 @@ function retryLater(key) {
   setState(key, {state: 'pending', message: '离线，改动暂存在本页内存 · Offline — kept in this tab'});
 }
 
+// create 的幂等键（与 note-api 的 createMemo 对应）：同一次新建的重试必须复用同一个 id，
+// 否则「服务端已落盘、响应丢了」的重试会在库里写出第二份「标题 2.md」。
+const createIds = new Map();
+const newRequestId = () => (globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + Math.random().toString(36).slice(2))).slice(0, 16);
+const clearCreateId = key => { createIds.delete(key); };
+const requestIdFor = key => {
+  if (!createIds.has(key)) createIds.set(key, newRequestId());
+  return createIds.get(key);
+};
+
 async function send(key, item) {
   if (item.kind === 'settings') {
     return fetch(API + '/api/settings', {
@@ -244,7 +254,7 @@ async function send(key, item) {
   // （新建请求在途时用户又编辑，会排在同一条 chain 后面，等拿到 path 再更新，避免重复建文件。）
   const body = ref
     ? {path: ref.path, title: item.payload.title, body: item.payload.body, fm: item.payload.fm, mtime: ref.mtime}
-    : {title: item.payload.title, body: item.payload.body, fm: item.payload.fm};
+    : {title: item.payload.title, body: item.payload.body, fm: item.payload.fm, requestId: requestIdFor(key)};
   return fetch(API + '/api/' + item.kind, {
     method: 'PUT',
     headers: {'content-type': 'application/json'},
@@ -295,6 +305,7 @@ export function flushKey(key) {
 
     const j = await res.json().catch(() => ({}));
     savedSigs.set(key, item.sig);
+    clearCreateId(key);
     markSelfWrite(); // 登记「这次写盘是本页写的」：自动刷新轮询据此不再弹假的外部改动提示
     attempts.delete(key);
     clearTimeout(retryTimers.get(key)); retryTimers.delete(key);
@@ -411,7 +422,7 @@ export async function deleteDraft(id) {
 
   // 还没在 NAS 上创建过、也没有在途创建：取消排队中的创建即可。
   if (pending?.op === 'create' && !refFor(key) && !chains.has(key)) {
-    outbox.delete(key); attempts.delete(key); states.delete(key); emit();
+    outbox.delete(key); attempts.delete(key); states.delete(key); clearCreateId(key); emit();
     return {ok: true, gone: false};
   }
 
@@ -428,7 +439,7 @@ export async function deleteDraft(id) {
     const res = await fetch(API + '/api/note?path=' + encodeURIComponent(current.path), {method: 'DELETE'});
     if (res.ok || res.status === 404) {
       markSelfWrite(); // 删除也是一次写盘，不登记就会在下一轮轮询里变成假的「外部改动」
-      refs.delete(key); savedSigs.delete(key); attempts.delete(key); states.delete(key); emit();
+      refs.delete(key); savedSigs.delete(key); attempts.delete(key); states.delete(key); clearCreateId(key); emit();
       return {ok: true, gone: true};
     }
     const j = await res.json().catch(() => ({}));

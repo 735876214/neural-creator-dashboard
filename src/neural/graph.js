@@ -319,8 +319,11 @@ export function forceLayout(graph) {
   }
   const rest = {contain: 120, wiki: 95, source: 90, news: 110, publish: 130, tag: 52, mention: 135, resonance: 170, bridge: 240, semantic: 150};
   const strength = {contain: .05, wiki: .06, source: .08, news: .06, publish: .06, tag: .09, mention: .018, resonance: .006, bridge: .004, semantic: .008};
-  for (let it = 0; it < 520; it++) {
-    const alpha = 1 - it / 520;
+  // 迭代数按节点数分档：520 轮全对迭代是 O(N²)，上千节点在手机上要几秒，
+  // 而布局每次数据刷新与每段草稿停顿都会重算——节点多时先降迭代数，观感损失远小于白帧。
+  const iters = N.length > 1200 ? 90 : N.length > 700 ? 160 : N.length > 400 ? 300 : 520;
+  for (let it = 0; it < iters; it++) {
+    const alpha = 1 - it / iters;
     for (let i = 0; i < N.length; i++) for (let j = i + 1; j < N.length; j++) {
       const A = N[i], B = N[j];
       let dx = B.x - A.x, dy = B.y - A.y, d2 = dx * dx + dy * dy || .01;

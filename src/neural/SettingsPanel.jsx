@@ -73,13 +73,13 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
     finally { setBusy(false); }
   };
 
-  return <section className="set-section" aria-label="AI 配置">
+  return <section className="set-section" aria-label="AI 配置 AI settings">
     <h3><Icon name="agent" size={14}/>AI <em>AI</em></h3>
     <p className="quiet">{ai?.enabled
       ? `已启用 · 全局模型 ${ai.model || '（各任务默认）'}`
       : '未启用：在下面填接口地址与 key，保存后即时生效（不用重启）'} <em>{ai?.enabled ? 'Enabled' : 'Disabled — configure below'}</em></p>
     <label>AI 接口地址 <em>Base URL</em>
-      <input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/v1（留空用环境变量）" disabled={readOnly || busy} aria-label="AI 接口地址"/>
+      <input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/v1（留空用环境变量）" disabled={readOnly || busy} aria-label="AI 接口地址 AI endpoint"/>
     </label>
     <label>AI API Key <em>API Key</em>
       <input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder={keyConfigured ? '已配置，留空不改动' : 'sk-…'} disabled={readOnly || busy} aria-label="AI API Key" autoComplete="new-password"/>
@@ -94,12 +94,12 @@ function AiSection({ai, settings, model, modelMsg, onModel, readOnly, onRefresh}
 
     <label>全局模型 <em>Default model</em>
       {models.length
-        ? <select value={model || ''} onChange={e => onModel(e.target.value)} disabled={readOnly} aria-label="全局 AI 模型">
+        ? <select value={model || ''} onChange={e => onModel(e.target.value)} disabled={readOnly} aria-label="全局 AI 模型 Global AI model">
             <option value="">跟随服务端默认模型</option>
             {models.map(m => <option key={m} value={m}>{m}</option>)}
             {model && !models.includes(model) && <option value={model}>{model}（当前）</option>}
           </select>
-        : <input value={model} onChange={e => onModel(e.target.value)} placeholder={modelsErr || '先保存连接以拉取模型列表'} disabled={readOnly} aria-label="全局 AI 模型（手动输入）"/>}
+        : <input value={model} onChange={e => onModel(e.target.value)} placeholder={modelsErr || '先保存连接以拉取模型列表'} disabled={readOnly} aria-label="全局 AI 模型（手动输入） Global AI model (manual)"/>}
     </label>
     {modelsErr && <p className="quiet" role="status">{modelsErr}——也可以在上方直接手动输入模型 id</p>}
     {model && <div className="form-actions"><button className="pill ghost" onClick={() => onModel('')} disabled={readOnly}>清除全局模型 <em>Clear</em></button></div>}
@@ -157,7 +157,7 @@ function PlatformSection({settings, onSaved, readOnly}) {
   };
 
   const configured = !!wx?.configured;
-  return <section className="set-section" aria-label="发布平台">
+  return <section className="set-section" aria-label="发布平台 Publishing platforms">
     <h3><Icon name="send" size={14}/>发布平台 <em>Publish platforms</em></h3>
     <p className="quiet">公众号可自动回拉阅读数据；小红书 / 抖音 / B站个人号没有数据接口，指标在作品页手动补填 <em>WeChat OA auto-pulls; others manual</em></p>
     <div className="form-row">
@@ -166,7 +166,7 @@ function PlatformSection({settings, onSaved, readOnly}) {
     </div>
     <div className="form-row">
       <label>每日同步时间 <em>Daily sync hour</em>
-        <select value={syncHour} onChange={e => setSyncHour(Number(e.target.value))} disabled={readOnly} aria-label="每日同步时间">
+        <select value={syncHour} onChange={e => setSyncHour(Number(e.target.value))} disabled={readOnly} aria-label="每日同步时间 Daily sync time">
           {Array.from({length: 24}, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00 后</option>)}
         </select>
       </label>
@@ -203,11 +203,11 @@ function GoalSection({goal, monthCount, onGoal, readOnly}) {
     finally { setBusy(false); }
   };
 
-  return <section className="set-section" aria-label="月目标">
+  return <section className="set-section" aria-label="月目标 Monthly goal">
     <h3><Icon name="save" size={14}/>月目标 <em>Monthly goal</em></h3>
     <div className="form-row">
       <label>目标篇数 <em>Target</em>
-        <input type="number" min="1" max="100" step="1" value={v} onChange={e => setV(e.target.value)} disabled={busy || readOnly} aria-label="目标篇数"/>
+        <input type="number" min="1" max="100" step="1" value={v} onChange={e => setV(e.target.value)} disabled={busy || readOnly} aria-label="目标篇数 Target post count"/>
       </label>
       <div className="set-status"><span className="set-ok">本月已发布 {monthCount} 篇</span>
         <button type="button" className="pill primary" onClick={save} disabled={busy || readOnly}>保存目标 <em>Save</em></button>
@@ -218,7 +218,7 @@ function GoalSection({goal, monthCount, onGoal, readOnly}) {
 }
 
 // 弹窗主体。settings 用 /api/settings 的脱敏视图；ai 是 /api/data 的 ai 信息。
-export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose, onRefresh, onGoal}) {
+export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose, onRefresh, onGoal, loadError}) {
   const [model, setModel] = useState(settings?.aiModel || '');
   const [modelMsg, setModelMsg] = useState('');
   const [tab, setTab] = useState('ai');
@@ -251,7 +251,9 @@ export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose
   };
 
   return <div className="settings-panel">
-    <nav className="set-tabs" role="tablist" aria-label="设置分类">
+    {loadError && <p className="quiet" role="alert">{loadError} —— 下面显示的是上一次读到的配置，可以直接重试
+      <button type="button" className="pill ghost" onClick={() => onRefresh?.()}>重试 Retry</button></p>}
+    <nav className="set-tabs" role="tablist" aria-label="设置分类 Settings category">
       {tabs.map(([id, zh, en]) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>{zh}<em>{en}</em></button>)}
     </nav>
     {tab === 'ai' && <AiSection ai={ai} settings={settings} model={model} modelMsg={modelMsg} onModel={saveModel} readOnly={readOnly} onRefresh={onRefresh}/>}

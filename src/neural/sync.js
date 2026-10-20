@@ -8,6 +8,15 @@ const API = import.meta.env.VITE_API_BASE ?? '';
 export {pickedModel, setPickedModel} from './persist.js';
 import {pickedModel} from './persist.js';
 
+// 服务端非 2xx 都带 {error: '中文原因'}（如「AI 未启用」「未知模型」）。
+// 只抛 HTTP 状态码会把「怎么修」丢掉，用户只看到「AI relate：HTTP 400」。
+async function fail(res, what) {
+  const j = await res.json().catch(() => ({}));
+  const err = new Error(j.error || (what + '：HTTP ' + res.status));
+  err.status = res.status;
+  return err;
+}
+
 // 可用模型列表（服务端从网关 /v1/models 拉的快照）。失败返回空数组，UI 据此隐藏下拉。
 export async function aiModels() {
   try {
@@ -23,7 +32,7 @@ export async function aiAnalyze(paths, dryRun = false) {
     method: 'POST', headers: {'content-type': 'application/json'},
     body: JSON.stringify({paths, dryRun, model: pickedModel()})
   });
-  if (!res.ok) throw new Error(`AI analyze：HTTP ${res.status}`);
+  if (!res.ok) throw await fail(res, 'AI analyze');
   // 注意：这里只拿到 202 任务号，写 frontmatter 发生在服务端后台任务里，
   // 登记「本页写入」必须等 pollJob 结束之后（见 Analysis.jsx），放在这里会探到写盘前的指纹。
   return res.json();
@@ -34,7 +43,7 @@ export async function aiRelate(threshold = 0.82) {
     method: 'POST', headers: {'content-type': 'application/json'},
     body: JSON.stringify({threshold})
   });
-  if (!res.ok) throw new Error(`AI relate：HTTP ${res.status}`);
+  if (!res.ok) throw await fail(res, 'AI relate');
   return res.json();
 }
 
@@ -43,6 +52,6 @@ export async function aiIdeas(paths) {
     method: 'POST', headers: {'content-type': 'application/json'},
     body: JSON.stringify({paths, model: pickedModel()})
   });
-  if (!res.ok) throw new Error(`AI ideas：HTTP ${res.status}`);
+  if (!res.ok) throw await fail(res, 'AI ideas');
   return res.json(); // 只返回候选选题，不写盘，不必登记本页写入
 }

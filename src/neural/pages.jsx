@@ -8,6 +8,7 @@ import {posts} from './works';
 import {T} from './theme';
 import {useSaveState, draftKey, apiUrl, refreshData, markSelfWrite} from './persist';
 import {getFiles} from '../data/store';
+import {useReducedMotion} from './useReducedMotion';
 import {SaveBadge} from './SaveStatus';
 import {Assistant} from './Assistant';
 import {Modal} from './useModal';
@@ -41,8 +42,8 @@ export function Library({graph, selected, setSelected, onGo, onAction, onModule,
     <div className="library-layout">
       <section className="works-col">
         <div className="toolbar-row">
-          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索作品… Search works" aria-label="搜索作品"/></label>
-          <div className="seg" role="group" aria-label="排序">{[['date', '最新', 'Latest'], ['views', '观看', 'Views'], ['rate', '收藏率', 'Save rate'], ['follows', '涨粉', 'Follows']].map(([k, zh, en]) => <button key={k} className={sort === k ? 'active' : ''} onClick={() => setSort(k)}>{zh}<em>{en}</em></button>)}</div>
+          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索作品… Search works" aria-label="搜索作品 Search posts"/></label>
+          <div className="seg" role="group" aria-label="排序 Sort">{[['date', '最新', 'Latest'], ['views', '观看', 'Views'], ['rate', '收藏率', 'Save rate'], ['follows', '涨粉', 'Follows']].map(([k, zh, en]) => <button key={k} className={sort === k ? 'active' : ''} onClick={() => setSort(k)}>{zh}<em>{en}</em></button>)}</div>
         </div>
         <div className="works-grid">{rows.map((p, i) => {
           const n = graph.index.get('post:' + p.id);
@@ -69,10 +70,13 @@ export function Library({graph, selected, setSelected, onGo, onAction, onModule,
 
 // —— 创作台 Drafts ——
 function MiniGraph({graph, node}) {
+  // SMIL(animateMotion) 不受 CSS 的 animation-* 影响，prefers-reduced-motion 对它完全无效，
+  // 所以这里在 JS 侧关掉沿连线往返的光粒，只留端点与连线（端点已经能表达结构）。
+  const reduced = useReducedMotion();
   const nb = neighbors(graph, node.id);
   const all = [...nb.mutual.map(x => ({...x, dir: 'both'})), ...nb.out.map(x => ({...x, dir: 'out'})), ...nb.back.map(x => ({...x, dir: 'in'}))].slice(0, 16);
   const R = 92, C = 120;
-  return <svg className="mini-graph" viewBox="0 0 240 240" role="img" aria-label={`${all.length} 条连接`}>
+  return <svg className="mini-graph" viewBox="0 0 240 240" role="img" aria-label={`${all.length} 条连接 Connections`}>
     <defs><radialGradient id="mg-core"><stop offset="0" stopColor={T.mini.glow0}/><stop offset=".5" stopColor={T.mini.core}/><stop offset="1" stopColor={T.mini.core} stopOpacity="0"/></radialGradient></defs>
     {all.map((x, i) => {
       const a = i / Math.max(all.length, 1) * Math.PI * 2 - Math.PI / 2, n = graph.index.get(x.id);
@@ -80,8 +84,8 @@ function MiniGraph({graph, node}) {
       return <g key={x.id} style={{'--d': i * 60 + 'ms'}} className={`mg-link dir-${x.dir}`}>
         <line x1={C} y1={C} x2={px} y2={py} stroke={x.dir === 'both' ? T.mini.mutual : KINDS[n.kind].color}/>
         <circle cx={px} cy={py} r={n.kind === 'ghost' ? 3.5 : 4.5} fill={n.kind === 'ghost' ? 'none' : KINDS[n.kind].color} stroke={KINDS[n.kind].color} strokeDasharray={n.kind === 'ghost' ? '2 2' : undefined}/>
-        {x.dir !== 'in' && <circle r="2.2" fill={T.mini.pulseOut} className="mg-pulse"><animateMotion dur={2 + i % 3 * .4 + 's'} repeatCount="indefinite" path={`M${C},${C} L${px},${py}`}/></circle>}
-        {x.dir !== 'out' && <circle r="2" fill={T.mini.pulseIn} className="mg-pulse"><animateMotion dur={2.4 + i % 2 * .5 + 's'} repeatCount="indefinite" path={`M${px},${py} L${C},${C}`}/></circle>}
+        {!reduced && x.dir !== 'in' && <circle r="2.2" fill={T.mini.pulseOut} className="mg-pulse"><animateMotion dur={2 + i % 3 * .4 + 's'} repeatCount="indefinite" path={`M${C},${C} L${px},${py}`}/></circle>}
+        {!reduced && x.dir !== 'out' && <circle r="2" fill={T.mini.pulseIn} className="mg-pulse"><animateMotion dur={2.4 + i % 2 * .5 + 's'} repeatCount="indefinite" path={`M${px},${py} L${C},${C}`}/></circle>}
       </g>;
     })}
     <circle cx={C} cy={C} r="26" fill="url(#mg-core)"/>
@@ -94,6 +98,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
   const area = useRef(null);
   const [suggest, setSuggest] = useState(null);
   const [pick, setPick] = useState(0);
+  const [imgErr, setImgErr] = useState(''); // 插图上传失败的原因：以前只 console.error，界面上完全看不出来
   const saveState = useSaveState(draftKey(draft?.id));
   // 正文被服务端截断（> 6000 字）时这份缓存不是全文：全文还没拉回来就不许编辑，
   // 否则第一个按键就会把截断后的正文写回 .md，6000 字之后的内容永久丢失。
@@ -149,18 +154,21 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
                 const f = e.target.files?.[0]; e.target.value = '';
                 if (!f) return;
                 const err = await insertImageAtCursor(area, f, v => change('body', v));
-                if (err) console.error('[attachment]', err);
+                // 失败只在控制台打一行等于没说：编辑器里既没有 ![[附件名]] 也没有提示，
+                // 用户会以为插图成功，直到重开笔记才发现丢了。
+                setImgErr(err || '');
               }}/>
-              <button type="button" className="icon-btn" disabled={readOnly} onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片"><Icon name="save" size={14}/></button>
+              <button type="button" className="icon-btn" disabled={readOnly} onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片 Insert image"><Icon name="save" size={14}/></button>
             </label>
           </span>
-          {hydrateErr ? <span><Icon name="info" size={13}/>读取全文失败：{hydrateErr} <button type="button" className="pill ghost" onClick={onHydrateRetry}>重试</button></span>
+          {imgErr ? <span role="alert"><Icon name="info" size={13}/>插图失败：{imgErr} <button type="button" className="pill ghost" onClick={() => setImgErr('')}>知道了 Dismiss</button></span>
+            : hydrateErr ? <span><Icon name="info" size={13}/>读取全文失败：{hydrateErr} <button type="button" className="pill ghost" onClick={onHydrateRetry}>重试</button></span>
             : truncated ? <span><Icon name="info" size={13}/>正在载入全文，稍候可编辑 · Loading full text</span>
             : readOnly ? <span><Icon name="info" size={13}/>只读演示 · Read-only</span> : <SaveBadge state={saveState}/>}
         </div>
-        <input className="editor-title" readOnly={locked} value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题"/>
+        <input className="editor-title" readOnly={locked} value={draft.title} onChange={e => change('title', e.target.value)} placeholder="给这篇内容一个标题 Title" aria-label="草稿标题 Draft title"/>
         <div className="editor-area">
-          <textarea ref={area} readOnly={locked} value={draft.body} aria-label="草稿正文" placeholder="开始写… 输入 [[ 链接到其他笔记 Type [[ to link a note"
+          <textarea ref={area} readOnly={locked} value={draft.body} aria-label="草稿正文 Draft body" placeholder="开始写… 输入 [[ 链接到其他笔记 Type [[ to link a note"
             onChange={e => { change('body', e.target.value); check(e.target); }} onClick={e => check(e.target)}
             onKeyDown={e => {
               if (!suggest?.list.length) return;
@@ -169,7 +177,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
               else if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); insert(suggest.list[pick]); }
               else if (e.key === 'Escape') setSuggest(null);
             }}/>
-          {suggest && <div className="suggest glass" role="listbox" aria-label="链接建议">
+          {suggest && <div className="suggest glass" role="listbox" aria-label="链接建议 Link suggestions">
             <p>链接到笔记 <em>Link to note</em>{suggest.q && <> · “{suggest.q}”</>}</p>
             {suggest.list.map((t, i) => <button key={t.id} role="option" aria-selected={i === pick} className={i === pick ? 'on' : ''} onMouseDown={e => { e.preventDefault(); insert(t); }} style={{'--kc': KINDS[t.kind].color}}><i/>{t.short}<small>{KINDS[t.kind].label} {KINDS[t.kind].en}</small></button>)}
             {!suggest.list.length && <span className="none">没有匹配，将成为未创建的笔记 <em>Will be unresolved</em></span>}
@@ -178,7 +186,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         <footer className="editor-foot">
           <span>{(draft.body || '').length} 字 <em>chars</em> · {wiki.length} 个双链 <em>wikilinks</em></span>
           <span className="pub-entry">
-            <select value={pubDefault} onChange={e => setPubPlatform(e.target.value)} aria-label="发布平台" title="发布平台">
+            <select value={pubDefault} onChange={e => setPubPlatform(e.target.value)} aria-label="发布平台 Publishing platforms" title="发布平台">
               {['小红书', '抖音', 'B站', '公众号'].map(k => <option key={k}>{k}</option>)}
             </select>
             <button className="pill" onClick={() => onPublish?.(draft.id, pubDefault)} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : '生成发布包，去平台手动发布'}>
@@ -323,7 +331,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
       <form className="kbar-clip" onSubmit={clip}>
         <Icon name="link" size={15}/>
         <input value={url} onChange={e => setUrl(e.target.value)} placeholder="粘贴推文或文章链接，剪藏并让 AI 分析… Paste a URL to clip & analyze"
-          aria-label="剪藏网址" disabled={readOnly || busy}/>
+          aria-label="剪藏网址 Clip URL" disabled={readOnly || busy}/>
         <button className="pill primary" disabled={readOnly || busy || !url.trim()}>{busy ? '抓取中…' : <><Icon name="save" size={14}/>剪藏 <em>Clip</em></>}</button>
       </form>
       <div className="kbar-actions">
@@ -331,7 +339,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
         <button className="pill ghost" disabled={readOnly} onClick={() => setComposing('制度')}><Icon name="file" size={14}/>新建制度 <em>Policy</em></button>
       </div>
     </section>
-    <div className="seg kcats" role="group" aria-label="按分类浏览">
+    <div className="seg kcats" role="group" aria-label="按分类浏览 Browse by category">
       {CATS.map(([zh, en]) => <button key={zh} className={cat === zh ? 'active' : ''} onClick={() => setCat(zh)}>{zh}<em>{en}</em><b>{items.filter(n => (n.personal?.category || '灵感') === zh).length}</b></button>)}
     </div>
     <div className="kgrid">
@@ -362,7 +370,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
       {!list.length && <div className="empty kempty"><Icon name="personal" size={30}/><p>{cat === '推文' ? '还没有剪藏。粘贴一个链接试试。' : `还没有「${cat}」条目。`}<em>Nothing here yet</em></p></div>}
     </div>
     {composing && <Modal onClose={() => setComposing(null)} label={'新建' + composing + '条目'}>
-        <header><h2>新建{composing} <em>New {composing === '灵感' ? 'spark' : 'policy'}</em></h2><button className="icon-btn" onClick={() => setComposing(null)} aria-label="关闭"><Icon name="close" size={16}/></button></header>
+        <header><h2>新建{composing} <em>New {composing === '灵感' ? 'spark' : 'policy'}</em></h2><button className="icon-btn" onClick={() => setComposing(null)} aria-label="关闭 Close"><Icon name="close" size={16}/></button></header>
         <div className="form">
           <label>标题 <em>Title</em><input autoFocus value={formTitle} onChange={e => setFormTitle(e.target.value)} placeholder={composing === '制度' ? '如：2026 年度安全检查通报' : '一句话标题'}/></label>
           <label>正文 <em>Body</em><textarea rows={8} value={formBody} onChange={e => setFormBody(e.target.value)}/></label>
@@ -409,7 +417,7 @@ export function Methods({graph, readOnly, onGo, onAction, onModule, showToast, o
     <div className="library-layout">
       <section className="works-col">
         <div className="toolbar-row">
-          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索方法笔记… Search notes" aria-label="搜索方法笔记"/></label>
+          <label className="search"><Icon name="search" size={15}/><input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索方法笔记… Search notes" aria-label="搜索方法笔记 Search method notes"/></label>
           <span className="quiet">{items.length} 条 · {mod?.title} <em>{mod?.en}</em></span>
         </div>
         <div className="kgrid">

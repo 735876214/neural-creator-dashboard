@@ -119,6 +119,18 @@ export function classify(rel, dirs, allAsNotes = false) {
 //   rel    —— 文件相对 vault 的真实路径，服务端写回时用它定位文件
 //   tags   —— 笔记的话题，用于推导概念词
 //   counts —— 各模块的篇数，用于进度提示
+// 轻量指纹：/api/version 每 5 秒轮询一次，不能为此把整个 vault 读两遍（几千篇时每次 0.3-0.5s NAS CPU）。
+// 只 walk + stat，不读正文；文件增删/改名/改 mtime 都会让 v 变化。
+export function vaultStamp(dir) {
+  let v = 0, n = 0;
+  // walk() 返回的已经是带 dir 的完整路径；累加 mtime + size 后对 1e15 取模，
+  // 既避免浮点求和在几千篇时丢精度，也不会溢出安全整数。
+  for (const p of walk(dir)) {
+    try { const st = statSync(p); v = (v + Math.round(st.mtimeMs) + st.size) % 1e15; n++; } catch { v = (v + 1) % 1e15; n++; }
+  }
+  return {v: v + n, n};
+}
+
 export function readVault(opts = {}) {
   const vault = opts.vault;
   if (!vault) throw new Error('readVault 需要 vault 参数');
@@ -253,8 +265,16 @@ export function readVault(opts = {}) {
     publishedFrom: dates[0] || '', publishedTo: dates[dates.length - 1] || '', source: '导入自本地笔记'
   };
 
+  // 选题与草稿也必须有上限：这两个桶原先全量返回，几百条就会把 /api/data 推到数 MB，
+  // 并把图谱节点数推进力导向布局的 N² 区间（手机上一帧几百毫秒）。总数留在 counts 里给 UI 提示。
+  const FLOW_LIMIT = 300;
+  const ideasOut = ideas.slice(0, FLOW_LIMIT);
+  const draftsOut = drafts.slice(0, FLOW_LIMIT);
+
   return {
-    works, notes, ideas, drafts, concepts, snapshot,
-    counts: {works: works.length, worksTotal: bucket.works.length, notes: notes.length, notesTotal: bucket.methods.length, ideas: ideas.length, drafts: drafts.length, personal: bucket.personal.length}
+    works, notes, ideas: ideasOut, drafts: draftsOut, concepts, snapshot,
+    counts: {works: works.length, worksTotal: bucket.works.length, notes: notes.length, notesTotal: bucket.methods.length,
+      ideas: ideasOut.length, ideasTotal: bucket.ideas.length, drafts: draftsOut.length, draftsTotal: bucket.drafts.length,
+      personal: bucket.personal.length}
   };
 }

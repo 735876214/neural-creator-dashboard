@@ -97,7 +97,14 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
   if (!isLive() || !aiEnabled || (isPersonal ? !rel : false)) return null;
   const run = (fn, okMsg) => async () => {
     setState(s => ({...s, busy: true, msg: ''}));
-    try { const r = await fn(); setState(s => ({...s, busy: false, ...r, msg: okMsg})); onToast?.(okMsg); }
+    try {
+      const r = await fn();
+      // 动作自己返回的 msg 必须优先：「写回失败」「这篇已经分析过了」「候选选题：…」
+      // 都比笼统的成功文案准确，覆盖掉就等于把失败报成成功。
+      const m = r?.msg || okMsg;
+      setState(s => ({...s, busy: false, ...r, msg: m}));
+      onToast?.(m);
+    }
     catch (e) { setState(s => ({...s, busy: false, msg: '失败：' + e.message})); }
   };
   return <section className="an-section ai-panel">
@@ -126,6 +133,9 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
         markSelfWrite();
         await refreshData().catch(() => {});
         const one = r.result?.find(x => x.id === node.id);
+        // 写回失败时服务端返回 written:false + error：不能当成成功把标签摘要显示出来，
+        // 文件里其实什么都没写，刷新后就消失了。
+        if (one?.written === false) return {msg: '写回失败：' + (one.error || '未知原因') + ' · 可重试'};
         return one ? {tags: one.tags, summary: one.summary} : {};
       }, '标签与摘要已写入笔记')}>打标签 + 摘要 <em>Tag &amp; summarize</em></button>
       {embedOn && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
@@ -156,7 +166,7 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
 function ModelPicker({models, value, onChange}) {
   if (!models.length) return null; // 拉不到列表就隐藏，请求仍用服务端默认模型
   return <select className="model-picker" value={value || ''} onChange={e => onChange(e.target.value || null)}
-    aria-label="选择 AI 模型" title="本次会话使用的 AI 模型">
+    aria-label="选择 AI 模型 Choose AI model" title="本次会话使用的 AI 模型">
     <option value="">默认模型</option>
     {models.map(m => <option key={m.id} value={m.id}>{m.name}{m.reasoning ? '（思考型）' : ''}</option>)}
   </select>;
@@ -177,6 +187,9 @@ function AskBox({graph, node, onGo, aiEnabled}) {
     if (!q.trim() || busy) return;
     setBusy(true);
     // NAS + 配了 AI：走 RAG（带引用）；否则用本地规则检索（不联网）
+    // 整体 try/finally：askGraph 在空库或数据形状异常时可能抛错，
+    // 那会让 setBusy(false) 永远执行不到 —— 发送按钮从此禁用，只能刷新页面。
+    try {
     if (ai) {
       try {
         // 模型选择必须随请求发出去：服务端 pickModel(reqModel, 'ask') 优先用它，
@@ -187,12 +200,17 @@ function AskBox({graph, node, onGo, aiEnabled}) {
         if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
         setRes([{title: 'AI 回答', en: 'AI answer', tone: 'info', text: j.answer || '（空）', refs: j.refs || []}]);
       } catch (e2) {
-        setRes([{title: 'AI 暂时不可用，本地检索结果', en: 'AI offline, local results', tone: 'warn', text: '', items: [], local: askGraph(graph, q, node.id)}]);
+        let local = [];
+        try { local = askGraph(graph, q, node.id); }
+        catch (e3) { setRes([{title: '检索出错', en: 'Search failed', tone: 'warn', text: String(e3.message || e3)}]); return; }
+        setRes([{title: 'AI 暂时不可用，本地检索结果', en: 'AI offline, local results', tone: 'warn', text: '', items: [], local}]);
       }
     } else {
       setRes(askGraph(graph, q, node.id).map(c => ({...c, local: true})));
     }
-    setBusy(false);
+    } catch (e4) {
+      setRes([{title: '检索出错', en: 'Search failed', tone: 'warn', text: String(e4.message || e4)}]);
+    } finally { setBusy(false); }
   };
   return <div className="an-ask">
     {res && <div className="an-ask-res">{res.map((c, i) => <div key={i} className={`ask-card mini tone-${c.tone}`}>
@@ -206,8 +224,8 @@ function AskBox({graph, node, onGo, aiEnabled}) {
       </div>)}
     </div>)}</div>}
     <form onSubmit={submit}>
-      <input value={q} onChange={e => setQ(e.target.value)} placeholder={ai ? '问你的笔记库… Ask your notes (AI)' : '追问这条内容… Ask about this note'} aria-label="提问"/>
-      <button aria-label="提交" disabled={busy}>{busy ? '…' : <Icon name="send" size={15}/>}</button>
+      <input value={q} onChange={e => setQ(e.target.value)} placeholder={ai ? '问你的笔记库… Ask your notes (AI)' : '追问这条内容… Ask about this note'} aria-label="提问 Question"/>
+      <button aria-label="提交 Send" disabled={busy}>{busy ? '…' : <Icon name="send" size={15}/>}</button>
     </form>
     {ai && <div className="an-ask-model"><ModelPicker models={models} value={model} onChange={choose}/></div>}
     <div className="an-ask-foot"><span><Icon name="agent" size={13}/>{ai ? 'AI 问答' : '我的图谱'} <em>{ai ? 'AI Q&A' : 'My graph'}</em></span><span><Icon name="spark" size={13}/>{ai ? 'RAG + 引用' : '本地分析'} <em>{ai ? 'with citations' : 'Local analysis'}</em></span></div>
@@ -399,9 +417,9 @@ function Transect({graph}) {
   const XR = r => x0 + (x1 - x0) * (r - t.r0) / span;
   const Y = d => H - 2 - Math.min(1, d) * (H - 7);
   const area = t.samples.map((v, i) => `${i ? 'L' : 'M'}${(x0 + (x1 - x0) * i / (t.samples.length - 1)).toFixed(1)},${Y(v).toFixed(1)}`).join(' ') + ` L${x1},${H - 1} L${x0},${H - 1} Z`;
-  return <section className="an-transect" aria-label="环系剖面">
+  return <section className="an-transect" aria-label="环系剖面 Ring profile">
     <header><span>环系剖面 <em>Ring transect</em></span><small>环带宽度 = 节点数 <em>band width = count</em></small></header>
-    <svg viewBox={`0 0 ${W} ${H + 24}`} role="img" aria-label="四圈环带的径向密度剖面">
+    <svg viewBox={`0 0 ${W} ${H + 24}`} role="img" aria-label="四圈环带的径向密度剖面 Radial density profile of the four rings">
       <defs><linearGradient id="tr-fill" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0" stopColor="#fff2cd" stopOpacity=".34"/><stop offset="1" stopColor="#b98f3c" stopOpacity=".04"/>
       </linearGradient></defs>
@@ -437,13 +455,18 @@ function MetricsEditor({node}) {
       const rel = getFiles()['post:' + node.post.id];
       const cur = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(rel))).then(r => r.json());
       const fm = {syncedAt: `手动 ${new Date().toISOString().slice(0, 10)}`};
-      for (const [k] of fields) {
+      // 先全量校验再写盘：以前是「边写边提示跳过」，提示随即被「已写入」覆盖，
+      // 用户看到成功、实际只有部分字段进了文件。
+      const bad = [], parsed = {};
+      for (const [k, zh] of fields) {
         const v = String(values[k]).trim();
         if (v === '') continue;
         const n = Number(v.replace(/[,，%]/g, ''));
-        if (isNaN(n)) { setMsg(`「${k}」不是数字，已跳过`); continue; }
-        fm[k] = n;
+        if (isNaN(n)) { bad.push(zh); continue; }
+        parsed[k] = n;
       }
+      if (bad.length) { setMsg(`这些字段不是数字，请修正后再保存：${bad.join('、')} · Not a number`); setBusy(false); return; }
+      Object.assign(fm, parsed);
       const res = await fetch(apiUrl('/api/note'), {
         method: 'PUT', headers: {'content-type': 'application/json'},
         body: JSON.stringify({path: rel, fm, mtime: cur.mtime})
@@ -461,7 +484,7 @@ function MetricsEditor({node}) {
       ? <button className="pill ghost" onClick={() => setOpen(true)}><Icon name="user" size={13}/>补填指标 <em>Edit metrics</em></button>
       : <div className="me-grid">
           {fields.map(([k, zh, en]) => <label key={k}>{zh} <em>{en}</em>
-            <input value={values[k] ?? ''} onChange={e => setValues(v => ({...v, [k]: e.target.value}))} inputMode="decimal" aria-label={zh}/>
+            <input value={values[k] ?? ''} onChange={e => setValues(v => ({...v, [k]: e.target.value}))} inputMode="decimal" aria-label={`${zh} ${en}`}/>
           </label>)}
           <div className="form-actions">
             <button className="pill ghost" onClick={() => { setOpen(false); setMsg(''); }} disabled={busy}>取消 <em>Cancel</em></button>
@@ -475,14 +498,14 @@ function MetricsEditor({node}) {
 export function Analysis({graph, node, module, onGo, onAction, onClose, aiEnabled, embedEnabled}) {
   const a = useMemo(() => analyze(graph, node), [graph, node]);
   const color = KINDS[node.kind].color;
-  return <div className="analysis glass" style={{'--kc': color}} role="region" aria-label={`${node.title} 的分析`}>
+  return <div className="analysis glass" style={{'--kc': color}} role="region" aria-label={`${node.title} 的分析 Analysis`}>
     <div className="an-instrument" aria-hidden="true"/>
     <p className="an-float">分析概览 <em>Analysis overview</em> · {module?.title} {module?.en}</p>
     <div className="an-scroll">
       {module && <Transect graph={graph}/>}
       <header className="an-head">
         <span className="an-cat"><span className="an-cat-icon"><Icon name={module?.icon || 'file'} size={15}/></span>{module?.title}<em>{module?.en}</em></span>
-        <button className="icon-btn" onClick={onClose} aria-label="关闭分析"><Icon name="close" size={15}/></button>
+        <button className="icon-btn" onClick={onClose} aria-label="关闭分析 Close analysis"><Icon name="close" size={15}/></button>
       </header>
       <div className="an-title-row">
         <div>

@@ -14,6 +14,7 @@ import {DiffModal} from './DiffModal';
 import {SettingsPanel} from './SettingsPanel';
 import {insertImageAtCursor} from './NoteModal';
 import {Count} from './Analysis';
+import {useReducedMotion} from './useReducedMotion';
 import {Icon} from './icons';
 import {T} from './theme';
 import * as persist from './persist';
@@ -32,7 +33,10 @@ function Modal({title, en, onClose, children, wide}) {
     const key = e => {
       if (e.key === 'Escape' && !e.isComposing) closeRef.current();
       if (e.key === 'Tab') {
-        const list = [...ref.current.querySelectorAll('button,input,textarea,select,a[href]')].filter(n => !n.disabled);
+        // 与 useModal 的 items() 一致：跳过 .visually-hidden 包裹的控件（如插图用的 file input），
+        // 否则 Tab 会停在一个看不见的输入框上，回车直接弹出文件对话框。
+        const list = [...ref.current.querySelectorAll('button,input,textarea,select,a[href]')]
+          .filter(n => !n.disabled && !n.closest('.visually-hidden') && !(n.offsetWidth === 0 && n.offsetHeight === 0));
         const first = list[0], last = list[list.length - 1];
         if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
@@ -43,7 +47,7 @@ function Modal({title, en, onClose, children, wide}) {
   }, []);
   return <div className="veil" onClick={onClose}>
     <section ref={ref} tabIndex={-1} className={`modal glass ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}>
-      <header><h2>{title} <em>{en}</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭弹窗"><Icon name="close" size={16}/></button></header>
+      <header><h2>{title} <em>{en}</em></h2><button className="icon-btn" onClick={onClose} aria-label="关闭弹窗 Close dialog"><Icon name="close" size={16}/></button></header>
       {children}
     </section>
   </div>;
@@ -56,7 +60,7 @@ function Snapshot({goal, onGoal, ideas, drafts, onIdea, onDraft, onLibrary, mont
   const total = posts.reduce((s, p) => s + p.views, 0);
   const stats4 = [['已发布笔记', 'Published', posts.length], ['账号粉丝', 'Followers', snapshot.followers], ['累计观看', 'Total views', total], ['已知笔记涨粉', 'Known follows', posts.reduce((s, p) => s + (p.follows ?? 0), 0)]];
   const max = Math.max(...posts.map(p => p.views));
-  return <section className="snapshot" aria-label="账号数据快照">
+  return <section className="snapshot" aria-label="账号数据快照 Account snapshot">
     <div className="snapshot-head"><p className="eyebrow">SNAPSHOT <span>账号快照</span></p><p className="quiet">{snapshot.source} · {snapshot.capturedAt} <em>Sample data</em></p></div>
     <div className="kpi-band glass">{stats4.map(([zh, en, v]) => <div key={zh}><span>{zh} <em>{en}</em></span><strong><Count value={v}/></strong></div>)}</div>
     <div className="snapshot-grid">
@@ -69,7 +73,7 @@ function Snapshot({goal, onGoal, ideas, drafts, onIdea, onDraft, onLibrary, mont
       <section className="glass card plan">
         <header><h2>创作计划 <em>Plan</em></h2></header>
         <div className="plan-body">
-          <button className="ring" onClick={onGoal} aria-label={`修改目标，本月 ${monthCount} 篇，目标 ${goal} 篇`}>
+          <button className="ring" onClick={onGoal} aria-label={`修改目标，本月 ${monthCount} 篇，目标 ${goal} 篇 · Edit goal: ${monthCount} this month, target ${goal}`}>
             <svg viewBox="0 0 180 180"><defs><linearGradient id="ring-g" x1="0" x2="1"><stop offset="0" stopColor={T.ring[0]}/><stop offset="1" stopColor={T.ring[1]}/></linearGradient></defs><circle cx="90" cy="90" r="72" className="track"/><circle cx="90" cy="90" r="72" className="value" strokeDasharray={`${Math.min(monthCount / goal, 1) * 452.39} 452.39`}/></svg>
             <span><strong>{monthCount}</strong>/{goal}<small>本月目标 Goal</small></span>
           </button>
@@ -98,7 +102,7 @@ function App() {
   const [settingsRev, setSettingsRev] = useState(0); // AI 配置保存后手动刷新（重新拉 settings + ai info）
   const [aiInfo, setAiInfo] = useState(null);
   const [dataRev, setDataRev] = useState(0);
-  const reduced = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
+  const reduced = useReducedMotion(); // 跟随系统开关变化，不是只在挂载时读一次
   const slowDrafts = useDeferredValue(drafts);
   // 数据仓变化（AI 语义边写回、外部改动自动刷新）时重建图谱，不必刷新页面。
   // 同步把 store 里的选题/草稿搬进本地 state：新增/删除总是跟随；
@@ -219,10 +223,21 @@ function App() {
   // seqRef 防乱序：并发重拉时（弹窗开着保存了多次），只有最新一次的响应允许落盘，
   // 旧快照晚到不会再覆盖新状态。
   const settingsSeq = useRef(0);
+  const [settingsErr, setSettingsErr] = useState(''); // 设置读取失败的原因（保留上次成功的值，不显示成空配置）
   useEffect(() => {
     if (modal !== 'settings') return;
     const seq = ++settingsSeq.current;
-    fetch(persist.apiUrl('/api/settings')).then(r => r.json()).then(j => { if (seq === settingsSeq.current) setSettingsLive(j); }).catch(() => {});
+    // 读失败（401 会话过期 / 500 / 离线）不能当成「没有配置」：那样面板会把公众号显示成未配置、
+    // 月目标回落默认值，用户以为配置丢了就重填。这里保留上一次成功的值，只额外挂一个错误提示。
+    fetch(persist.apiUrl('/api/settings'))
+      .then(async r => {
+        const j = await r.json().catch(() => ({}));
+        if (seq !== settingsSeq.current) return;
+        if (!r.ok) { setSettingsErr(j.error || '读取设置失败（HTTP ' + r.status + '）'); return; }
+        setSettingsErr('');
+        setSettingsLive(j);
+      })
+      .catch(() => { if (seq === settingsSeq.current) setSettingsErr('读取设置失败：连不上笔记库'); });
   }, [modal, settingsRev]); // settingsRev：AI 配置保存后重拉
 
   // AI 启用状态（Assistant / AiPanel / 设置面板的单一事实源）：挂载即拉，保存 AI 配置后重拉。
@@ -355,11 +370,11 @@ function App() {
         <span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="19" height="19"><g stroke={T.logo[0]} strokeWidth=".7" opacity=".85"><path d="M12 5 6.5 9M12 5l6 3.6M6.5 9 7 17.5M12 5v12.4M18 8.6 17 17.6M7 17.5l10 .1"/></g><path fill={T.logo[2]} d="m12 1.6 1.5 4.3 4.3 1.5-4.3 1.5L12 13.2l-1.5-4.3L6.2 7.4l4.3-1.5Z"/><circle cx="7" cy="17.6" r="1.5" fill={T.logo[1]}/><circle cx="17" cy="17.7" r="1.1" fill={T.logo[3]}/><circle cx="18" cy="8.6" r=".9" fill="#ffffff"/></svg></span>
         <span className="brand-text">{CONFIG.brand.name} <b>/ {CONFIG.brand.sub}</b><small>{CONFIG.brand.tagline} · {CONFIG.brand.taglineEn}</small></span>
       </a>
-      <nav aria-label="主导航">{navs.map(([id, zh, en]) => <button key={id} className={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}>{zh}<em>{en}</em></button>)}</nav>
+      <nav aria-label="主导航 Main navigation">{navs.map(([id, zh, en]) => <button key={id} className={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}>{zh}<em>{en}</em></button>)}</nav>
       <div className="top-actions">
         <button className="pill primary" onClick={() => newDraft()} disabled={!live} title={live ? '' : '未连接 NAS，只读'}><Icon name="plus" size={14}/>新建草稿 <em>New</em></button>
-        <button className="avatar set-btn" onClick={() => { setSettingsLive(null); setModal('settings'); }} aria-label="打开设置"><Icon name="gear" size={17}/></button>
-        <button className="avatar" onClick={() => setModal('about')} aria-label={`${snapshot.account}，查看账号与数据来源`}><img src={asset(CONFIG.avatar)} alt=""/></button>
+        <button className="avatar set-btn" onClick={() => { setSettingsLive(null); setModal('settings'); }} aria-label="打开设置 Open settings"><Icon name="gear" size={17}/></button>
+        <button className="avatar" onClick={() => setModal('about')} aria-label={`${snapshot.account}，查看账号与数据来源 · Account and data source`}><img src={asset(CONFIG.avatar)} alt=""/></button>
       </div>
     </header>
 
@@ -436,6 +451,7 @@ function App() {
     {modal === 'settings' && <Modal title="设置" en="Settings" onClose={close} wide>
       <SettingsPanel
         settings={settingsLive}
+        loadError={settingsErr}
         ai={aiInfo}
         goal={goal}
         monthCount={monthPosts.length}
@@ -590,7 +606,7 @@ function ReadModal({node, onClose, editable}) {
       : <div className="reader">
           <p className="quiet">{node.path} · 保存前会比对修改时间，不会静默覆盖别人的改动 <em>Conflict-safe</em></p>
           <div className="reader-edit-row">
-            <textarea ref={editArea} className="reader-edit" value={text} onChange={e => setText(e.target.value)} rows={16} aria-label="编辑笔记正文" autoFocus/>
+            <textarea ref={editArea} className="reader-edit" value={text} onChange={e => setText(e.target.value)} rows={16} aria-label="编辑笔记正文 Edit note body" autoFocus/>
             {editable && <label className="img-insert" title="上传图片并插入 ![[ ]]">
               <input type="file" accept="image/*" className="visually-hidden" onChange={async e => {
                 const f = e.target.files?.[0]; e.target.value = '';
@@ -598,7 +614,7 @@ function ReadModal({node, onClose, editable}) {
                 const err = await insertImageAtCursor(editArea, f, setText);
                 if (err) setErr(err);
               }}/>
-              <button type="button" className="icon-btn" onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片"><Icon name="save" size={14}/></button>
+              <button type="button" className="icon-btn" onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片 Insert image"><Icon name="save" size={14}/></button>
             </label>}
           </div>
           {err && <p className="quiet" role="alert">{err}

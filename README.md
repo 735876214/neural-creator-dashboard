@@ -15,7 +15,7 @@
 
 把你的作品、笔记、选题和草稿，变成一张会呼吸的神经网络：中心是一颗星核，七簇发光的星团代表七个模块（含 AI 热点与个人知识库），点开星团，金色星座线像伞一样展开到每一篇内容；点开一篇，右侧弹出它的全部数据和双向链接。
 
-Turn your works, notes, ideas and drafts into a living neural network — a star core, six glowing clusters, constellation lines spreading to every piece, and a full analysis panel for each one.
+Turn your works, notes, ideas and drafts into a living neural network — a star core, seven glowing clusters, constellation lines spreading to every piece, and a full analysis panel for each one.
 
 > 仓库里的账号、作品、笔记、选题、草稿**全部是虚构的示例数据**。
 
@@ -24,7 +24,7 @@ Turn your works, notes, ideas and drafts into a living neural network — a star
 - **工作台**：星核点亮、日冕呼吸，背景星穹从星核蔓延开，七簇星团（作品库、概念网络、方法库、选题池、创作台、AI 热点、个人知识库）围绕星核游动。
 - **三层交互**：点星团 → 星核退到左侧、七簇列队，星座线扇形展开到该模块的每一篇内容；点内容 → 右侧滑出分析栏（指标、收藏率、出链 / 反链 / 双向、话题、二度关联）；Esc 或面包屑逐层返回。
 - **问你的图谱**：底部对话框可以问「最核心的内容」「双向连接有哪些」「下一篇写什么」「未创建的笔记」，按本地规则检索，不调用 AI；部署模式配好 AI key 后，分析栏另有 AI 问答、打标签与语义关联。
-- **作品库 / 创作台 / 选题池**三个内页：作品卡片与排序、草稿编辑（支持 `[[` 双链补全）、选题转草稿，每个内页顶部带一条星座轨。
+- **五个内页**（作品库 / 创作台 / 选题池 / 知识库 / 方法库）：作品卡片与排序、草稿编辑（支持 `[[` 双链补全）、选题转草稿、知识库剪藏，每个内页顶部带一条星座轨。
 - **深空配色**：深空蓝紫底、金色星座线、星核与星云由代码逐帧自绘，颜色集中在 `src/neural/theme.js` 和 `neural.css` 顶部的 CSS 变量里。
 - **中英双语**界面，尊重系统的「减少动态效果」设置。
 - 纯静态模式只读；连接 note-api（NAS 部署）后，选题、草稿与月目标全部写入 NAS，浏览器不保存业务数据。
@@ -97,8 +97,8 @@ npm run import -- --vault "<你的笔记文件夹>" --account "<账号名>" --fo
 
 | 导出 | 内容 | 关键字段 |
 |---|---|---|
-| `snapshot` | 账号概况 | `account` 账号名、`followers` 粉丝数、`capturedAt` 数据日期、`source` 来源说明 |
-| `posts` / `postContent` | 作品（由 `W(...)` 一次写出） | 指标：`views` `likes` `comments` `saves` `follows` `shares` `impressions` `ctr` `duration`，缺失填 `null`；内容：`body` 正文、`tags` 话题、`media`（`images` / `video`） |
+| `snapshot` | 账号概况 | `account` 账号名、`followers` 粉丝数、`capturedAt` 数据日期、`publishedFrom` / `publishedTo` 发布区间、`source` 来源说明 |
+| `posts` / `postContent` | 作品（由 `W(...)` 一次写出） | 指标：`views` `likes` `comments` `saves` `shares` 缺失填 `0`，`follows` `impressions` `ctr` `duration` 缺失填 `null`；内容：`body` 正文、`tags` 话题、`media`（`images` / `video`） |
 | `notes` | 方法库笔记与 AI 热点日报 | `title`、`path`（方法笔记第二段是子目录；日报为 `00-AI热点/YYYY-MM-DD.md` 并带 `kind: 'news'`）、`body`（可以写 `[[双链]]`）、`tags`（可选） |
 | `seedIdeas` | 选题池 | `title`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note`、`sourceNews`（可选，来源日报日期） |
 | `seedDrafts` | 创作台草稿 | `title`、`body`、`source`（来源选题的 id） |
