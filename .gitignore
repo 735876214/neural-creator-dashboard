@@ -27,7 +27,7 @@ examples/vault/.trash/
 examples/vault/.dashboard/
 .note-api.env
 
-# nginx Basic Auth 密码文件（含密码哈希）
-.htpasswd
-neural-note-api-*.tar.gz
+# 本地开发辅助目录（构建临时目录、部署模式验证用的 vault 副本），都不进版本库
+.tmpbuild/
+.devrun/
 .note-api-local/

@@ -8,6 +8,16 @@ import {apiUrl, refreshData, markSelfWrite} from './persist';
 
 const fmt = (v, d = 0) => v == null || Number.isNaN(v) ? '—' : Number(v).toLocaleString('zh-CN', {minimumFractionDigits: d, maximumFractionDigits: d});
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// AI 面板能处理的内容类型：方法笔记 / AI 热点日报 / 个人知识库 / 作品——都是有正文文件、
+// 且服务端 /api/ai/analyze 的 targets 会遍历到的四类。挂载点与面板内部共用这一份白名单，
+// 两处各写一份必然分叉（挂载点曾漏掉 post，作品分析在界面上根本点不到）。
+const AI_KINDS = new Set(['note', 'news', 'personal', 'post']);
+// KINDS 与 buildGraph 是两处独立维护的清单，天然会漂：拿到未知 kind 时不能直接
+// `KINDS[kind].color`（TypeError → 分析栏白屏），退回 ghost 的配色继续渲染。
+const kindSpec = kind => KINDS[kind] || KINDS.ghost;
+// 指标字段可能缺失（手写 my-data.local.js / 老导入器只保证 views 是数字），
+// 直接相加会得到 NaN，互动率显示成 "NaN%"。
+const num = v => (Number.isFinite(v) ? v : 0);
 
 export function Count({value, decimals = 0, suffix = ''}) {
   const [v, setV] = useState(reducedMotion() ? value : 0);
@@ -50,8 +60,8 @@ function Chip({graph, id, onGo, sub}) {
   if (!n) return null;
   const go = CONTENT.has(n.kind) || n.kind === 'concept';
   const body = <>{n.short || n.title}{sub && <small>{sub}</small>}</>;
-  return go ? <button className="chip" style={{'--kc': KINDS[n.kind].color}} onClick={() => onGo(id)}>{body}</button>
-    : <span className={`chip static ${n.kind === 'ghost' ? 'ghost' : ''}`} style={{'--kc': KINDS[n.kind].color}}>{body}</span>;
+  return go ? <button className="chip" style={{'--kc': kindSpec(n.kind).color}} onClick={() => onGo(id)}>{body}</button>
+    : <span className={`chip static ${n.kind === 'ghost' ? 'ghost' : ''}`} style={{'--kc': kindSpec(n.kind).color}}>{body}</span>;
 }
 
 function Links({graph, node, onGo}) {
@@ -91,10 +101,14 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
   // 不能改变本组件的 hook 数量，否则 React 抛 hooks 数量不匹配。
   const [state, setState] = useState({busy: false, msg: '', tags: null, summary: null, related: null});
   const isPersonal = node.kind === 'personal';
-  // node.id 已经是图谱完整 id（note: / personal: 前缀由 graph.js 加好），这里不能再拼一次，
+  const isPost = node.kind === 'post';
+  // node.id 已经是图谱完整 id（note: / personal: / post: 前缀由 graph.js 加好），这里不能再拼一次，
   // 否则 key 变成 note:note:n1，getFiles() 永远取不到，AI 面板必然失败。
   const rel = getFiles()?.[node.id] || null;
-  if (!isLive() || !aiEnabled || (isPersonal ? !rel : false)) return null;
+  // 只有「有正文文件」的四类内容能分析（见 AI_KINDS）。选题、草稿、话题、概念节点
+  // 服务端不收，面板若渲染出来，点一下只会拿到 0 条任务，被误报成「这篇已经分析过了」。
+  const analyzable = !!rel && AI_KINDS.has(node.kind);
+  if (!isLive() || !aiEnabled || !analyzable) return null;
   const run = (fn, okMsg) => async () => {
     setState(s => ({...s, busy: true, msg: ''}));
     try {
@@ -123,12 +137,16 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
       <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
         // 打标签 + 摘要，写回 frontmatter（tags / summary 键）
         const dry = await aiAnalyze([rel], true);
+        if (!dry.total) return {msg: '这篇没有可分析的内容（服务端没找到对应文件）'};
         if (!dry.todo) return {msg: '这篇已经分析过了'};
         const job = await aiAnalyze([rel]);
         // 服务端在「两步之间已经没待办了」时返回 200 {total:0}，没有 job：这里要兜住，
         // 否则读 job.job.id 抛 TypeError，面板显示一条看不懂的失败。
         if (!job?.job?.id) return {msg: job?.message || '这篇已经分析过了'};
-        const r = await pollJob(job.job.id);
+        // 单篇默认 60 秒够用；但分析是「每条一次模型调用」的串行循环，批量调用时
+        // 前端先超时会让 markSelfWrite/refreshData 被跳过，后台写盘反而被当成外部改动。
+        // 与 relate 一样按任务总量放大上限。
+        const r = await pollJob(job.job.id, Math.max(120, (job.job.total || 1) * 10 + 60));
         // 写盘发生在后台任务里，指纹要等任务结束才稳定：此刻登记 + 刷新，轮询才不会误报外部改动
         markSelfWrite();
         await refreshData().catch(() => {});
@@ -150,10 +168,11 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
         const mine = edges.filter(e => e.a === node.id || e.b === node.id);
         return {related: mine.map(e => ({id: e.a === node.id ? e.b : e.a, sim: e.sim}))};
       }, '语义关联已更新')}>语义关联 <em>Semantic links</em></button>}
-      <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
+      {/* 生成选题走 /api/ai/ideas，服务端只收 d.notes 里的文件：作品（post:）传进去会 404 */}
+      {!isPost && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
         const r = await aiIdeas([rel]);
         return {msg: r.candidates?.length ? '候选选题：' + r.candidates.map(c => c.title).join('；') : '没有生成候选'};
-      }, '选题候选已生成')}>生成选题 <em>Seed ideas</em></button>
+      }, '选题候选已生成')}>生成选题 <em>Seed ideas</em></button>}
     </div>}
     {state.busy && <p className="quiet">AI 正在处理…</p>}
     {state.msg && <p className="quiet">{state.msg}</p>}
@@ -271,12 +290,15 @@ function analyze(graph, node) {
 
   if (node.kind === 'post') {
     const P = C.filter(n => n.kind === 'post').sort((a, b) => String(a.date).localeCompare(String(b.date)));
-    const p = node.post, rate = x => x.post.views ? x.post.saves / x.post.views * 100 : null;
+    const p = node.post, rate = x => (num(x.post.views) ? num(x.post.saves) / num(x.post.views) * 100 : null);
     const r = rate(node), others = P.filter(x => x !== node).map(rate).filter(x => x != null);
     const avg = others.reduce((s, x) => s + x, 0) / (others.length || 1);
     const rank = [...P].sort((a, b) => b.post.views - a.post.views).indexOf(node) + 1;
-    const engage = p.views ? (p.likes + p.comments + p.saves + p.shares) / p.views * 100 : null;
+    const engage = num(p.views) ? (num(p.likes) + num(p.comments) + num(p.saves) + num(p.shares)) / num(p.views) * 100 : null;
     const ideas = latent(graph, node.id).filter(x => graph.index.get(x.id).kind === 'idea');
+    // 发布接口会把来源选题的稳定 id 写进作品 frontmatter（sourceIdeaId），发布后草稿文件被移走，
+    // 标题回连不再成立；这里直接按 id 找回选题，图上的 source 边也来自同一个字段（graph.js）。
+    const srcIdea = p.sourceIdeaId ? graph.index.get('idea:' + p.sourceIdeaId) : null;
     const fromDraft = [...nb.out, ...nb.back, ...nb.mutual].filter(x => graph.index.get(x.id).kind === 'draft').map(x => graph.index.get(x.id));
     return {
       badge: p.platform ? [`已发布 · ${p.platform}`, p.url ? 'Published · linked' : 'Published'] : ['已发布', 'Published'],
@@ -291,6 +313,7 @@ function analyze(graph, node) {
         ['表现排名', 'Ranking', `观看第 ${rank}/${P.length} 名；收藏率${r >= avg ? '高于' : '低于'}其他作品均值 ${Math.abs(r - avg).toFixed(1)} 个百分点。`, r >= avg ? 'gold' : 'info'],
         ...(p.platform ? [['发布来源', 'Source', `${p.platform}${p.url ? ' · ' + String(p.url).replace(/^https?:\/\/(www\.)?/, '').slice(0, 48) : ''}${p.syncedAt ? `（指标 ${p.syncedAt}）` : ''}`, p.url ? 'gold' : 'info']] : []),
         ...(fromDraft.length ? [['来自草稿', 'From draft', `同名草稿「${fromDraft.slice(0, 3).map(x => x.short || x.title).join('、')}」已进入作品库。`, 'gold']] : []),
+        ...(p.sourceIdeaId ? [['来源选题', 'From idea', srcIdea ? `由选题「${srcIdea.short || srcIdea.title}」发布。` : `来源选题 ${p.sourceIdeaId} 已不在选题池中（可能已删除）。`, srcIdea ? 'gold' : 'warn']] : []),
         ...resonance,
         ...(ideas.length ? [['可延伸选题', 'Next ideas', ideas.slice(0, 2).map(x => `「${graph.index.get(x.id).short}」（共享：${x.via.join('、')}）`).join('；'), 'info']] : []),
         ...(p.updated ? [['数据时点', 'Snapshot', p.updated, 'muted']] : [['数据时点', 'Snapshot', '读取时累计值，缺失项保留为「—」。', 'muted']])
@@ -313,10 +336,14 @@ function analyze(graph, node) {
     const I = C.filter(n => n.kind === 'idea');
     const reach = x => 100 * latent(graph, x.id).length / Math.max(1, C.length - 1);
     const lat = latent(graph, node.id);
-    const posts = lat.filter(x => graph.index.get(x.id).kind === 'post');
-    const notes = lat.filter(x => graph.index.get(x.id).kind === 'note').length + nb.mutual.filter(x => graph.index.get(x.id).kind === 'note').length;
-    const hasDraft = [...nb.out, ...nb.back, ...nb.mutual].some(x => graph.index.get(x.id).kind === 'draft');
-    const news = [...nb.out, ...nb.back, ...nb.mutual].filter(x => graph.index.get(x.id).kind === 'news').map(x => graph.index.get(x.id));
+    // 直连邻居（含 source/publish/news 这些不是 mention/tag 的边）必须一起算：
+    // 只统计 latent() 时，图上明明连着来源作品，卡片却写「关联作品 0」。
+    const direct = [...nb.out, ...nb.back, ...nb.mutual].map(x => graph.index.get(x.id)).filter(Boolean);
+    const posts = [...direct.filter(x => x.kind === 'post'), ...lat.map(x => graph.index.get(x.id)).filter(x => x?.kind === 'post')]
+      .filter((x, i, arr) => arr.findIndex(y => y.id === x.id) === i);
+    const notes = new Set([...direct.filter(x => x.kind === 'note'), ...lat.map(x => graph.index.get(x.id)).filter(x => x?.kind === 'note')].map(x => x.id)).size;
+    const hasDraft = [...nb.out, ...nb.back, ...nb.mutual].some(x => graph.index.get(x.id)?.kind === 'draft');
+    const news = [...nb.out, ...nb.back, ...nb.mutual].filter(x => graph.index.get(x.id)?.kind === 'news').map(x => graph.index.get(x.id));
     return {
       badge: [`优先级 ${node.idea.priority}`, 'Priority'], status: `${node.idea.status} · ${node.idea.platform}`,
       action: hasDraft ? ['打开草稿', 'Open draft', {type: 'ideaToDraft', idea: node.idea}] : ['转为草稿', 'To draft', {type: 'ideaToDraft', idea: node.idea}],
@@ -497,7 +524,7 @@ function MetricsEditor({node}) {
 
 export function Analysis({graph, node, module, onGo, onAction, onClose, aiEnabled, embedEnabled}) {
   const a = useMemo(() => analyze(graph, node), [graph, node]);
-  const color = KINDS[node.kind].color;
+  const color = kindSpec(node.kind).color;
   return <div className="analysis glass" style={{'--kc': color}} role="region" aria-label={`${node.title} 的分析 Analysis`}>
     <div className="an-instrument" aria-hidden="true"/>
     <p className="an-float">分析概览 <em>Analysis overview</em> · {module?.title} {module?.en}</p>
@@ -528,7 +555,7 @@ export function Analysis({graph, node, module, onGo, onAction, onClose, aiEnable
       <Insights items={a.insights}/>
       {node.tags?.length > 0 && <section className="an-section"><h3>话题标签 <em>Topics</em></h3><div className="chip-row">{node.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div></section>}
       {node.kind === 'post' && <MetricsEditor node={node}/>}
-      {(node.kind === 'note' || node.kind === 'personal') && <AiPanel graph={graph} node={node} onGo={onGo} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/>}
+      {AI_KINDS.has(node.kind) && <AiPanel graph={graph} node={node} onGo={onGo} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/>}
       <Links graph={graph} node={node} onGo={onGo}/>
     </div>
     <AskBox graph={graph} node={node} onGo={onGo} aiEnabled={aiEnabled}/>

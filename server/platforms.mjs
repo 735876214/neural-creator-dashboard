@@ -10,16 +10,24 @@
 //
 // 环境变量：WECHAT_APPID / WECHAT_SECRET（公众号）、SYNC_HOUR（默认 21 点）、SYNC_TZ_OFFSET（默认 8）、
 // PLATFORM_SYNC_CRON=0 关闭定时任务。
-import {readFileSync, existsSync} from 'node:fs';
+import {readFileSync, statSync} from 'node:fs';
 import {join} from 'node:path';
-import {parse, pick} from './vault.mjs';
+import {parse} from './vault.mjs';
 
-const SYNC_HOUR_DEFAULT = Number(process.env.SYNC_HOUR || 21);
+// SYNC_HOUR 填成 '21:00' / 'abc' 时 Number() 得到 NaN，而 `hours < NaN` 恒假 —— 定时任务会
+// 变成「启动即同步」，与「等到 21 点」完全相反。非法值回退默认并留一行日志。
+const parsedHour = Number(process.env.SYNC_HOUR);
+const SYNC_HOUR_DEFAULT = Number.isFinite(parsedHour) && parsedHour >= 0 && parsedHour <= 23 ? parsedHour : 21;
+if (process.env.SYNC_HOUR && SYNC_HOUR_DEFAULT !== parsedHour) console.error(`[platforms] SYNC_HOUR=${process.env.SYNC_HOUR} 不是 0–23 的数字，改用 ${SYNC_HOUR_DEFAULT}`);
 // 容器默认 UTC（Dockerfile 不装 tzdata），直接用 getHours() 会让「21:00 后同步」变成北京时间次日 05:00。
 // 用显式偏移而不是 TZ 环境变量：不依赖系统 zoneinfo，也不需要 tzdata 包。
 const TZ_OFFSET_RAW = Number(process.env.SYNC_TZ_OFFSET);
 const TZ_OFFSET = Number.isFinite(TZ_OFFSET_RAW) ? TZ_OFFSET_RAW : 8;
 const localNow = (ms = Date.now()) => new Date(ms + TZ_OFFSET * 3600_000);
+
+// 微信侧网络黑洞（NAS 出口被墙 / 对端挂住连接）时 undici 默认要等 300s：同步期间整站 AI 与日报
+// 都被同一把闸挡住，30 篇的批量最坏能把闸占几小时。所有外部请求都必须带自己的超时。
+const WX_TIMEOUT = 15_000;
 const WECHAT_APPID_ENV = process.env.WECHAT_APPID || '';
 const WECHAT_SECRET_ENV = process.env.WECHAT_SECRET || '';
 
@@ -64,18 +72,33 @@ export const syncHour = () => {
 };
 
 // —— 公众号 stable_token（缓存到过期前 5 分钟） ——
-let wxToken = {token: '', expires: 0};
+let wxToken = {token: '', expires: 0, appid: ''};
+let wxTokenFailAt = 0; // 取 token 失败后的 60s 冷却：批量同步里每篇都会重试一次，会直接撞 45009
 async function wechatToken() {
   const creds = wechatCreds(credsRef.readSettings);
-  if (!creds) throw new Error('未配置公众号凭据：在设置面板填 AppID / Secret，或配服务端环境变量');
+  if (!creds) throw fatalAuth('未配置公众号凭据：在设置面板填 AppID / Secret，或配服务端环境变量');
   if (wxToken.token && Date.now() < wxToken.expires && wxToken.appid === creds.appid) return wxToken.token;
+  if (Date.now() - wxTokenFailAt < 60_000) throw fatalAuth('公众号 token 刚刚获取失败，60 秒后再试');
   const res = await fetch('https://api.weixin.qq.com/cgi-bin/stable_token', {
     method: 'POST', headers: {'content-type': 'application/json'},
-    body: JSON.stringify({grant_type: 'client_credential', appid: creds.appid, secret: creds.secret})
+    body: JSON.stringify({grant_type: 'client_credential', appid: creds.appid, secret: creds.secret}),
+    signal: AbortSignal.timeout(WX_TIMEOUT)
   });
   const j = await res.json().catch(() => ({}));
-  if (!j.access_token) throw new Error('公众号 token 获取失败：' + (j.errmsg || 'HTTP ' + res.status));
-  wxToken = {token: j.access_token, expires: Date.now() + (Number(j.expires_in) - 300) * 1000, appid: creds.appid};  return wxToken.token;
+  if (!j.access_token) {
+    wxTokenFailAt = Date.now();
+    throw fatalAuth('公众号 token 获取失败：' + (j.errmsg || 'HTTP ' + res.status));
+  }
+  wxToken = {token: j.access_token, expires: Date.now() + (Number(j.expires_in) - 300) * 1000, appid: creds.appid};
+  return wxToken.token;
+}
+
+// 凭据 / token 类失败是整批共有的：单篇吞掉它会让批量同步退化成「3 天窗口 × N 篇各自换一次 token」，
+// 直接把微信侧的取 token 频率限制撞穿，而用户只看到 N 条一样的错。用标记让上层中止整批。
+function fatalAuth(message) {
+  const e = new Error(message);
+  e.fatal = 'auth';
+  return e;
 }
 
 // 公众号数据统计接口的时间范围是 T-1：查最近 3 天，取「已发表图文」汇总里
@@ -91,14 +114,24 @@ async function fetchWxMetrics({platformId, url}, {fetchImpl = fetch} = {}) {
     const begin = ymd(day), end = ymd(new Date(day.getTime() + 86400_000));
     const res = await fetchImpl(`https://api.weixin.qq.com/datacube/getarticletotal?access_token=${encodeURIComponent(token)}`, {
       method: 'POST', headers: {'content-type': 'application/json'},
-      body: JSON.stringify({begin_date: begin, end_date: end})
+      body: JSON.stringify({begin_date: begin, end_date: end}),
+      signal: AbortSignal.timeout(WX_TIMEOUT)
     });
     const j = await res.json().catch(() => ({}));
     // 权限/限流类错误（48001 无 datacube 权限、45009 超限、40001 token 失效）必须原样抛出：
     // 当成「没有数据」会让用户反复重试，永远定位不到真正原因。
     if (!res.ok || j.errcode) {
-      if (j.errcode === 40001 || j.errcode === 42001) wxToken = {token: '', expires: 0}; // token 失效，下次重取
-      throw new Error('公众号数据接口错误：' + (j.errmsg || 'HTTP ' + res.status) + (j.errcode ? `（errcode ${j.errcode}）` : ''));
+      // token / 权限类错误是整批共有的：标成 fatal，让调用方中止整批而不是逐篇重取 token。
+      if (j.errcode === 40001 || j.errcode === 42001) {
+        wxToken = {token: '', expires: 0, appid: ''};
+        throw fatalAuth('公众号 token 已失效：' + (j.errmsg || '请重新获取'));
+      }
+      if (j.errcode === 48001 || j.errcode === 45009 || j.errcode === 40013) {
+        throw fatalAuth('公众号数据接口错误：' + (j.errmsg || 'HTTP ' + res.status) + (j.errcode ? `（errcode ${j.errcode}）` : ''));
+      }
+      // access_token 在 URL query 上：错误文本里绝不能把整条 URL 打进去（会跟着 job.error 回浏览器）
+      const detail = String(j.errmsg || 'HTTP ' + res.status).replace(/access_token=[^&\s]+/g, 'access_token=***');
+      throw new Error('公众号数据接口错误：' + detail + (j.errcode ? `（errcode ${j.errcode}）` : ''));
     }
     if (!Array.isArray(j.list)) continue;
     for (const item of j.list) {
@@ -116,13 +149,31 @@ export async function pullOne(post, rel, vaultDir, io = {}) {
   const platform = post.platform;
   if (!platform) return {pullable: false, updated: false, error: '作品没有 platform'};
   const cfg = PLATFORM_PULLABLE[platform];
+  // 公众号的 pullable 是静态 true，真正的开关在凭据上：没配凭据时要说「没配」，不能逐篇报
+  // 「失败 N 次」——前端会把「3 篇失败：未配置凭据」当成同步出错。
+  if (platform === '公众号' && !wxPullable()) {
+    return {pullable: false, updated: false, error: '未配置凭据：在设置面板填公众号 AppID / Secret，或配服务端环境变量'};
+  }
   if (!cfg?.pullable) return {pullable: false, updated: false, error: cfg?.note || '该平台不支持自动拉取'};
   let metrics;
   try { metrics = await fetchWxMetrics(post); }
-  catch (e) { return {pullable: true, updated: false, error: e.message}; }
+  catch (e) {
+    // 凭据 / token 类是整批共有的失败：原样上抛，让 pullAll 与路由立刻中止整批
+    if (e.fatal) throw e;
+    return {pullable: true, updated: false, error: e.message};
+  }
   if (!metrics) return {pullable: true, updated: false, error: '平台侧最近 3 天没有返回数据'};
   const abs = join(vaultDir, rel);
-  const before = readFileSync(abs, 'utf8');
+  // 读文本与取 mtime 必须贴着写回：这里现取 mtime，writeExisting 的乐观锁才真的能拦住
+  // 「拉取期间别处改了这篇」。文件在此期间被外部删除/改名时报可读原因，不能让整批中断。
+  let before = '';
+  let mtime = null;
+  try {
+    mtime = mtimeOf(abs);
+    before = readFileSync(abs, 'utf8');
+  } catch (e) {
+    return {pullable: true, updated: false, error: '读取作品失败：' + (e.code === 'ENOENT' ? '文件已不存在' : e.message)};
+  }
   const num = v => (v == null || isNaN(Number(v)) ? undefined : Math.round(Number(v) * 10) / 10);
   const fm = {};
   // 键名复用：文件里已有中文键（观看）就沿用中文，否则写英文键
@@ -134,19 +185,25 @@ export async function pullOne(post, rel, vaultDir, io = {}) {
   // 公众号数据统计接口只公开阅读类字段；点赞 / 分享 / 收藏等公开细分字段缺失就不写（保留「—」）。
   const patch = Object.fromEntries(Object.entries(fm).filter(([, v]) => v !== undefined));
   if (!Object.keys(patch).length) return {pullable: true, updated: false, error: '平台数据为空'};
-  writeExisting(rel, {fm: patch, mtime: mtimeOf(abs)});
+  writeExisting(rel, {fm: patch, mtime});
   return {pullable: true, updated: true, metrics: patch};
 }
 
-// 遍历作品库：有 platform + url 的作品逐篇尝试。io 注入 loadData 风格的数据与写回函数。
+// 遍历作品库：有 platform + url 的作品逐篇尝试。
+// 单篇失败只记录在 results 里，不中断整批；但 fatal（凭据 / token）会立刻中止并把原因带回。
 export async function pullAll(data, vaultDir, io = {}) {
   const targets = data.works.filter(w => w.post.platform && w.post.url);
   const results = [];
   for (const w of targets) {
-    const r = await pullOne(w.post, w.rel, vaultDir, io);
-    results.push({path: w.rel, title: w.post.title, platform: w.post.platform, ...r});
+    try {
+      const r = await pullOne(w.post, w.rel, vaultDir, io);
+      results.push({path: w.rel, title: w.post.title, platform: w.post.platform, ...r});
+    } catch (e) {
+      if (e.fatal) return {results, aborted: true, error: e.message};
+      results.push({path: w.rel, title: w.post.title, platform: w.post.platform, pullable: true, updated: false, error: e.message});
+    }
   }
-  return results;
+  return {results, aborted: false};
 }
 
 // 每天 SYNC_HOUR 点后每小时检查一次；当天已同步过（任一作品 frontmatter 有今天的 syncedAt）就跳过。
@@ -160,8 +217,19 @@ export function startPlatformsCron(runOnce, {intervalMs = 30 * 60_000} = {}) {
     const today = ymd(now);
     if (lastRunYmd === today) return;
     running = true;
-    try { await runOnce(); lastRunYmd = today; console.error('[platforms] 平台指标同步完成'); }
-    catch (e) { console.error('[platforms] 同步失败：', e.message); }
+    try {
+      // runOnce 返回 {ok, failed} 统计：全部失败时**不能**置 lastRunYmd —— 否则当天剩余
+      // 20 多次 tick 全被跳过，一整天不再同步，日志里只剩一行「同步失败」。
+      const stats = await runOnce();
+      const ok = Number(stats?.ok) || 0;
+      const failed = Number(stats?.failed) || 0;
+      if (ok > 0 || failed === 0) {
+        lastRunYmd = today;
+        console.error(`[platforms] 平台指标同步完成：${ok} 篇更新，${failed} 篇失败`);
+      } else {
+        console.error(`[platforms] 平台指标同步全部失败（${failed} 篇），等下一次重试`);
+      }
+    } catch (e) { console.error('[platforms] 同步失败：', e.message); }
     finally { running = false; }
   };
   setInterval(tick, intervalMs).unref();
@@ -169,10 +237,3 @@ export function startPlatformsCron(runOnce, {intervalMs = 30 * 60_000} = {}) {
 }
 
 // —— 供路由使用的便捷封装：是否存在可拉取能力（未配凭据时 /api/platforms/pull 返回逐篇 pullable:false） ——
-export const hasPuller = () => wxPullable();
-
-// 供读取作品 frontmatter 用（pick 透出，与 vault.mjs 同源）
-export {pick};
-
-// 存在性检查（文件可能被外部删除）
-export const fileExists = existsSync;

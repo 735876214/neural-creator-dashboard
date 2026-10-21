@@ -245,6 +245,9 @@ export function SettingsPanel({settings, ai, goal, monthCount, readOnly, onClose
     try {
       await saveSettings({aiModel: id || null});
       savedModelRef.current = undefined; // 保存落定，恢复跟随外部变化
+      // 设置是 AI 模型的单一事实源：不刷新 store，分析栏/助手发请求时 pickedModel() 读到的
+      // 还是旧模型（旧模型下线就直接 400 未知模型）。onSaved 是空函数，这里自己拉一次。
+      await refreshData().catch(() => {});
       onRefresh?.(); // 重拉 aiInfo / settings——头部「已启用 · 全局模型 X」即时反映新模型
     }
     catch (e) { setModel(prev); savedModelRef.current = undefined; setModelMsg('模型保存失败：' + e.message); } // 回滚 UI 并展示错误

@@ -37,7 +37,7 @@
 ## 数据字段（`src/data/*.js` 的导出）
 
 - `snapshot`：`account`、`followers`、`capturedAt`、`publishedFrom`、`publishedTo`、`source`
-- `posts`：`id`、`title`、`date`（`YYYY-MM-DD HH:mm`）、`views`（数字，缺失写 0）、`likes`、`comments`、`saves`、`shares`、`follows`、`impressions`、`ctr`、`duration`（缺失写 `null`）、`platform` / `url` / `platformId` / `syncedAt`（发布来源，半自动发布回填，均可选）
+- `posts`：`id`、`title`、`date`（`YYYY-MM-DD HH:mm`）、`views`（数字，缺失写 0）、`likes`、`comments`、`saves`、`shares`、`follows`、`impressions`、`ctr`、`duration`（缺失写 `null`）、`platform` / `url` / `platformId` / `syncedAt`（发布来源，半自动发布回填，均可选）、`sourceIdeaId`（发布时的来源选题稳定 id，`/api/publish` 写入，可选；图谱靠它补上「选题 → 作品」这一跳）、`sourceDraftId`（来源草稿 id，仅作追溯用，图谱不消费——草稿文件发布后已移进作品库，节点不存在）
 - `postContent`：与 `posts` 按 `title` 对应，`body`、`tags`、`media`（`images` / `video`）
 - `notes`：`id`、`title`、`path`（方法笔记形如 `05-方法库 methods/<子目录>/<文件名>.md`；AI 热点日报形如 `00-AI热点/YYYY-MM-DD.md` 并带 `kind: 'news'`）、`body`、`tags`（可选，frontmatter 与正文话题）；个人知识库条目形如 `06-个人知识库/<文件名>.md` 并带 `kind: 'personal'`，可选 `category`（灵感/制度/推文）、`url`、`domain`、`author`、`clipped`、`summary`、`keyPoints`、`snapshot`
 - `seedIdeas`：`id`（老数据是序号数字，看板里新建的是稳定字符串 id，两者都可）、`title`、`platform`、`priority`（高 / 中 / 低）、`status`（待写 / 待扩展 / 已转草稿）、`note`、`sourceNews`（可选，自动生成时的来源日报日期 `YYYY-MM-DD`）

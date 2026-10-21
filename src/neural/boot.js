@@ -10,7 +10,7 @@
 //
 // 登录：note-api 开了登录时，/api/session 会返回 required:true / authenticated:false，
 // 这时跳转到独立的 login.html；登录成功后再回到当前页。纯静态模式没有这个接口，直接跳过。
-import {setApiData, setError, beginLoad} from '../data/store.js';
+import {setApiData, setError, beginLoad, ARRAY_FIELDS} from '../data/store.js';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 const EXPECT_API = import.meta.env.VITE_API_BASE !== undefined;
@@ -118,7 +118,10 @@ async function boot() {
   }
   try {
     if (!json) throw lastErr || new Error('读不到笔记库');
-    if (!Array.isArray(json.posts)) throw new Error('note-api 返回的数据形状不对');
+    // 五个数组字段是图谱推导的输入：任何一个不是数组都说明这不是一份可用的 /api/data
+    // （老版本 note-api、中间层裁剪、序列化失败都会这样），走回退分支而不是带着残缺数据渲染。
+    const missing = ARRAY_FIELDS.filter(k => k !== 'semantic' && !Array.isArray(json[k]));
+    if (missing.length) throw new Error(`note-api 返回的数据形状不对（缺少 ${missing.join('、')}）`);
     setApiData(json, seq);
   } catch (e) {
     if (e.status === 401 && authRequired) { redirectToLogin(); return; }

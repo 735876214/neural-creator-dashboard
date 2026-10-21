@@ -24,6 +24,12 @@ import './neural.css';
 // 业务数据只存 NAS（部署模式）；纯静态模式只读，不写 localStorage。
 // 保存状态、离线重试、409 冲突都由 persist.js 统一处理。
 
+// 新建选题/草稿的稳定 id：写成 fm.id 一起落盘，之后 /api/data 回来的 id 与本地一致，
+// 刷新合并不会把这条新记录当成「服务端已删除」丢掉。绝不能从既有 id 推算
+// （Math.max(0, ...ideas.map(i => i.id)) 遇到 note-api 写的短 uuid 就是 NaN，
+// 第二条新选题会带着上一个 key 去 PUT，把第一条的文件改名覆盖）。
+const newLocalId = () => (globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + Math.random().toString(36).slice(2))).slice(0, 8);
+
 function Modal({title, en, onClose, children, wide}) {
   const ref = useRef(null), closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -110,6 +116,10 @@ function App() {
   useEffect(() => subscribeData(() => {
     setDataRev(v => v + 1);
     const d = getData();
+    // 位置 id（i3 / draft-3）是「排序后第 N 个」，外部新建/删除一篇就会让同一个 id
+    // 指向另一个文件。rel 相同才算「还是同一条」：否则把本地未落盘的编辑盖到新记录上，
+    // 用户看到的是 A 的标题配 B 的备注（写回仍按各自 path + mtime 走，不会写错文件）。
+    const sameRecord = (local, fresh) => !local?.rel || !fresh?.rel || local.rel === fresh.rel;
     if (isLive()) {
       if (Array.isArray(d.seedIdeas)) setIdeas(list => {
         const byId = new Map(list.map(x => [x.id, x]));
@@ -117,7 +127,7 @@ function App() {
         // 只有「本地还有未落盘改动」的条目才能在服务端快照里消失后继续留着；
         // 否则外部（Obsidian / 另一台设备）删掉的选题会一直复活，再编辑还会被写回 vault。
         const kept = list.filter(x => !freshIds.has(x.id) && persist.isPending(persist.ideaKey(x.id)));
-        return [...(d.seedIdeas || []).map(x => (byId.get(x.id) && persist.isPending(persist.ideaKey(x.id))) ? byId.get(x.id) : x), ...kept];
+        return [...(d.seedIdeas || []).map(x => (byId.get(x.id) && persist.isPending(persist.ideaKey(x.id)) && sameRecord(byId.get(x.id), x)) ? byId.get(x.id) : x), ...kept];
       });
       if (Array.isArray(d.seedDrafts)) setDrafts(list => {
         const freshIds = new Set((d.seedDrafts || []).map(x => x.id));
@@ -125,7 +135,7 @@ function App() {
         const kept = list.filter(x => !freshIds.has(x.id) && persist.isPending(persist.draftKey(x.id)));
         return [...(d.seedDrafts || []).map(x => {
           const prev = list.find(y => y.id === x.id);
-          return (prev && persist.isPending(persist.draftKey(x.id))) ? prev : x;
+          return (prev && persist.isPending(persist.draftKey(x.id)) && sameRecord(prev, x)) ? prev : x;
         }), ...kept];
       });
     }
@@ -263,7 +273,7 @@ function App() {
 
   function newDraft(title = '未命名草稿', body = '', source = null, sourceTitle = null) {
     if (!live) { setToast('未连接 NAS，当前为只读演示 · Read-only (no NAS)'); return; }
-    const id = 'draft-' + Date.now();
+    const id = newLocalId();
     const draft = {id, title, body, source};
     setDrafts(d => [draft, ...d]);
     setActive(id); setPage('drafts'); setModal(null);
@@ -346,7 +356,9 @@ function App() {
     if (!live) { setToast('未连接 NAS，当前为只读演示 · Read-only (no NAS)'); return; }
     const path = getFiles()['draft:' + draft.id] || persist.refPath(persist.draftKey(draft.id)) || null;
     if (!path) { setToast('草稿还没同步到 NAS，等保存完成后再发布 · Not synced yet'); return; }
-    setModal({toPost: {path, title: draft.title}});
+    // 按 id 记，不按标题：默认标题都是「未命名草稿」，两条同名草稿会让发布表单拿到别人的字段
+    // （path 来自被点的那条、正文来自第一条），发布出去的内容和用户看到的不是同一篇。
+    setModal({toPost: {path, title: draft.title, draftId: draft.id}});
   }
   // 回填保存：更新草稿对象并走同一条防抖保存管线（platform/url/platformId/syncedAt 随 fm 落盘）
   function savePublishBack(published) {
@@ -379,7 +391,9 @@ function App() {
     </header>
 
     {live
-      ? <SyncBanner items={saveItems} onRetry={persist.retry} onOverwrite={persist.overwriteConflict} onRefresh={() => location.reload()} onDiff={key => setModal({diff: key})}/>
+      ? <SyncBanner items={saveItems} onRetry={persist.retry} onOverwrite={persist.overwriteConflict} onRefresh={() => location.reload()} onDiff={key => setModal({diff: key})}
+          onDiscard={key => { persist.discardLocal(key); setToast('已放弃本地改动，保留 NAS 上的版本 · Local edits discarded'); }}
+          onDismiss={key => persist.dismissNotice(key)}/>
       : <div className="sync-banner glass read-only" role="status">
           <span className="sb-title"><Icon name="info" size={14}/>未连接 NAS 笔记库 · 只读演示 <em>Read-only (no NAS)</em></span>
           <span className="sb-item">选题、草稿与目标的编辑已禁用；连接 note-api 后自动恢复 <em>Connect note-api to edit</em></span>
@@ -390,10 +404,10 @@ function App() {
         <Home graph={graph} layout={layout} focus={focus} setFocus={setFocus} onAction={onAction} onAbout={() => setModal('about')} reduced={reduced} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled}/>
         <Snapshot goal={goal} onGoal={() => { setGoalInput(String(goal)); setModal('goal'); }} ideas={ideas} drafts={drafts} onIdea={editIdea} onDraft={id => { setActive(id); setPage('drafts'); }} onLibrary={id => { if (typeof id === 'string') setLibSel(id); setPage('library'); }} monthCount={monthPosts.length}/>
       </>}
-      {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled}/>}
-      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost} aiEnabled={aiInfo?.enabled}
+      {page === 'library' && <Library graph={graph} selected={libSel} setSelected={setLibSel} onGo={openInGraph} onAction={onAction} onModule={goModule} readOnly={!live} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled} showToast={setToast}/>}
+      {page === 'drafts' && <Drafts graph={graph} drafts={drafts} setDrafts={setDrafts} active={active} setActive={setActive} onNew={() => newDraft()} onDelete={deleteDraft} onDirty={onDraftDirty} readOnly={!live} onGo={openInGraph} onModule={goModule} onPublish={publishDraft} onToPost={toPost} aiEnabled={aiInfo?.enabled} showToast={setToast}
         hydrateErr={hydrateErr?.id === active ? hydrateErr.msg : null} onHydrateRetry={() => { setHydrateErr(null); setHydrateTry(n => n + 1); }}/>}
-      {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onModule={goModule} readOnly={!live} onNew={() => editIdea({id: Math.max(0, ...ideas.map(i => i.id)) + 1, title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
+      {page === 'ideas' && <Ideas graph={graph} ideas={ideas} onEdit={editIdea} onGraph={openInGraph} onModule={goModule} readOnly={!live} aiEnabled={aiInfo?.enabled} showToast={setToast} onNew={() => editIdea({id: newLocalId(), title: '', platform: '小红书', priority: '中', status: '待写', note: ''})}/>}
       {page === 'methods' && <Methods graph={graph} readOnly={!live} onGo={openInGraph} onAction={onAction} onModule={goModule} showToast={setToast} onNew={() => setModal('new-note')} aiEnabled={aiInfo?.enabled} embedEnabled={!!aiInfo?.embed?.enabled}/>}
       {page === 'knowledge' && <Knowledge graph={graph} readOnly={!live} onGraph={openInGraph} onModule={goModule} onAction={onAction} onNewDraft={newDraft} onEditIdea={editIdea} ideas={ideas} drafts={drafts} onDeleteDraft={deleteDraft} showToast={setToast} aiEnabled={aiInfo?.enabled}/>}
     </main>
@@ -497,8 +511,14 @@ function App() {
     })()}
     {modal === 'new-note' && <NewNoteModal onClose={close} onDone={path => { setModal(null); setToast('方法笔记已创建（05-方法库/），刷新后进图谱 · Note created'); location.reload(); }}/>}
     {modal?.toPost && (() => {
-      const draft = drafts.find(x => x.title === modal.toPost.title);
-      if (!draft) return null;
+      // 按 id 找回草稿（不能用标题：同名草稿会串），找不到就说清楚，不能静默什么都不发生
+      const draft = drafts.find(x => x.id === modal.toPost.draftId);
+      if (!draft) return (
+        <Modal title="草稿已不在了" en="Draft is gone" onClose={close}>
+          <p>这条草稿已经被删除或改名，无法发布。请刷新页面后从列表里重新选择。</p>
+          <p className="quiet">This draft no longer exists — reload and pick it again from the list.</p>
+        </Modal>
+      );
       return <PublishModal draft={{...draft, path: modal.toPost.path}} onClose={close}
         onDone={path => { setModal(null); setToast('作品已生成（02-作品库/），正在刷新 · Post created'); location.reload(); }}/>;
     })()}

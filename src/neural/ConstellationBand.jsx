@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useRef} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {MODULES} from './graph';
 import {T} from './theme';
 import {paintConstellation, baked, nameOf, countsOf} from './constellations';
@@ -10,7 +10,8 @@ import {paintConstellation, baked, nameOf, countsOf} from './constellations';
 //   试过弧线排列，因上下不齐已取消。
 // v6.5：**拉平对齐、垂直居中**——ARC 全部归零（展示框尺寸保持 168×140 不变）。
 const CW = 168, CH = 140;                                // 每个小星座的展示尺寸（CSS px，按 2× 绘制）
-const DPR = Math.min(window.devicePixelRatio || 1, 2);
+// 缩放比会随「窗口拖到另一块屏」变化，所以是变量不是常量；命中 DPR 的旧缓存保留（最多两档）
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
 const cache = new Map();
 // 垂距（px，向下为正）：v6.5 起全部为 0 = 七个星座同一基线、居中排列
 const ARC = [0, 0, 0, 0, 0, 0, 0];
@@ -36,7 +37,18 @@ function miniOf(id) {
 
 export function ConstellationBand({page, onGo}) {
   const refs = useRef({});
-  const figs = useMemo(() => Object.fromEntries(MODULES.map(m => [m.id, miniOf(m.id)])), []);
+  // 屏幕缩放比变了要按新密度重烘小星座（否则位图停在旧 DPR 上发虚）
+  const [dpr, setDpr] = useState(DPR);
+  useEffect(() => {
+    const sync = () => {
+      const d = Math.min(window.devicePixelRatio || 1, 2);
+      if (Math.abs(d - DPR) < .01) return;
+      DPR = d; setDpr(d);
+    };
+    window.addEventListener('resize', sync);
+    return () => window.removeEventListener('resize', sync);
+  }, []);
+  const figs = useMemo(() => Object.fromEntries(MODULES.map(m => [m.id, miniOf(m.id)])), [dpr]);
   useEffect(() => {
     for (const m of MODULES) {
       const el = refs.current[m.id], src = figs[m.id];
@@ -60,7 +72,7 @@ export function ConstellationBand({page, onGo}) {
           onClick={() => onGo && onGo(m.id)} style={{'--mod': T.modules[m.id].color, '--dy': `${ARC[i] ?? 0}px`}}
           aria-current={on ? 'true' : undefined}
           title={`${zh} ${en} · ${m.title} · ${n.stars} 主星 ${n.edges} 连线`}>
-          <canvas className="cb-canvas" ref={el => { refs.current[m.id] = el; }} width={Math.round(CW * DPR)} height={Math.round(CH * DPR)} style={{width: CW, height: CH}}/>
+          <canvas className="cb-canvas" ref={el => { refs.current[m.id] = el; }} width={Math.round(CW * dpr)} height={Math.round(CH * dpr)} style={{width: CW, height: CH}}/>
           <span className="cb-name"><b>{zh}</b><em>{en.toUpperCase()}</em></span>
           <span className="cb-mod">{m.title}<em>{m.en}</em></span>
         </button>;

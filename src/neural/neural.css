@@ -124,7 +124,10 @@ main, .site-foot { position: relative; z-index: 1; }
 .cl-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 /* 命中区 = 骨架外沿多边形（clip-path 由 constellations.js 算好）：细长的星座不会用空角挡住相邻的星座与标签 */
 .cl-hit { position: absolute; padding: 0; border: 0; background: none; pointer-events: auto; }
-.cl-hit:focus-visible { outline: 2px solid var(--gold); outline-offset: 4px; border-radius: 8px; }
+.cl-hit:focus-visible { outline: none; }
+/* 焦点环不能画在 .cl-hit 上：它带 clip-path，outline 会被多边形一起裁掉、键盘用户看不到焦点。
+   改为画在没被裁剪的外层 .cluster 上（.kbd 由 Home.jsx 在 focus-visible 时加） */
+.cluster.kbd { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 14px; box-shadow: 0 0 22px rgba(232, 200, 132, .28); }
 /* 标签始终压在所有星座的点击区之上 */
 .cluster-label { position: absolute; z-index: 2; left: 0; top: 0; display: grid; grid-template-columns: auto 1fr; grid-template-areas: "icon count" "const const" "name name" "sky sky" "sub sub"; align-items: center; column-gap: 8px; min-width: 148px; padding: 7px 13px 8px; border-radius: 12px; border: 1px solid var(--line); background: linear-gradient(160deg, rgba(20, 28, 58, .66), rgba(6, 9, 22, .8)); backdrop-filter: blur(10px); color: var(--text); text-align: left; will-change: transform, opacity; transition: border-color .3s, box-shadow .3s, background .3s; }
 .cluster-label.below { justify-items: start; }

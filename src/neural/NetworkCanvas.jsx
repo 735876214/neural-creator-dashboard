@@ -40,6 +40,7 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
       dpr = Math.min(window.devicePixelRatio || 1, 2);
       W = canvas.clientWidth; H = canvas.clientHeight;
       canvas.width = W * dpr; canvas.height = H * dpr;
+      live.current?.netKick?.();          // reduced 下循环可能已停：改尺寸后要补画
     };
     resize();
     const ro = new ResizeObserver(resize); ro.observe(canvas);
@@ -80,7 +81,9 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
       const sc = (L.core.s / 440) * Math.min(W * .37 / 380, H * .36 / 300) * (L.stage === 'hub' ? 1 : .55);
       const hover = L.hover;
       const hl = hover ? new Set(graph.nodes.filter(n => n.kind === hover).map(n => n.id)) : null;
-      if (hl) for (const l of graph.links) { if (hl.has(l.a) && l.kind !== 'contain') hl.add(l.b); }
+      // 边的 a/b 是字典序归一过的（graph.js 的 link()），所以「亮邻居」必须双向判断：
+      // 只顺着 a→b 走的话，前缀排在前面的邻居（concept:/note: 之类）永远点不亮。
+      if (hl) { const seed = [...hl]; for (const l of graph.links) { if (l.kind === 'contain') continue; if (seed.has(l.a)) hl.add(l.b); else if (seed.has(l.b)) hl.add(l.a); } }
       const grow = reduced ? 1 : Math.min(1, Math.max(0, (t - .35) / 2.2));
       const prog = x => reduced ? 1 : Math.min(1, Math.max(0, (t - .4 - x.d * .32 - x.seed * .35) / .9));
       const pos = x => {
@@ -191,10 +194,20 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
       }
     };
     // 每帧先排好下一帧再绘制：某一帧出错也不会让背景网络停住
+    // reduced 下画面是静止的：等星核/星团的弹簧收敛（live.moving 由 Home 的 step 维护）就停掉循环，
+    // 否则每帧重绘整张星图纯属空转；交互与尺寸变化通过 netKick 叫醒。
     let warned = false;
-    const frame = now => { raf = requestAnimationFrame(frame); try { draw(now); } catch (err) { if (!warned) { warned = true; console.error(err); } } };
+    const frame = now => {
+      if (reduced && !live.current.moving) { raf = 0; return; }
+      raf = requestAnimationFrame(frame); try { draw(now); } catch (err) { if (!warned) { warned = true; console.error(err); } }
+    };
     raf = requestAnimationFrame(frame);
-    return () => { cancelAnimationFrame(raf); ro.disconnect(); };
+    live.current.netKick = () => { if (!raf) { live.current.moving = true; raf = requestAnimationFrame(frame); } };
+    return () => {
+      cancelAnimationFrame(raf); raf = 0;
+      if (live.current) live.current.netKick = null;
+      ro.disconnect();
+    };
   }, [graph, layout, live, reduced]);
   return <canvas ref={ref} className="network-canvas" aria-hidden="true"/>;
 }

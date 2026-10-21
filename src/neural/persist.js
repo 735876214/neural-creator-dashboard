@@ -9,13 +9,16 @@
 // 写入调度：1.2s 防抖、同一 key 串行、失败进内存 outbox 并按指数退避重试。
 // 按「数据不保存在浏览器」的要求，outbox 只在内存里；刷新/关闭页面前会提示。
 import {useSyncExternalStore} from 'react';
-import {getMeta, getFiles, getMtimes, getSettings, setApiData, beginLoad} from '../data/store.js';
+import {getMeta, getFiles, getMtimes, getSettings, setApiData, beginLoad, isLive as storeIsLive} from '../data/store.js';
 import {FM_RE, stripFrontmatter} from './mdfront.js';
 
 // 兼容既有调用方（main.jsx 用 persist.stripFrontmatter）。
 export {stripFrontmatter};
 
-export const isLive = () => !!getMeta();
+// 必须与 src/data/store.js 用同一套判定：原来这里判 `!!getMeta()`，而 data/index.js 转出的
+// store.isLive 判 `source === 'api'`。meta 缺失但 source 是 api 时，UI 认为可编辑（live=true），
+// 而 queue() 因为 isLive() 为假直接 return —— 用户的编辑被静默丢弃，连失败提示都没有。
+export const isLive = storeIsLive;
 
 const API = import.meta.env.VITE_API_BASE ?? '';
 const DELAY = 1200;
@@ -47,6 +50,9 @@ let overviewVersion = -1;
 let overviewCache = [];
 const EMPTY = [];
 const UNRESOLVED = new Set(['pending', 'error', 'conflict']);
+// 横幅还要显示一次性提示态（dropped：文件在 NAS 上已不存在，本地改动被丢弃）。
+// 它不算「未落盘」：不拦自动刷新，也不拦关页提示——改动已经明确放弃了。
+const NOTICE = new Set(['dropped']);
 
 const DEFAULT_STATE = {state: 'idle', at: 0};
 
@@ -100,9 +106,10 @@ export function useSaveState(key) {
 function pendingSnapshot() {
   if (overviewVersion === version) return overviewCache;
   overviewVersion = version;
-  overviewCache = [...outbox.keys()]
+  overviewCache = [...outbox.keys(), ...states.keys()]
+    .filter((key, i, all) => all.indexOf(key) === i)
     .map(key => ({key, state: getSaveState(key)}))
-    .filter(x => UNRESOLVED.has(x.state.state));
+    .filter(x => UNRESOLVED.has(x.state.state) || NOTICE.has(x.state.state));
   return overviewCache;
 }
 
@@ -114,6 +121,12 @@ export function usePendingSaves() {
 
 const draftPayload = (draft, sourceTitle) => {
   const fm = {};
+  // 稳定 id：新建时本地生成的 id 必须一起落盘，否则 /api/data 回来的 id 是位置序号
+  // （vault 里没有 fm.id 时 readVault 会给 'draft-N'），与本地 id 对不上 → 刷新合并把这条
+  // 刚建好的草稿当成「服务端已删除」丢掉，编辑器悄悄切到别的草稿。
+  // 位置序号 'draft-3' 这种不回写：那会把随文件增删漂移的序号固化进文件。
+  const ownId = String(draft.id ?? '').trim();
+  if (ownId && !/^draft-\d+$/.test(ownId)) fm.id = ownId;
   // 选题关联：稳定 id 优先（sourceIdeaId，改名不断链）；标题仅作为老读取端的兼容回退。
   // 只固化「稳定 id」：老数据里 readVault 按目录顺序生成的数字序号会随文件增删位移，
   // 固化成 sourceIdeaId 后会在序号位移时错关联；数字 source 保持标题回退，不写 sourceIdeaId。
@@ -127,10 +140,15 @@ const draftPayload = (draft, sourceTitle) => {
   return {title: String(draft.title || '').trim() || '未命名草稿', body: draft.body || '', fm};
 };
 
-const ideaPayload = idea => ({
-  title: String(idea.title || '').trim() || '未命名选题',
-  fm: {platform: idea.platform, priority: idea.priority, status: idea.status, note: idea.note || ''}
-});
+const ideaPayload = idea => {
+  const fm = {platform: idea.platform, priority: idea.priority, status: idea.status, note: idea.note || ''};
+  // 同上：稳定 id 一起落盘（服务端只在没带 id 时才自己生成一个短 uuid），
+  // 否则新建选题的本地 id 与服务端 id 不同，刷新合并会把它丢掉。
+  // 位置序号（数字 id）不回写：readVault 的数字序号会随文件增删位移。
+  const ownId = typeof idea.id === 'string' ? idea.id.trim() : '';
+  if (ownId) fm.id = ownId;
+  return {title: String(idea.title || '').trim() || '未命名选题', fm};
+};
 
 const sigOf = payload => JSON.stringify(payload);
 
@@ -182,7 +200,12 @@ export function createDraft({id, title, body, sourceTitle}) {
   if (!isLive()) return Promise.resolve(null);
   clearTimeout(timers.get(key));
   timers.delete(key);
-  const payload = draftPayload({title, body}, sourceTitle);
+  const payload = draftPayload({id, title, body}, sourceTitle);
+  // 新建必须带稳定 id：服务端只在没带 id 时自己生成，带了就照用，
+  // 这样 /api/data 回来的 id 与本地一致（合并时才不会把这条新草稿丢掉）。
+  // 位置序号 id（draft-3）不回写：它是按目录顺序算出来的，增删一篇就会指向别的草稿，
+  // 写进文件后反而把会漂的序号固化了。只回写真正的稳定 id。
+  if (id && !/^draft-\d+$/.test(String(id))) payload.fm.id = String(id);
   outbox.set(key, {op: 'create', kind: 'draft', payload, sig: sigOf(payload)});
   setState(key, {state: 'saving', message: undefined});
   return flushKey(key).then(() => refs.get(key) || null);
@@ -292,7 +315,17 @@ export function flushKey(key) {
     }
 
     if (res.status === 404) {
-      setState(key, {state: 'error', message: 'NAS 上找不到这个文件，请刷新页面 · File not found on NAS — refresh'});
+      // 文件在 NAS 上已经不存在（被别的编辑器删掉／改名了）。保留 outbox 只会让这条记录在
+      // 每次 refreshData 之后被「复活」（isPending 为真 → 合并保留），横幅常驻，重试永远 404，
+      // 只能整页刷新才清掉。这里直接丢弃本地改动并留下一条可见提示（dropped 不是未落盘态：
+      // 自动刷新可以正常推进，关页也不再拦）。
+      outbox.delete(key);
+      attempts.delete(key);
+      savedSigs.delete(key);
+      clearCreateId(key);
+      clearTimeout(retryTimers.get(key)); retryTimers.delete(key);
+      if (item.op !== 'create') refs.delete(key);
+      setState(key, {state: 'dropped', message: 'NAS 上已不存在这个文件，本地改动已放弃 · File gone — local edits dropped'});
       return;
     }
 
@@ -398,6 +431,13 @@ export function discardLocal(key) {
   savedSigs.delete(key);
   clearTimeout(timers.get(key)); timers.delete(key);
   clearTimeout(retryTimers.get(key)); retryTimers.delete(key);
+  states.delete(key);
+  emit();
+}
+
+// 关掉一条一次性提示（dropped）：本地改动已经放弃，只把横幅上那行收起来。
+export function dismissNotice(key) {
+  if (!NOTICE.has(getSaveState(key).state)) return;
   states.delete(key);
   emit();
 }
@@ -513,9 +553,13 @@ export async function hydrateIdea(id) {
 
 // —— AI 模型选择：跟着设置一起存 NAS，不写 localStorage ——
 
-let pickedAiModel = getSettings()?.aiModel ?? null;
+let pickedAiModel = null;
 
-export function pickedModel() { return pickedAiModel; }
+// 优先级：本次会话在分析栏 / 助手里临时选的模型 > 设置面板里的全局模型 > 不传（服务端按任务取）。
+// 只在 setPickedModel() 里更新 pickedAiModel，设置面板改全局模型不经过它，
+// 所以这里每次都读 store 的最新设置；但临时选择必须能覆盖全局，否则「换模型」按钮对
+// 打标签 / 生成选题（sync.js 里发 pickedModel()）完全无效。
+export function pickedModel() { return pickedAiModel || getSettings()?.aiModel || null; }
 
 export function setPickedModel(id) {
   pickedAiModel = id || null;

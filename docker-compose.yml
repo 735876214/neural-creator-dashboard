@@ -28,6 +28,14 @@ services:
     image: ghcr.io/735876214/neural-creator-dashboard:latest
     container_name: neural-note-api
     restart: unless-stopped
+    # 与宿主目录属主对齐：镜像里以 node（uid/gid 1000）运行，宿主上的 vault 若属于
+    # 别的用户（NAS 共享目录常见），把 PUID/PGID 填成那边的 uid/gid，否则看板写出来的
+    # 笔记属于 1000，SMB / Obsidian / 文件管理器里改不动也删不掉。
+    user: "${PUID:-1000}:${PGID:-1000}"
+    # 容器日志必须限长：Docker 默认 json-file 不轮转，NAS 的系统盘会被日志写满。
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     environment:
       # 容器内固定路径与端口
       VAULT_DIR: /vault
@@ -60,6 +68,10 @@ services:
       # —— 网页剪藏（个人知识库）——
       WEB_FETCH_TIMEOUT: ${WEB_FETCH_TIMEOUT:-20000}
       WEB_FETCH_MAX_BYTES: ${WEB_FETCH_MAX_BYTES:-2097152}
+      # 看板日期基准（「今天是哪天」：作品 date、月目标进度、日报归类）。容器默认 UTC，
+      # 不设就是 +8（北京时间）。注意 NEWS_TZ_OFFSET 只管日报生成时刻，DASHBOARD_TZ_OFFSET
+      # 优先于它——两者混用会出现「作品记成昨天」这种错日期。
+      DASHBOARD_TZ_OFFSET: ${DASHBOARD_TZ_OFFSET:-8}
       # —— AI 热点 ——
       NEWS_SOURCE: ${NEWS_SOURCE:-}
       NEWS_HOUR: ${NEWS_HOUR:-8}
@@ -71,6 +83,10 @@ services:
       # 日报生成时刻（NEWS_HOUR）按同一套偏移判定，默认 +8（北京时间）
       NEWS_TZ_OFFSET: ${NEWS_TZ_OFFSET:-8}
       PLATFORM_SYNC_CRON: ${PLATFORM_SYNC_CRON:-}
+      # 反向代理：本机有 Caddy / Traefik / 群晖反代时，把 WEB_BIND 改成 127.0.0.1 并设
+      # TRUST_PROXY=1（两者必须同时改）。只设 TRUST_PROXY 而端口仍发布在 0.0.0.0 时，
+      # 直连请求可以自带 x-real-ip 伪造来源 IP，把登录限流绕成无限爆破。
+      TRUST_PROXY: ${TRUST_PROXY:-0}
       # 公众号凭据：也可以不填，改在「设置 → 发布平台」里存进 vault 的 settings.json
       WECHAT_APPID: ${WECHAT_APPID:-}
       WECHAT_SECRET: ${WECHAT_SECRET:-}
@@ -86,7 +102,8 @@ services:
       - ${VAULT_DIR:-./notes-vault}:/vault
       - note-api-data:/data    # 索引、会话密钥、auth.json（没设 DASHBOARD_PASSWORD 时）
     ports:
-      - "${WEB_PORT:-8088}:8787"   # 局域网入口
+      # 默认发布到所有网卡；前面挂 HTTPS 反代时改成 WEB_BIND=127.0.0.1:${WEB_PORT:-8088}:8787
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8088}:8787"   # 局域网入口
 
 volumes:
   note-api-data:

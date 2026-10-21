@@ -12,7 +12,10 @@ export const eolOf = text => (text.includes('\r\n') ? '\r\n' : '\n');
 
 // 组 1 允许为空：`---\n---\n正文` 是空属性块，以前正则匹配不上会判成「没有 frontmatter」，
 // setBody 随即把 head 置空，用户只改正文就把整块属性连标题一起抹掉。
+// 闭合栅栏后的换行放宽成可省略（`---` 紧跟正文）：vault.mjs 的读层是宽进的，
+// 写层比读层窄就会出现「读得出来、一写就多一行/毁格式」的不对称。
 const FM = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/;
+const FM_LENIENT = /^---\r?\n(?:([\s\S]*?)\r?\n)?---\r?\n?/;
 const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const BOM = '\uFEFF';
 
@@ -24,14 +27,19 @@ export function split(raw) {
   const bom = text.startsWith(BOM) ? BOM : '';
   const src = bom ? text.slice(BOM.length) : text;
   const eol = eolOf(src);
-  const m = src.match(FM);
+  const m = src.match(FM) || src.match(FM_LENIENT);
   if (m) {
     const inner = m[1] ?? '';
     return {eol, bom, hasFm: true, lines: inner ? inner.split(/\r?\n/) : [], body: src.slice(m[0].length)};
   }
-  // 只有开头 `---` 却没有结束栅栏：当成「空属性块 + 正文」。否则 patchKeys 会把新的属性块
+  // 只有开头 `---` 却没有可识别的闭合栅栏：当成「空属性块 + 正文」。否则 patchKeys 会把新的属性块
   // 写到文件最前面，旧的 `---` 留在正文里变成重复的一行。
-  if (/^---\r?\n/.test(src)) return {eol, bom, hasFm: true, lines: [], body: src.slice(src.indexOf('\n') + 1)};
+  // 但如果后面还有独立的 `---` 行，说明这份文件其实有属性块、只是格式怪（栅栏带缩进、
+  // 或属性里含嵌套块），当成空块会把属性塞进正文——那种情况宁可当「没有 frontmatter」，
+  // 由 patchKeys 在前面新建一块。
+  if (/^---\r?\n/.test(src) && !/\n---[ \t]*(?:\r?\n|$)/.test(src)) {
+    return {eol, bom, hasFm: true, lines: [], body: src.slice(src.indexOf('\n') + 1)};
+  }
   return {eol, bom, hasFm: false, lines: [], body: src};
 }
 
@@ -67,8 +75,13 @@ export function patchKeys(text, patch) {
   const out = [...lines];
 
   for (const [key, value] of Object.entries(patch)) {
-    const re = new RegExp('^' + escapeRe(key) + '\\s*:');
-    const i = out.findIndex(l => re.test(l));
+    // 大小写不敏感 + 重复键一起处理：读层（vault.mjs 的 parse）是「后者覆盖前者」，
+    // 而写层原来只改第一处、且区分大小写（Obsidian 手打的 `Tags:` 匹配不到 `tags`），
+    // 于是「保存成功」但读回来还是旧值——用户看到的是「改了没反应」。
+    const re = new RegExp('^' + escapeRe(key) + '\\s*:', 'i');
+    const heads = [];
+    for (let k = 0; k < out.length; k++) if (re.test(out[k])) heads.push(k);
+    const i = heads.length ? heads[0] : -1;
     let end = i, blockStyle = false;
     if (i >= 0) {
       // 这个键后面跟着缩进行时，连同那些行一起替换：块状列表（「- 项」）之外还有
@@ -83,6 +96,12 @@ export function patchKeys(text, patch) {
       }
       end = j - 1;
       blockStyle = listItems > 0;
+    }
+    // 重复的同名键从后往前删掉（连同它们的缩进块）：留着只会让读层拿到被遮住的那份。
+    for (let k = heads.length - 1; k >= 1; k--) {
+      let j = heads[k] + 1;
+      while (j < out.length && /^\s+\S/.test(out[j])) j++;
+      out.splice(heads[k], j - heads[k]);
     }
     const rendered = render(key, value, blockStyle);
     if (i < 0) out.push(...rendered);
@@ -106,7 +125,7 @@ export function setBody(text, newBody) {
 
 // frontmatter 里是否已经有某个键。Obsidian 的约定是「文件名即标题」，
 // 所以只有在用户已经在属性里写了 title 时，改标题才需要同时改这一行。
-export const hasKey = (text, key) => split(text).lines.some(l => new RegExp('^' + escapeRe(key) + '\\s*:').test(l));
+export const hasKey = (text, key) => split(text).lines.some(l => new RegExp('^' + escapeRe(key) + '\\s*:', 'i').test(l));
 
 // 一次写入里同时改 frontmatter 和正文。
 export function writeDoc(text, {fm = null, body = undefined} = {}) {

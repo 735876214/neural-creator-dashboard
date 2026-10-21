@@ -105,6 +105,17 @@ async function gate() {
 }
 const release = () => { active--; waiters.shift()?.(); };
 
+// 把上游状态码翻译成用户能照着改的说法：对外只回这一句（原文只进服务端日志）。
+function upstreamError(status) {
+  if (status === 401 || status === 403) return `AI 接口鉴权失败（${status}）：检查 API Key 是否有效、该 Key 是否有这个模型的权限`;
+  if (status === 404) return 'AI 接口地址或模型不存在（404）：检查 Base URL 是否以 /v1 结尾、模型名是否在 /v1/models 列表里';
+  if (status === 400 || status === 422) return `AI 请求被上游拒绝（${status}）：模型名或参数不被接受，换模型或检查 max_tokens`;
+  if (status === 429) return 'AI 接口限流（429）：稍后重试，或调低 AI_CONCURRENCY';
+  if (status === 413) return 'AI 请求过长（413）：把这批内容拆小一点再分析';
+  if (status >= 500) return `AI 上游错误（${status}）：稍后重试，若持续出现请看服务端日志`;
+  return `AI 接口错误（${status}）`;
+}
+
 async function call(base, key, path, payload) {
   await gate();
   try {
@@ -123,9 +134,12 @@ async function call(base, key, path, payload) {
         }
         if (!res.ok) {
           const text = await res.text().catch(() => '');
+          // 上游错误体常带渠道 / 配额 / 上游账号等内部细节，而这条消息会进 job.error，
+          // 由 /api/ai/jobs 回给浏览器并长期留在 SQLite：原文只写服务端日志，对外给状态码 + 分类原因。
+          console.error(`[ai] 上游返回 ${res.status}：${text.slice(0, 400)}`);
           // 4xx 是确定性失败（key 失效、模型不存在、参数不合法）：重试只会把一次失败放大成三次，
           // 在 relate 这种「每条一次调用」的循环里等于任务长时间无进展。标成 fatal 直接抛。
-          const err = new Error(`AI 接口 ${res.status}：${text.slice(0, 200)}`);
+          const err = new Error(upstreamError(res.status));
           err.fatal = res.status < 500 && res.status !== 429;
           throw err;
         }
@@ -139,16 +153,15 @@ async function call(base, key, path, payload) {
   } finally { release(); }
 }
 
-// 从 OpenAI 格式回复里取文本：content 为空时兜底 reasoning_content（思考型模型），
-// 再兜底 message 是字符串 / 数组的情况。返回 null 表示真的没有内容。
-function textOf(msg) {
+// 从 OpenAI 格式回复里取正文。只认 content，**不兜底 reasoning_content**：
+// 思考型模型的推理过程和正文共用 max_tokens，预算被思考吃光时 content 是空串，
+// 把 reasoning 当答案会把英文内心独白直接投给用户（实测 cn:auto 会把
+// \"We need answer in Chinese. User asks: ...\" 当回答返回）。空正文交给 chat() 重试。
+function contentOf(msg) {
   if (!msg) return null;
   let c = msg.content;
   if (Array.isArray(c)) c = c.filter(b => b.type === 'text').map(b => b.text).join('');
-  if (typeof c === 'string' && c.trim()) return c;
-  const r = msg.reasoning_content || msg.reasoning;
-  if (typeof r === 'string' && r.trim()) return r;
-  return null;
+  return typeof c === 'string' && c.trim() ? c : null;
 }
 
 function parseJson(text) {
@@ -178,9 +191,25 @@ export async function chat(messages, {json = false, temperature = 0.3, maxTokens
   }
   const payload = {model: useModel, messages, temperature, max_tokens: maxTokens};
   if (json) payload.response_format = {type: 'json_object'};
-  const data = await call(CHAT_BASE, CHAT_KEY, '/chat/completions', payload);
-  const text = textOf(data.choices?.[0]?.message);
-  if (!text) throw new Error('AI 返回了空回复（模型 ' + useModel + ' 可能是纯思考型且被截断），换个模型或加大 max_tokens');
+  const t0 = Date.now();
+  let data = await call(CHAT_BASE, CHAT_KEY, '/chat/completions', payload);
+  let text = contentOf(data.choices?.[0]?.message);
+  if (!text) {
+    // 空正文有两种原因，处理方式相反：
+    // ① 预算被推理吃光（回复很快，模型还想继续说）→ 放宽预算重试一次即可；
+    // ② 模型本身就是纯思考型（回复很慢、等到超时才有 reasoning）→ 再重试只是让用户多等一个超时，
+    //    直接报错更诚实。用「第一次的耗时」区分：慢的就不再重试。
+    const elapsed = Date.now() - t0;
+    const big = Math.min(Math.max(maxTokens * 4, 4000), 32000);
+    const hint = '换个模型（如 cn:deepseek-v4.1-flash）或调大 max_tokens';
+    if (elapsed < 20000) {
+      data = await call(CHAT_BASE, CHAT_KEY, '/chat/completions', {...payload, max_tokens: big});
+      text = contentOf(data.choices?.[0]?.message);
+      if (!text) throw new Error('AI 只返回了思考过程，没有正文（' + useModel + ' 的推理占满了 ' + big + ' tokens）：' + hint);
+    } else {
+      throw new Error('AI 只返回了思考过程，没有正文（' + useModel + ' 花了 ' + Math.round(elapsed / 1000) + ' 秒仍在推理）：' + hint);
+    }
+  }
   return json ? parseJson(text) : text;
 }
 
@@ -203,7 +232,11 @@ export async function embed(texts) {
           body: JSON.stringify({text: list.slice(i, i + 16)}),
           signal: AbortSignal.timeout(TIMEOUT)
         });
-        if (!res.ok) throw new Error(`Cloudflare AI ${res.status}：${(await res.text().catch(() => '')).slice(0, 150)}`);
+        if (!res.ok) {
+          // 同 call()：原文只进日志，对外只回分类原因（这段会进 relate 的 job.error 再回浏览器）。
+          console.error(`[ai] Cloudflare AI 返回 ${res.status}：${(await res.text().catch(() => '')).slice(0, 400)}`);
+          throw new Error(upstreamError(res.status));
+        }
         const j = await res.json();
         const rows = j.result?.data || [];
         if (rows.length !== Math.min(16, list.length - i)) throw new Error('embedding 返回条数不对');

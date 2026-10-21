@@ -42,9 +42,18 @@ let loadSeq = 0;
 export const beginLoad = () => ++loadSeq;
 
 // note-api 的 /api/data 返回的就是这份数据的形状，外加 files / figures / mtimes / settings / meta。
+// 这几个数组字段是图谱推导的输入，形状不对时绝不能让它们进 data：
+// ・缺字段时 `{...data, ...rest}` 会把 sample 的同名数组留在原位 —— 示例的概念词表会
+//   继续参与真实笔记库的概念推导，图上凭空出现无来源的概念节点与共振边；
+// ・字段显式是 null 时会覆盖成 null，graph.js 顶层 `for (const n of notes)` 在 import 期
+//   抛错，boot 的 try/catch 兜不住 → 整站白屏。
+// 所以先删掉非数组的键（保留 sample 的原值），再由 boot.js 决定要不要整体回退。
+export const ARRAY_FIELDS = ['posts', 'postContent', 'notes', 'seedIdeas', 'seedDrafts', 'concepts', 'semantic'];
+
 export function setApiData(payload, seq) {
   if (seq != null && seq !== loadSeq) return false;
   const {files: f, figures: g, mtimes: t, settings: s, meta: m, ...rest} = payload || {};
+  for (const k of ARRAY_FIELDS) if (!Array.isArray(rest[k])) delete rest[k];
   data = {...data, ...rest};
   files = f || {};
   figures = g || {};

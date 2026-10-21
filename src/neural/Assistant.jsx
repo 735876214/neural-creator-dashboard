@@ -2,7 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {askGraph} from './graph';
 import {Icon} from './icons';
 import {isLive} from '../data/store';
-import {apiUrl, refreshData, markSelfWrite} from './persist';
+import {apiUrl, refreshData, markSelfWrite, pickedModel} from './persist';
 
 // —— AI 助手（创作台 / 知识库右下角的浮动抽屉）——
 // 两个能力：① 上传文件（md/txt/docx/pdf）提取文本存进个人知识库；② 对整个笔记库提问
@@ -21,6 +21,16 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
   // AI 启用状态单一事实源：由调用方（App）传入——设置面板保存后 onRefresh 已让它即时刷新，
   // 这里不再各自订阅 store（三份来源会各自陈旧）。
   const ai = isLive() && !!aiProp;
+  // 上传上限由服务端下发（MAX_BODY 可用环境变量调），失败就按默认 2 MB 显示。
+  const [maxMb, setMaxMb] = useState(2);
+  useEffect(() => {
+    if (!isLive()) return;
+    let alive = true;
+    fetch(apiUrl('/api/ai/info')).then(r => (r.ok ? r.json() : null))
+      .then(j => { const b = Number(j?.maxUpload); if (alive && b > 0) setMaxMb(Math.round((b / 1024 / 1024) * 10) / 10); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const scrollRef = useRef(null);
   useEffect(() => { scrollRef.current?.scrollTo({top: 1e9}); }, [thread, open]);
 
@@ -39,7 +49,9 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
     try {
       if (ai) {
         try {
-          const res = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question})});
+          // 带上用户在分析栏里选的模型：不传则服务端回落到 AI_MODEL / 设置里的全局模型，
+          // 同一屏两个 AI 入口会用不同模型回答（分析栏选了模型而助手里没生效）。
+          const res = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question, model: pickedModel() || undefined})});
           const j = await res.json();
           if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
           setThread(t => [...t, {role: 'a', text: j.answer || '（空）', refs: j.refs || []}]);
@@ -60,6 +72,11 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
     let okCount = 0, failCount = 0;
     for (const file of files) {
       try {
+        // 先在本地拦一次：手机视频/大图必然超过服务端 MAX_BODY，原来要等整包传完
+        // 才收到 413，用户只看到「文件过大（上限 2 MB）」却不知道是哪个文件、多大。
+        if (file.size > maxMb * 1024 * 1024) {
+          throw new Error(`超过上限 ${maxMb} MB（这个文件 ${(file.size / 1024 / 1024).toFixed(1)} MB）`);
+        }
         const res = await fetch(apiUrl('/api/knowledge/upload'), {
           method: 'POST',
           headers: {'x-filename': encodeURIComponent(file.name), 'x-category': encodeURIComponent(cat), 'content-type': 'application/octet-stream'},
@@ -129,7 +146,9 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
       </>}
 
       {tab === 'upload' && <div className="as-upload">
-        <p className="as-hint">支持 md / txt / docx / pdf（≤{Math.round(4)} MB），提取文本后存进个人知识库，自动进搜索与 AI 问答。</p>
+        {/* 上限跟着服务端的 MAX_BODY 走：写死「4 MB」而服务端默认 2 MB 时，
+            2–4 MB 的文件会被 413 拒绝，提示与实际限制自相矛盾。 */}
+        <p className="as-hint">支持 md / txt / docx / pdf（≤{maxMb} MB），提取文本后存进个人知识库，自动进搜索与 AI 问答。</p>
         <div className="as-cats" role="group" aria-label="上传分类 Upload category">
           {CATS.map(c => <button key={c} className={cat === c ? 'on' : ''} onClick={() => setCat(c)}>{c}</button>)}
         </div>

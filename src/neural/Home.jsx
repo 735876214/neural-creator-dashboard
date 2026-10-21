@@ -149,7 +149,8 @@ const DUST = Array.from({length: 130}, (_, i) => ({a: i * 2.39996, v: .035 + (i 
 // 知识笔记→天蝎 · 概念→双鱼 · 作品→处女 · 选题→射手 · 草稿→水瓶 · AI 热点→仙女 · 个人知识库→猎户（星座表与坐标口径见 constellations.js）。
 // 骨架星位、经典连线、星等全部来自真实星表，图形是**静态**的，所以整幅烘焙成一张离屏画布（每簇一张，2×），
 // 逐帧只做一次 drawImage + 主星闪烁 —— 这是 v6.2 定的落地口径（星座层比原来的光球层省 2.8–5.5×）。
-const DPR = Math.min(window.devicePixelRatio || 1, 2);
+// 缩放比不是常量：把窗口拖到另一块缩放不同的屏时它会变，位图必须按新密度重烘焙，否则画面发虚
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
 const HUB_K = 1, SUB_K = .82;                           // 图形缩放：首屏 1:1，展开层/内页收一档，别压住环系
 // 验收实测用：?profile=1 时把「星座层」的逐帧耗时记进 window.__ncProfile（不影响正常路径）
 const PROFILE = typeof location !== 'undefined' && /[?&]profile=1/.test(location.search);
@@ -157,6 +158,13 @@ const figData = Object.fromEntries(MODULES.map(m => {
   const bake = baked(m.id, DPR);
   return [m.id, {bake, sk: skeleton(m.id), hit: hitOf(m.id), ext: extentOf(m.id), n: countsOf(m.id)}];
 }));
+// 缩放比变了就按新密度重烘一次七张星团图（一次性成本），旧烘焙画布被整体替换
+function rebakeAll() { for (const m of MODULES) figData[m.id] = {...figData[m.id], bake: baked(m.id, DPR)}; }
+function syncDPR() {
+  const d = Math.min(window.devicePixelRatio || 1, 2);
+  if (Math.abs(d - DPR) < .01) return false;
+  DPR = d; rebakeAll(); return true;
+}
 
 // 每帧绘制一簇：先把烘焙好的星座整幅贴回（骨架星 + 经典连线 + 成员星场），再给骨架主星叠一层闪烁。
 // 星位是真的、静止的；只有主星在呼吸 —— 悬停/选中时整幅提亮一档，不改形状。
@@ -195,10 +203,12 @@ function drawCluster(canvas, data, t, on, reduced, hot) {
 
 const bez = (p0, p1, p2, p3, u) => { const m = 1 - u; return m * m * m * p0 + 3 * m * m * u * p1 + 3 * m * u * u * p2 + u * u * u * p3; };
 
-function Scene({graph, items, more, onModule, onItem, live, sel}) {
+function Scene({graph, items, more, onModule, onItem, live, sel, dpr}) {
   const dustRef = useRef(null), coreRef = useRef(null);
   const clusterRefs = useRef({}), canvasRefs = useRef({}), labelRefs = useRef({}), threadRefs = useRef({}), pulseRefs = useRef({});
   const itemRefs = useRef([]), fanRefs = useRef([]), fanPulseRefs = useRef([]), moreRef = useRef(null);
+  // 命中区被 clip-path 裁掉，outline 会一起被裁：焦点环画在没被裁剪的 .cluster 上（键盘可达性）
+  const [kbMod, setKbMod] = useState(null);
   const summaries = useMemo(() => Object.fromEntries(MODULES.map(m => [m.id, moduleSummary(graph, m)])), [graph]);
   // 星座图形（figData）在模块加载时烘焙一次，六簇共用；这里只留每簇的标签数据
   const clusterData = figData;
@@ -220,6 +230,7 @@ function Scene({graph, items, more, onModule, onItem, live, sel}) {
       if (d < bd) { bd = d; bi = i; }
     });
     live.current.hoverStar = bi < 0 ? null : {id: m.id, idx: bi};
+    live.current.kick?.();                 // reduced 下帧循环是停的，交互要把它叫醒
   }, [live]);
 
   useEffect(() => {
@@ -372,13 +383,32 @@ function Scene({graph, items, more, onModule, onItem, live, sel}) {
           }
         }
       }
+      // 「减少动态效果」下据此决定还要不要继续排帧：所有弹簧都贴住目标就停循环
+      if (L.reduced) {
+        let moving = Math.abs(ox - Tt.core.x) > .5 || Math.abs(oy - Tt.core.y) > .5 || Math.abs(os - Tt.core.s) > .5;
+        if (!moving) for (const m of MODULES) {
+          const j = S.cluster[m.id], tg = Tt.cluster[m.id];
+          if (Math.abs(j.x - tg.x) > .5 || Math.abs(j.y - tg.y) > .5 || Math.abs(j.s - tg.s) > .5 || Math.abs(j.o - tg.o) > .5) { moving = true; break; }
+        }
+        if (!moving && Tt.fan) for (let i = 0; i < items.length; i++) {
+          const st = L.itemState[i];
+          if (st && (Math.abs(st.x - Tt.fan.x) > 1 || Math.abs(st.y - (Tt.fan.y0 + i * Tt.fan.gap)) > 1 || Math.abs(st.o - 1) > .04)) { moving = true; break; }
+        }
+        L.moving = moving;
+      } else L.moving = true;
     };
-    // 每帧先排好下一帧再执行：某一帧出错也不会让星核与星团停住
+    // 每帧先排好下一帧再执行：某一帧出错也不会让星核与星团停住。
+    // 「减少动态效果」下画面本来就是静止的（脉冲恒为 0、摆动为 0），弹簧一旦收敛就不再排帧，
+    // 否则 60fps 每帧写几十个 style 纯属空转；交互（悬停/选中/尺寸变化）通过 kick 重新起循环。
     let warned = false;
-    const frame = now => { raf = requestAnimationFrame(frame); try { step(now); } catch (err) { if (!warned) { warned = true; console.error(err); } } };
+    const frame = now => { raf = requestAnimationFrame(frame); try { step(now); } catch (err) { if (!warned) { warned = true; console.error(err); } } if (live.current.reduced && !live.current.moving) { cancelAnimationFrame(raf); raf = 0; } };
     raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
-  }, [items, live, sel, clusterData]);
+    live.current.kick = () => { if (!raf) { live.current.moving = true; raf = requestAnimationFrame(frame); } live.current.netKick?.(); };
+    return () => {
+      cancelAnimationFrame(raf); raf = 0;
+      if (live.current) live.current.kick = null;
+    };
+  }, [items, live, sel, clusterData, dpr, size]);
 
   const hub = live.current.stage === 'hub';
   // 行距不足 30px 时只留标题一行，两行会叠在一起看不清（与 targets() 用同一套算法）
@@ -415,16 +445,17 @@ function Scene({graph, items, more, onModule, onItem, live, sel}) {
       const sum = summaries[m.id], active = live.current.mod === m.id, art = figData[m.id];
       const [zh, en] = nameOf(m.id);
       return <React.Fragment key={m.id}>
-        <div className={`cluster ${active ? 'active' : ''}`} ref={el => { clusterRefs.current[m.id] = el; }} style={{width: art.bake.box, height: art.bake.box}}>
-          <canvas className="cl-canvas" width={Math.round(art.bake.box * DPR)} height={Math.round(art.bake.box * DPR)} ref={el => { canvasRefs.current[m.id] = el; }}/>
+        <div className={`cluster ${active ? 'active' : ''} ${kbMod === m.id ? 'kbd' : ''}`} ref={el => { clusterRefs.current[m.id] = el; }} style={{width: art.bake.box, height: art.bake.box}}>
+          <canvas className="cl-canvas" width={Math.round(art.bake.box * dpr)} height={Math.round(art.bake.box * dpr)} ref={el => { canvasRefs.current[m.id] = el; }}/>
           {/* 命中区 = 骨架外沿多边形（不是整张画布的 bbox）：细长的星座不会用空角挡住旁边的星座与标签 */}
           <button className="cl-hit" onClick={() => onModule(m.id)}
             style={{left: art.bake.box / 2 + art.hit.cx - art.hit.w / 2, top: art.bake.box / 2 + art.hit.cy - art.hit.h / 2, width: art.hit.w, height: art.hit.h, clipPath: `polygon(${art.hit.clip})`}}
-            onPointerEnter={() => { live.current.hover = m.kind; }} onPointerMove={e => onStar(m, e)} onPointerLeave={() => { live.current.hover = null; live.current.hoverStar = null; }}
+            onPointerEnter={() => { live.current.hover = m.kind; live.current.kick?.(); }} onPointerMove={e => onStar(m, e)} onPointerLeave={() => { live.current.hover = null; live.current.hoverStar = null; live.current.kick?.(); }}
+            onFocus={e => { if (e.target.matches(':focus-visible')) { setKbMod(m.id); live.current.kick?.(); } }} onBlur={() => setKbMod(k => (k === m.id ? null : k))}
             aria-label={`${zh} ${en} · ${m.title} ${m.en}，${art.n.stars} 主星 ${art.n.edges} 连线 · ${sum.count} 条`}/>
         </div>
         <button className={`cluster-label ${active ? 'active' : ''} ${hub ? 'below' : 'side'}`} ref={el => { labelRefs.current[m.id] = el; }} onClick={() => onModule(m.id)} tabIndex={-1}
-          onPointerEnter={() => { live.current.hover = m.kind; }} onPointerLeave={() => { live.current.hover = null; }} style={{'--mod': MOD_STYLE[m.id].color}}>
+          onPointerEnter={() => { live.current.hover = m.kind; live.current.kick?.(); }} onPointerLeave={() => { live.current.hover = null; live.current.kick?.(); }} style={{'--mod': MOD_STYLE[m.id].color}}>
           <span className="jl-icon"><Icon name={m.icon} size={14}/></span>
           <span className="jl-count"><b>{sum.count}</b></span>
           <span className="jl-const"><b>{zh}</b><em>{en.toUpperCase()}</em></span>
@@ -501,14 +532,31 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
   const {mod, sel} = focus;
   const stage = sel ? 'note' : mod ? 'module' : 'hub';
   const items = useMemo(() => moduleItems(graph, mod), [graph, mod]);
+  // 图例原来对 8 个 kind 各 filter 一遍 graph.nodes（每次 render 8 × N 次比较）。
+  const kindCounts = useMemo(() => {
+    const c = {};
+    for (const n of graph.nodes) c[n.kind] = (c[n.kind] || 0) + 1;
+    return c;
+  }, [graph]);
   // 列队行距不足 26px 时会叠在一起看不清：只列出放得下的部分，剩下的用一行说明
-  const maxRows = rowsThatFit(Math.max(size.h, 560));
-  const shown = items.length > maxRows ? items.slice(0, maxRows - 1) : items;   // 留一格给「还有 N 条」
+  const maxRows = useMemo(() => rowsThatFit(Math.max(size.h, 560)), [size.h]);
+  const shown = useMemo(() => (items.length > maxRows ? items.slice(0, maxRows - 1) : items), [items, maxRows]);   // 留一格给「还有 N 条」
   const more = items.length - shown.length;
+  // 帧循环的 effect 依赖 items 的身份：这里必须是稳定引用，否则每次重渲染都会重启循环、把列队动画倒回去
+  const sceneItems = useMemo(() => (stage === 'hub' ? [] : shown), [stage, shown]);
+  // 缩放比（拖到另一块缩放不同的屏会变）：变了要重烘位图并重绘
+  const [dpr, setDpr] = useState(DPR);
+  useEffect(() => {
+    const sync = () => { if (syncDPR()) setDpr(DPR); };
+    window.addEventListener('resize', sync);
+    let mq = null;
+    try { mq = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`); mq.addEventListener?.('change', sync); } catch {}
+    return () => { window.removeEventListener('resize', sync); mq?.removeEventListener?.('change', sync); };
+  }, []);
   const live = useRef(null);
   if (!live.current) {
     const now = performance.now();
-    live.current = {t0: now, time: 0, stage, mod, items, size, reduced, paused: false, hover: null, itemState: [], fanStart: now, core: {x: 640, y: 380, s: 400},
+    live.current = {t0: now, time: 0, stage, mod, items, size, reduced, paused: false, hover: null, itemState: [], fanStart: now, moving: true, core: {x: 640, y: 380, s: 400},
       springs: {dust: sp(.3), core: {x: sp(size.w / 2), y: sp(size.h / 2), s: sp(120), o: sp(0)}, cluster: Object.fromEntries(MODULES.map(m => [m.id, {x: sp(size.w / 2), y: sp(size.h / 2), s: sp(20), o: sp(0), lo: sp(0)}]))}};
     let seen = false;
     try { seen = !!sessionStorage.getItem('neural-intro-seen'); } catch {}
@@ -562,7 +610,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
   return <section ref={stageRef} className={`home-stage stage-${stage} ${live.current.introSeen ? 'intro-done' : ''}`} aria-label="创作星图 Creator graph">
     <div className="stage-bg"/>
     <NetworkCanvas graph={graph} layout={layout} live={live} reduced={reduced}/>
-    <Scene graph={graph} items={stage === 'hub' ? [] : shown} more={stage === 'hub' ? 0 : more} sel={sel} live={live} onModule={id => setFocus({mod: id === mod && stage !== 'hub' ? mod : id, sel: null})} onItem={id => setFocus({mod, sel: id})}/>
+    <Scene graph={graph} items={sceneItems} more={stage === 'hub' ? 0 : more} sel={sel} live={live} dpr={dpr} onModule={id => setFocus({mod: id === mod && stage !== 'hub' ? mod : id, sel: null})} onItem={id => setFocus({mod, sel: id})}/>
 
     <div className="hub-copy" aria-hidden={stage !== 'hub'}>
       <p className="eyebrow">{CONFIG.brand.name} · {CONFIG.brand.sub} <span>{CONFIG.brand.tagline}</span></p>
@@ -588,7 +636,7 @@ export function Home({graph, layout, focus, setFocus, onAction, onAbout, reduced
 
     {stage === 'hub' && <div className="legend glass" aria-label="图例 Legend">
       <h3>图例 <em>Legend</em></h3>
-      {['post', 'note', 'personal', 'idea', 'draft', 'concept', 'tag', 'ghost'].map(k => <div key={k}><i style={{'--kc': KINDS[k].color}} className={k === 'ghost' ? 'ghost' : ''}/>{KINDS[k].label} <em>{KINDS[k].en}</em><b className="mono">{graph.nodes.filter(n => n.kind === k).length}</b></div>)}
+      {['post', 'note', 'personal', 'idea', 'draft', 'concept', 'tag', 'ghost'].map(k => <div key={k}><i style={{'--kc': KINDS[k].color}} className={k === 'ghost' ? 'ghost' : ''}/>{KINDS[k].label} <em>{KINDS[k].en}</em><b className="mono">{kindCounts[k] || 0}</b></div>)}
       <div className="legend-lines"><span><i className="ln mutual"/>双向 <em>Mutual</em></span><span><i className="ln one"/>单向 <em>One-way</em></span></div>
       <p className="legend-foot">环带宽度 = 节点数 · 外圈 = 概念 <em>Ring width = count</em></p>
     </div>}

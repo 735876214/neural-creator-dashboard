@@ -17,11 +17,11 @@
 //   API_TOKEN   可选：设了之后所有 /api 请求都要带 Authorization: Bearer <token>
 //   VAULT_GIT   '1' 开启写入后自动 git commit（默认开启，vault 不是仓库时自动跳过）
 import {createServer} from 'node:http';
-import {readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, renameSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, renameSync, readdirSync, copyFileSync, chmodSync, accessSync, createReadStream, constants as fsConstants} from 'node:fs';
 import {join, resolve, sep, dirname, extname, basename, posix} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {gzipSync} from 'node:zlib';
-import {readVault, vaultStamp, parse, ATTACHMENTS_DIR} from './vault.mjs';
+import {readVault, vaultStamp, vaultStampCached, bumpVaultStamp, parse, ATTACHMENTS_DIR} from './vault.mjs';
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
 import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateIdeas, answer, embed, listModels, validModel, taskModel, taskModelsSnapshot} from './ai.mjs';
@@ -43,7 +43,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 const STATIC_DIR = process.env.STATIC_DIR ? resolve(process.env.STATIC_DIR) : null;
 const API_TOKEN = process.env.API_TOKEN || '';
 const VAULT_GIT = process.env.VAULT_GIT !== '0';
-const MAX_BODY = Number(process.env.MAX_BODY || 2 * 1024 * 1024);
+// 请求体上限：与 deploy/.env.example、docker-compose.yml 里写的「默认 4 MB」保持一致。
+// 原来代码默认 2 MB、模板写 4 MB，直接 `npm run api` 与容器行为不同，按文档传 3 MB 的 PDF 会 413。
+const MAX_BODY = Number(process.env.MAX_BODY || 4 * 1024 * 1024);
 // 登录：密码来自环境变量，或 compose 里 auth 容器生成的只读文件。
 // 两者都没有 = 不开启登录（本机开发 / 纯静态）。
 const AUTH_FILE = process.env.AUTH_FILE ? resolve(process.env.AUTH_FILE) : '';
@@ -58,6 +60,16 @@ const KIND_DIR = {idea: '04-选题池', draft: '03-创作台', note: '05-方法�
 // news 沿用 note: 前缀（历史语义边依赖它）。relate / ask 必须用这同一套，否则语义边会连到不存在的节点。
 const noteNodeId = n => n.kind === 'personal' ? 'personal:' + n.id : 'note:' + n.id;
 const SNAPSHOTS_DIR = '06-个人知识库/.snapshots';
+
+// 「今天是哪天」必须用显式时区偏移算：容器默认 UTC（镜像不装 tzdata），
+// 东八区 00:00–07:59 之间发布的作品会被 toISOString() 记成前一天，
+// 而作品 date 决定排序、月目标进度与时间区间——一处写错整屏统计都错。
+const TZ_OFFSET_RAW = Number(process.env.DASHBOARD_TZ_OFFSET ?? process.env.NEWS_TZ_OFFSET);
+const TZ_OFFSET = Number.isFinite(TZ_OFFSET_RAW) ? TZ_OFFSET_RAW : 8;
+const localYmd = (ms = Date.now()) => {
+  const d = new Date(ms + TZ_OFFSET * 3600_000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+};
 
 if (!process.env.VAULT_DIR) {
   console.error('请用 VAULT_DIR 指定笔记库目录，例如：VAULT_DIR=./examples/vault node server/index.mjs');
@@ -81,9 +93,22 @@ const fail = (code, message, extra) => { throw new HttpError(code, message, extr
 function acceptsGzip(req) {
   return /\bgzip\b/.test(String(req?.headers?.['accept-encoding'] || ''));
 }
+
+// 所有响应（JSON、静态、HTML）都要带的基础安全头。
+// 原来只有附件与知识库快照这两条边缘路径有 CSP，index.html / login.html / assets / 全部 JSON
+// 一条都没有：登录页可被任意站点 iframe 套一层透明层骗取密码；笔记正文一旦有 XSS 也没有兜底。
+// 这里只上「不影响现有功能」的四条：login.html 与看板都用内联 script / inline style / canvas，
+// 所以先不加 script-src（白名单是后续单独立项），但 frame-ancestors 已经能挡点击劫持。
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'no-referrer',
+  'content-security-policy': "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+};
+
 function json(res, code, obj) {
   let body = Buffer.from(JSON.stringify(obj));
-  const head = {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'vary': 'accept-encoding'};
+  const head = {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'vary': 'accept-encoding', ...SECURITY_HEADERS};
   if (body.length > 1024 && acceptsGzip(res.req)) { body = gzipSync(body); head['content-encoding'] = 'gzip'; }
   head['content-length'] = body.length;
   res.writeHead(code, head);
@@ -95,7 +120,9 @@ async function readBody(req) {
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > MAX_BODY) fail(413, '请求体过大');
+    // 抛之前先 destroy：请求体不 drain 也不断开的话，keep-alive 连接上会残留半截大 body，
+    // 客户端继续往里灌，直到它自己超时（服务端已经回过 413 了）。
+    if (size > MAX_BODY) { req.destroy(); fail(413, '请求体过大'); }
     chunks.push(c);
   }
   if (!chunks.length) return {};
@@ -109,13 +136,21 @@ async function readBody(req) {
   return parsed;
 }
 
+// 可选请求体：只有「确实没有 body」才当 {}。原来的 `readBody(req).catch(() => ({}))`
+// 把 413（过大）与 400（JSON 非法）一起吞成空对象，超限请求既不报错也不处理。
+async function readBodyOrEmpty(req) {
+  const hasBody = Number(req.headers['content-length'] || 0) > 0 || !!req.headers['transfer-encoding'];
+  if (!hasBody) return {};
+  return readBody(req);
+}
+
 // 原始二进制请求体（文件上传用，同样受 MAX_BODY 约束）
 async function readRaw(req) {
   const chunks = [];
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > MAX_BODY) fail(413, '文件过大（上限 ' + Math.round(MAX_BODY / 1024 / 1024) + ' MB）');
+    if (size > MAX_BODY) { req.destroy(); fail(413, '文件过大（上限 ' + Math.round(MAX_BODY / 1024 / 1024) + ' MB）'); }
     chunks.push(c);
   }
   return Buffer.concat(chunks);
@@ -136,7 +171,11 @@ const loginFailures = new Map();
 function loadAuthConfig() {
   if (DASHBOARD_PASSWORD) return {user: DASHBOARD_USER, password: DASHBOARD_PASSWORD};
   if (!AUTH_FILE) return null;
-  if (!existsSync(AUTH_FILE)) return null;
+  if (!existsSync(AUTH_FILE)) {
+    // bootstrapAuth() 已经在前面跑过（设置了 AUTH_FILE 就一定会生成文件）：
+    // 到这里还没有文件说明自举被跳过或失败，绝不能当成「没配置登录」——那等于免登录。
+    throw new Error(`AUTH_FILE 已配置但文件不存在：${AUTH_FILE}`);
+  }
   let raw;
   try { raw = JSON.parse(readFileSync(AUTH_FILE, 'utf8')); }
   catch (e) { throw new Error(`auth.json 不是合法 JSON（${AUTH_FILE}）：${e.message}`); }
@@ -163,15 +202,23 @@ function bootstrapAuth() {
     const password = randomBytes(9).toString('base64url');
     const body = JSON.stringify({user: DASHBOARD_USER, password, createdAt: new Date().toISOString()}, null, 2) + '\n';
     writeFileSync(AUTH_FILE, body, {mode: 0o600});
+    // mode 只在「新建」时生效：AUTH_FILE 若是个已存在的空文件（手搓过、卷里残留），
+    // 覆盖写会保留原有 0644，密码就以组/其他人可读落盘，与文档承诺不符。
+    chmodSync(AUTH_FILE, 0o600);
     console.error('');
     console.error('========== 看板登录 ==========');
     console.error('用户名：' + DASHBOARD_USER);
     console.error('密码：  ' + password);
-    console.error('固定密码：在 .env 设置 DASHBOARD_PASSWORD=你的密码');
+    console.error('（这行只在首次启动时打印一次，密码同时写在 AUTH_FILE 里；');
+    console.error('  想固定密码：在 .env 设置 DASHBOARD_PASSWORD=你的密码）');
     console.error('==============================');
     console.error('');
   } catch (e) {
-    console.error('[note-api] 生成登录密码失败（不开启登录）：', e.message);
+    // 绝不能退化成「不开启登录」：authed() 把 null 当免登录，AUTH_FILE 所在卷只读一次，
+    // 整个笔记库（含写入、删除、改 AI key）就对 0.0.0.0 裸奔，而这里原本只留一行 stderr。
+    console.error('[note-api] 生成登录密码失败，已拒绝启动：' + e.message);
+    console.error('[note-api] 修好 AUTH_FILE 所在目录的权限，或显式设置 DASHBOARD_PASSWORD。');
+    process.exit(1);
   }
 }
 
@@ -184,6 +231,7 @@ function sessionKey() {
   try {
     mkdirSync(DATA_DIR, {recursive: true});
     writeFileSync(SESSION_KEY_FILE, key + '\n', {mode: 0o600});
+    try { chmodSync(SESSION_KEY_FILE, 0o600); } catch {}
   } catch {} // 数据目录只读时退回进程内密钥：重启后重新登录，但功能不受影响
   return key;
 }
@@ -234,7 +282,9 @@ function verifySession(req, auth) {
 }
 
 function cookieHeader(value, req) {
-  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  // 转发头只有在显式信任代理时才认：客户端自带 `X-Forwarded-Proto: https` 就能让 Cookie 带上
+  // Secure，纯 HTTP 部署下会把自己锁进「登录成功但仍未登录」的循环。
+  const proto = TRUST_PROXY ? String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() : '';
   const secure = proto === 'https' || !!req.socket.encrypted;
   const age = value ? `Max-Age=${SESSION_TTL}` : 'Max-Age=0';
   return `${SESSION_COOKIE}=${encodeURIComponent(value || '')}; Path=/; HttpOnly; SameSite=Lax; ${age}${secure ? '; Secure' : ''}`;
@@ -254,13 +304,22 @@ function clientIp(req) {
 }
 
 // 把客户端给的相对路径钉死在笔记库内部，只允许 .md。
+// 服务端私有目录（回收站 / 看板设置 / 网页快照）一律不开放读写：否则任何登录用户都能
+// 覆盖回滚备份、改 settings.json，或读到全部历史版本（实测 GET /api/note?path=.trash/… 返回 200）。
+const PRIVATE_DIRS = ['.trash/', '.dashboard/', SNAPSHOTS_DIR + '/'];
 function inside(rel) {
   const raw = String(rel || '').replace(/\\/g, '/').trim();
   if (!raw || raw.includes('\0')) fail(400, '缺少路径');
   if (!raw.toLowerCase().endsWith('.md')) fail(400, '只允许读写 .md 文件');
   const p = resolve(VAULT, raw);
   if (p !== VAULT && !p.startsWith(VAULT + sep)) fail(400, '路径越界');
-  return {abs: p, rel: p.slice(VAULT.length + 1).split(sep).join('/')};
+  const norm = p.slice(VAULT.length + 1).split(sep).join('/');
+  // 黑名单必须逐段归一化再比：Windows / APFS 上 `.trash./x.md`、`.TRASH/x.md`、`.trash /x.md`
+  // 都会解析到真实 .trash 目录，而字符串 startsWith 判不出来（本机实测 Test-Path '.trash.' 为真）。
+  const segs = norm.split('/').map(s => s.replace(/[. ]+$/, '').toLowerCase());
+  if (segs.some(s => s === '.trash' || s === '.dashboard')) fail(400, '这个目录只允许服务端内部访问');
+  if (segs[0] === '06-个人知识库' && segs[1] === '.snapshots') fail(400, '这个目录只允许服务端内部访问');
+  return {abs: p, rel: norm};
 }
 
 // 网页快照路径：只允许 06-个人知识库/.snapshots/ 下的 .html（剪藏 HTML 不可信，读取时由路由加 CSP）。
@@ -277,26 +336,30 @@ function insideHtml(rel) {
 const mtimeOf = abs => statSync(abs).mtimeMs;
 
 // —— 笔记库读取（带短缓存；写操作会立即失效）——
+// 注意 readVault 全程是同步 fs：多个标签页同时冷启动也只会有一个真正去读盘（其余请求在
+// 事件循环里排队，等到的就是已经填好的缓存），所以这里不需要 single-flight 去重。
 let cache = {at: 0, data: null};
 function loadData(maxAge = 1500) {
   if (cache.data && Date.now() - cache.at < maxAge) return cache.data;
   const data = readVault({vault: VAULT});
   const files = {};
-  let personalSeq = 0;
-  for (const w of data.works) files['post:' + w.post.id] = w.rel;
-  // personal 用自己的前缀（与前端图谱节点 id 一致）；news 沿用 note: 前缀（历史语义边依赖它）。
-  for (const n of data.notes) files[(n.kind === 'personal' ? 'personal:p' + (++personalSeq) : 'note:' + n.id)] = n.rel;
-  for (const i of data.ideas) files['idea:' + i.id] = i.rel;
-  for (const d of data.drafts) files['draft:' + d.id] = d.rel;
   const figures = {};
   const mtimes = {};
+  // 附件（figures）由 readVault 在读取正文时顺手算好：这里原来把每个文件再读一遍，
+  // 几千篇的库等于每次 /api/data 都把整个 vault 读两遍；而且截断到 6000 字的正文
+  // 拿不到后面的图片引用，作品详情页报的「N 张图」会偏少。
+  const add = (id, rel, attachments) => {
+    files[id] = rel;
+    if (attachments?.length) figures[id] = attachments;
+  };
+  for (const w of data.works) add('post:' + w.post.id, w.rel, w.attachments);
+  // personal / news 的 id 规则跟索引、图谱共用 noteNodeId()：personal 用自己的前缀，news 沿用 note:（历史语义边依赖它）。
+  for (const n of data.notes) add(noteNodeId(n), n.rel, n.attachments);
+  for (const i of data.ideas) add('idea:' + i.id, i.rel, null);
+  for (const d of data.drafts) add('draft:' + d.id, d.rel, null);
+  // mtime 只能现取（乐观锁必须是最新的），但一次 stat 比「读全文 + 正则匹配附件」便宜一个数量级
   for (const [id, rel] of Object.entries(files)) {
-    const abs = join(VAULT, rel);
-    try {
-      mtimes[id] = mtimeOf(abs);
-      const f = attachmentsOf(readFileSync(abs, 'utf8'));
-      if (f.length) figures[id] = f;
-    } catch {}
+    try { mtimes[id] = mtimeOf(join(VAULT, rel)); } catch {}
   }
   cache = {at: Date.now(), data: {...data, files, figures, mtimes, generatedAt: new Date().toISOString()}};
   return cache.data;
@@ -306,38 +369,65 @@ const invalidate = () => { cache = {at: 0, data: null}; };
 // 写入的目标一律用「相对路径」定位，不用 n1 / w1 这类位置 id——
 // 位置 id 在笔记增删后会整体位移，拿它当写入口令迟早会写到别的文件上。
 function target({path, id}) {
+  // path 与 id 同时给出时以前是 path 静默胜出，调用方以为按 id 定位成功
+  if (path && id) fail(400, 'path 与 id 只能二选一');
   if (path) return inside(path).rel;
-  if (id) {
-    const rel = loadData().files[id];
-    if (rel) return rel;
-  }
-  fail(400, '缺少 path（写入必须用相对路径定位文件）');
+  if (!id) fail(400, '缺少 path（写入必须用相对路径定位文件）');
+  const rel = loadData().files[id];
+  // 「给了 id 但查不到」是 404，不是「参数没给」：原实现把两者并成一个 400，
+  // 前端只看到「缺少 path」，失效 id 的真实原因被掩盖。
+  if (!rel) fail(404, `找不到该 id 对应的文件：${id}`);
+  return rel;
 }
 
 // —— 写回 ——
+// 备份不能每次都写同一个 .trash/<rel>：同一篇笔记被反复删除/编辑时第二次会静默覆盖第一次，
+// 「误写可回滚」就只剩最近一版（实测 A 版永久丢失）。首次仍用 .trash/<rel>（沿用既有预期），
+// 已存在时追加时间戳 + 随机后缀，保留历史版本。
 function backup(rel, text) {
-  const dest = join(VAULT, '.trash', rel);
+  let dest = join(VAULT, '.trash', rel);
+  if (existsSync(dest)) {
+    const ext = extname(dest);
+    const stem = dest.slice(0, dest.length - ext.length);
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').replace(/\..*$/, '');
+    dest = `${stem}.${stamp}-${randomBytes(2).toString('hex')}${ext}`;
+    for (let i = 2; existsSync(dest) && i < 100; i++) dest = `${stem}.${stamp}-${randomBytes(2).toString('hex')}${ext}`;
+  }
   mkdirSync(dirname(dest), {recursive: true});
-  writeFileSync(dest, text, 'utf8');
+  // 备份自身也要原子：写一半崩溃会留下残缺备份，正好在最需要回滚时不可用
+  const tmp = join(dirname(dest), `.${basename(dest)}.${process.pid}-${Date.now()}.tmp`);
+  writeFileSync(tmp, text, 'utf8');
+  renameSync(tmp, dest);
 }
 
+// git 自动提交：失败绝不能静默。文档承诺「笔记库是 git 仓库，误写可回滚」，用户按此理解
+// 自己的数据可恢复性；容器里 .git 属主与进程 UID 不一致（换 UID 后常见）、index.lock 残留、
+// 磁盘满、safe.directory 不匹配任意一种都会走到 catch。写回本身已成功，所以只警告不失败，
+// 但必须留痕，否则历史静默断档而没人知道。
+const GIT_TIMEOUT = 5000; // 同步调用在请求路径上：大 vault 上不设超时会阻塞整个事件循环
 function gitCommit(rel, message) {
   if (!VAULT_GIT || !existsSync(join(VAULT, '.git'))) return false;
   try {
-    execFileSync('git', ['add', '--', rel], {cwd: VAULT, stdio: 'ignore'});
-    execFileSync('git', ['commit', '-m', message, '--', rel], {cwd: VAULT, stdio: 'ignore'});
+    execFileSync('git', ['add', '--', rel], {cwd: VAULT, stdio: 'ignore', timeout: GIT_TIMEOUT});
+    execFileSync('git', ['commit', '-m', message, '--', rel], {cwd: VAULT, stdio: 'ignore', timeout: GIT_TIMEOUT});
     return true;
-  } catch { return false; }
+  } catch (e) {
+    console.warn('[note-api] git 提交失败（文件已写入，只是没进版本库）：', rel, e.status ?? e.message);
+    return false;
+  }
 }
 
 // 多文件提交（网页剪藏：md + 快照一起进版本库）。路径已由调用方各自校验。
 function gitCommitMulti(rels, message) {
   if (!VAULT_GIT || !existsSync(join(VAULT, '.git'))) return false;
   try {
-    execFileSync('git', ['add', '--', ...rels], {cwd: VAULT, stdio: 'ignore'});
-    execFileSync('git', ['commit', '-m', message, '--', ...rels], {cwd: VAULT, stdio: 'ignore'});
+    execFileSync('git', ['add', '--', ...rels], {cwd: VAULT, stdio: 'ignore', timeout: GIT_TIMEOUT});
+    execFileSync('git', ['commit', '-m', message, '--', ...rels], {cwd: VAULT, stdio: 'ignore', timeout: GIT_TIMEOUT});
     return true;
-  } catch { return false; }
+  } catch (e) {
+    console.warn('[note-api] git 提交失败（文件已写入，只是没进版本库）：', rels.join(', '), e.status ?? e.message);
+    return false;
+  }
 }
 
 // —— 看板设置（vault/.dashboard/settings.json）——
@@ -550,6 +640,13 @@ function cleanFm(kind, fm) {
     if ('priority' in out && !['高', '中', '低'].includes(out.priority)) fail(400, '优先级必须是 高/中/低');
     if ('status' in out && !['待写', '待扩展', '已转草稿'].includes(out.status)) fail(400, '状态必须是 待写/待扩展/已转草稿');
   } else {
+    // 草稿也允许带稳定 id：/api/publish 要靠它把「草稿 → 作品」这一跳写进作品 frontmatter
+    // （发布时草稿文件被移走，只有 id 能在移走前后都成立）。格式与选题的稳定 id 一致，只放行短字符串。
+    if ('id' in fm) {
+      if (typeof fm.id !== 'string') fail(400, 'id 必须是字符串');
+      if (fm.id.length > 32) fail(400, 'id 过长');
+      out.id = fm.id;
+    }
     if ('source' in fm) {
       if (!(typeof fm.source === 'string' || typeof fm.source === 'number')) fail(400, 'source 必须是选题标题或选题 id');
       out.source = String(fm.source);
@@ -599,8 +696,13 @@ function writeExisting(rel, {body, fm, mtime}) {
   if (!existsSync(abs)) fail(404, `文件不存在：${rel}`);
   const before = readFileSync(abs, 'utf8');
   const current = mtimeOf(abs);
-  if (mtime != null && Math.abs(Number(mtime) - current) > 1) {
-    fail(409, '文件已被其他地方改动', {path: rel, mtime: current, content: before});
+  if (mtime != null) {
+    const want = Number(mtime);
+    // NaN 会让下面的比较恒为 false，乐观锁静默失效：实测 mtime:"abc" 直接覆盖成功且回 200。
+    if (!Number.isFinite(want)) fail(400, 'mtime 必须是毫秒时间戳');
+    if (Math.abs(want - current) > 1) {
+      fail(409, '文件已被其他地方改动', {path: rel, mtime: current, content: before});
+    }
   }
   const after = writeDoc(before, {fm: alignKeys(fm, before), body});
   if (after === before) return {path: rel, mtime: current, changed: false, text: after};
@@ -649,12 +751,22 @@ function createNote(kind, {title, body = '', fm = {}, requestId}) {
   }
   const dir = KIND_DIR[kind] || KIND_DIR.note;
   const name = safeName(title);
-  let rel = posix.join(dir, name + '.md');
-  for (let i = 2; existsSync(join(VAULT, rel)); i++) rel = posix.join(dir, `${name} ${i}.md`);
   const text = writeDoc('', {fm, body});
+  mkdirSync(join(VAULT, dir), {recursive: true});
+  // 用 'wx'（O_EXCL）占位：existsSync + writeFileSync 之间若被并发创建同名笔记（cron + HTTP、
+  // 两个标签页）会互相静默覆盖，而且 writeFileSync 非原子，进程被杀会留下半截 .md。
+  let rel = '';
+  for (let i = 1; i < 1000 && !rel; i++) {
+    const cand = posix.join(dir, (i === 1 ? name : `${name} ${i}`) + '.md');
+    try {
+      writeFileSync(join(VAULT, cand), text, {encoding: 'utf8', flag: 'wx'});
+      rel = cand;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+    }
+  }
+  if (!rel) fail(409, `同名文件过多：${name}`);
   const abs = join(VAULT, rel);
-  mkdirSync(dirname(abs), {recursive: true});
-  writeFileSync(abs, text, 'utf8');
   createMemoPut(requestId, rel);
   gitCommit(rel, `新增 ${rel}`);
   invalidate();
@@ -684,23 +796,88 @@ function parseFrontmatter(text) {
   return {tags: Array.isArray(raw) ? raw : raw ? String(raw).split(/[,，\s]+/).filter(Boolean) : []};
 }
 
+// —— 崩溃残留清理 ——
+// 所有落盘都是「写 tmp → rename」，进程在这两步之间被杀就会在目录里留下
+// `.<名字>.<pid>-<时间戳>.tmp`。它们会被 Obsidian / Syncthing / git 当成普通文件同步与提交。
+// 只删 1 小时前的：刚写出来的可能是另一个实例此刻正在用的临时文件。
+const TEMP_FILE_RE = /^\..+\.\d+-\d+\.tmp$/;
+function cleanupTempFiles(root, depth = 0) {
+  if (!root || depth > 6) return 0;
+  let entries;
+  try { entries = readdirSync(root, {withFileTypes: true}); } catch { return 0; }
+  const cutoff = Date.now() - 3600_000;
+  let removed = 0;
+  for (const e of entries) {
+    const p = join(root, e.name);
+    if (e.isDirectory()) {
+      if (e.name === 'node_modules' || e.name === '.git') continue;
+      removed += cleanupTempFiles(p, depth + 1);
+      continue;
+    }
+    if (!TEMP_FILE_RE.test(e.name)) continue;
+    try { if (statSync(p).mtimeMs < cutoff) { rmSync(p, {force: true}); removed++; } } catch {}
+  }
+  return removed;
+}
+
 // —— 索引 ——
 function reindex(data = loadData()) {
   const rows = [];
   // 1.5s 快照缓存里的文件可能刚被外部删掉/改名：statSync 抛 ENOENT 会让整个 /api/data 500，
   // 这里按 loadData 收集 mtimes 的同一策略兜底，缺文件的行跳过（下一次 loadData 就不再包含它）。
-  const at = rel => { try { return new Date(statSync(join(VAULT, rel)).mtimeMs).toISOString(); } catch { return null; } };
+  //
+  // 少读到一篇 ≠ 它被删了（SMB 抖动、被独占、权限）：readVault 对读不出正文的文件是 continue，
+  // 这时如果照常做「删掉不在 rows 里的 id」与批量清扫，那一篇的向量、AI 摘要、语义边会被
+  // 永久删除（下次 relate 要全量重算 embedding、analyze 要重烧 token）。所以统计缺文件数，
+  // 只要有一个，这一轮就只增只改、不删不清。
+  const mtimes = data.mtimes || {};
+  let missing = 0;
+  const at = (id, rel) => {
+    // loadData 已经为每个文件 stat 过一次（乐观锁用的就是它），这里直接复用，
+    // 不再对同一批路径 stat 第二遍（几千篇的库等于每次 /api/data 多几千次系统调用）。
+    const known = mtimes[id];
+    if (Number.isFinite(known)) return new Date(known).toISOString();
+    try { return new Date(statSync(join(VAULT, rel)).mtimeMs).toISOString(); } catch { missing++; return null; }
+  };
   const push = (id, rel, title, kind, body) => {
-    const mtime = at(rel);
+    const mtime = at(id, rel);
     if (!mtime) return;
     rows.push({id, path: rel, title, kind, body, hash: hashOf(body), mtime});
   };
   for (const w of data.works) push('post:' + w.post.id, w.rel, w.post.title, 'post', w.content.body);
-  let personalSeq = 0;
-  for (const n of data.notes) push(n.kind === 'personal' ? 'personal:p' + (++personalSeq) : 'note:' + n.id, n.rel, n.title, n.kind, n.body);
+  for (const n of data.notes) push(noteNodeId(n), n.rel, n.title, n.kind, n.body);
   for (const i of data.ideas) push('idea:' + i.id, i.rel, i.title, 'idea', i.note || '');
   for (const d of data.drafts) push('draft:' + d.id, d.rel, d.title, 'draft', d.body);
-  return index.syncNotes(rows);
+  return index.syncNotes(rows, {prune: missing === 0});
+}
+
+// 索引只覆盖 /api/data 的展示窗口（作品 30、方法笔记 40、日报 60、个人库 120、选题草稿 300）：
+// 窗口外的文件搜不到，也不会进 RAG 上下文——文件明明躺在库里却回答「没有相关内容」。
+// 命中为空时用一次全量读兜底（只在未命中时付这份钱，正常检索零额外开销）。
+function searchAll(q, limit = 20) {
+  const term = String(q || '').trim();
+  const hits = index.search(term, limit);
+  if (hits.length || [...term].length < 2) return hits;
+  try {
+    const full = readVault({vault: VAULT, full: true});
+    const pool = [
+      ...full.works.map(w => ({id: 'post:' + w.post.id, title: w.post.title, kind: 'post', rel: w.rel, body: w.content?.body || ''})),
+      ...full.notes.map(n => ({id: noteNodeId(n), title: n.title, kind: n.kind, rel: n.rel, body: n.body})),
+      ...full.ideas.map(i => ({id: 'idea:' + i.id, title: i.title, kind: 'idea', rel: i.rel, body: i.note || ''})),
+      ...full.drafts.map(x => ({id: 'draft:' + x.id, title: x.title, kind: 'draft', rel: x.rel, body: x.body || ''}))
+    ];
+    const seen = new Set(hits.map(h => h.id));
+    const needle = term.toLowerCase();
+    for (const x of pool) {
+      if (hits.length >= limit) break;
+      if (seen.has(x.id)) continue;
+      const at = (x.title + '\n' + x.body).toLowerCase().indexOf(needle);
+      if (at < 0) continue;
+      seen.add(x.id);
+      hits.push({id: x.id, title: x.title, kind: x.kind, path: x.rel, snip: x.body.slice(Math.max(0, at - 40), at + 80)});
+    }
+  } catch (e) { console.error('[note-api] 全量检索兜底失败：', e.message); }
+  return hits;
 }
 
 // —— 静态托管（可选，用来省掉单独的 nginx）——
@@ -709,21 +886,42 @@ const MIME = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; char
   '.webp': 'image/webp', '.woff2': 'font/woff2', '.ico': 'image/x-icon', '.map': 'application/json; charset=utf-8'};
 function serveStatic(req, res, pathname) {
   let rel;
-  try { rel = decodeURIComponent(pathname).replace(/^\/+/, ''); }
+  try { rel = decodeURIComponent(pathname).replace(/\\/g, '/').replace(/^\/+/, ''); }
   catch { rel = ''; } // 畸形 URL 当作没这个文件，走 SPA 回退
+  // 反斜杠必须先归一化成 '/' 再判 ..：Windows 上 join/resolve 把 \ 当分隔符，
+  // 只按 '/' 切分时 `..\dist2\leak.js` 能跳出 STATIC_DIR（原实现实测可读到相邻目录文件）。
   if (rel.includes('\0') || rel.split('/').includes('..')) return false;
-  let abs = join(STATIC_DIR, rel);
-  if (!abs.startsWith(STATIC_DIR)) return false;
-  if (!existsSync(abs) || statSync(abs).isDirectory()) abs = join(STATIC_DIR, 'index.html'); // SPA 回退
-  if (!existsSync(abs)) return false;
-  let body = readFileSync(abs);
+  let abs = resolve(STATIC_DIR, rel);
+  // 前缀比较必须带分隔符：`…/dist2` 也 startsWith(`…/dist`) 成立
+  if (abs !== STATIC_DIR && !abs.startsWith(STATIC_DIR + sep)) return false;
+  const missing = !existsSync(abs) || statSync(abs).isDirectory();
+  if (missing) {
+    // 只在「看起来是页面路由」（没有扩展名）时才回退到 index.html。
+    // 原来任何未命中的路径都回 index.html + 200：`/foo/assets/main.js` 这种深链会先拿 200
+    // 空壳页，再让浏览器把一段 HTML 当 JS 解析（控制台一串 Unexpected token '<'），
+    // 真正的 404 反而被吞掉。
+    if (extname(rel)) return false;
+    abs = join(STATIC_DIR, 'index.html');
+    if (!existsSync(abs)) return false;
+  }
+  const st = statSync(abs);
   const type = MIME[extname(abs).toLowerCase()] || 'application/octet-stream';
-  const head = {'content-type': type, 'cache-control': 'no-cache'};
+  // Vite 产物带内容 hash，可以永久缓存；入口 HTML 必须每次协商（否则改了 index.html 拉不到新版）。
+  // 原来统一 no-cache 且没有 ETag：每次刷新都全量重传 JS/CSS，而 no-cache 的协商缓存又完全失效。
+  const isAsset = rel.startsWith('assets/');
+  const cacheControl = isAsset ? 'public, max-age=31536000, immutable' : 'no-cache';
+  const etag = 'W/"' + st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16) + '"';
+  const head = {'content-type': type, 'cache-control': cacheControl, etag, 'vary': 'accept-encoding', ...SECURITY_HEADERS};
+  if (String(req.headers['if-none-match'] || '') === etag) {
+    res.writeHead(304, head);
+    res.end();
+    return true;
+  }
+  let body = readFileSync(abs);
   // 文本类资源（js/css/html/svg/json）压缩后再发；图片字体不需要
   if (body.length > 1024 && /^(text\/|application\/(json|javascript|manifest))/.test(type) && acceptsGzip(req)) {
     body = gzipSync(body); head['content-encoding'] = 'gzip';
   }
-  head['vary'] = 'accept-encoding';
   head['content-length'] = body.length;
   res.writeHead(200, head);
   res.end(body);
@@ -735,7 +933,8 @@ function tokenAuthed(req) {
   if (!API_TOKEN) return false;
   const h = req.headers.authorization || '';
   const t = h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-api-token'] || '');
-  return t === API_TOKEN;
+  // 常量时间比较：`t === API_TOKEN` 会按首个不同字符的位置泄漏前缀信息
+  return safeEqual(t, API_TOKEN);
 }
 
 function authed(req) {
@@ -745,11 +944,43 @@ function authed(req) {
 }
 
 // —— 路由 ——
+// 这两个端点的请求体是原始二进制（Content-Type 由上传的文件决定），不走「必须是 JSON」的闸。
+const RAW_UPLOADS = new Set(['/api/attachment', '/api/knowledge/upload']);
+
 async function route(req, res, url) {
   const p = url.pathname.replace(/\/+$/, '') || '/';
 
-  // 健康检查只需要 ok：绝对路径与索引条数不该对未鉴权请求暴露
-  if (p === '/api/health') return json(res, 200, {ok: true});
+  // —— CSRF / 简单请求闸 ——
+  // 会话 Cookie 是 SameSite=Lax，同站（evil.example.com → dash.example.com）仍会带上；
+  // 而 `text/plain` 的 JSON body 属于「简单请求」，浏览器不发预检。原来只剩 SameSite 一道防线。
+  // 因此非 GET/HEAD 一律要求 JSON Content-Type，并要求 sec-fetch-site 同源（无该头的老客户端不拦）。
+  const method = String(req.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    const site = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+    if (site && site !== 'same-origin' && site !== 'none') return json(res, 403, {error: '跨站请求被拒绝'});
+    if (!RAW_UPLOADS.has(p)) {
+      const hasBody = Number(req.headers['content-length'] || 0) > 0 || !!req.headers['transfer-encoding'];
+      const ctype = String(req.headers['content-type'] || '').toLowerCase();
+      if (hasBody && !ctype.startsWith('application/json')) {
+        return json(res, 415, {error: '要求 Content-Type: application/json'});
+      }
+    }
+  }
+
+  // 健康检查默认只回 ok：绝对路径与索引条数不该对未鉴权请求暴露。
+  // ?deep=1 再检查 vault 可读、DATA_DIR 可写（只回布尔，不含路径）：卷被快照锁定、配额满、
+  // 或换个 UID 后 chown 改错时，容器必须显示 unhealthy —— 否则「页面能开、保存全失败」
+  // 而 docker ps 一直 healthy，容器编排永远不会重启它，也没有任何健康信号指向根因。
+  if (p === '/api/health') {
+    if (url.searchParams.get('deep') !== '1') return json(res, 200, {ok: true});
+    const can = fn => { try { fn(); return true; } catch { return false; } };
+    const checks = {
+      vault: can(() => accessSync(VAULT, fsConstants.R_OK)),
+      data: can(() => accessSync(DATA_DIR, fsConstants.W_OK))
+    };
+    const ok = checks.vault && checks.data;
+    return json(res, ok ? 200 : 503, {ok, checks});
+  }
 
   // —— 登录：这几个端点在未登录时也必须可用 ——
   if (p === '/api/session' && req.method === 'GET') {
@@ -763,21 +994,38 @@ async function route(req, res, url) {
     if (!auth) return json(res, 200, {ok: true, required: false});
     const ip = clientIp(req);
     const now = Date.now();
-    // 失败记录只在成功登录时清除：不定期清过期项的话 Map 会随来源 IP 一直长
+    // 失败记录只在成功登录时清除；不定期清过期项的话 Map 会随来源 IP 一直长
     if (loginFailures.size > 512) for (const [k, v] of loginFailures) if (v.reset <= now) loginFailures.delete(k);
-    const rec = loginFailures.get(ip);
+    const bump = (k, at) => {
+      const r = loginFailures.get(k);
+      const next = r && r.reset > at ? {n: r.n + 1, reset: r.reset} : {n: 1, reset: at + LOGIN_WINDOW};
+      loginFailures.set(k, next);
+      return next;
+    };
+    // 只按 IP 计数会被两种情况打穿：反代后未设 TRUST_PROXY 时所有客户端共用一个 key
+    // （一个人失败 8 次就能把主人锁在门外 5 分钟）；设了又可用 x-real-ip 无限拆分。
+    // 所以 IP 维度只做宽松上限（3×），精确计数落在「IP + 用户名」上。
+    const ipKey = 'ip:' + ip;
+    const ipRec = loginFailures.get(ipKey);
+    if (ipRec && ipRec.reset > now && ipRec.n >= LOGIN_MAX * 3) {
+      res.setHeader('retry-after', String(Math.ceil((ipRec.reset - now) / 1000)));
+      return json(res, 429, {error: '尝试太频繁，请稍后再试'});
+    }
+    const {username, password} = await readBody(req);
+    const key = ipKey + '|' + String(username ?? '').slice(0, 64);
+    const rec = loginFailures.get(key);
     if (rec && rec.reset > now && rec.n >= LOGIN_MAX) {
       res.setHeader('retry-after', String(Math.ceil((rec.reset - now) / 1000)));
       return json(res, 429, {error: '尝试太频繁，请稍后再试'});
     }
-    const {username, password} = await readBody(req);
     const ok = safeEqual(username ?? '', auth.user) & safeEqual(password ?? '', auth.password);
     if (!ok) {
-      const next = rec && rec.reset > now ? {n: rec.n + 1, reset: rec.reset} : {n: 1, reset: now + LOGIN_WINDOW};
-      loginFailures.set(ip, next);
+      bump(ipKey, now);
+      const next = bump(key, now);
       return json(res, 401, {error: '用户名或密码不正确', attemptsLeft: Math.max(0, LOGIN_MAX - next.n)});
     }
-    loginFailures.delete(ip);
+    loginFailures.delete(key);
+    loginFailures.delete(ipKey);
     res.setHeader('set-cookie', cookieHeader(makeSession(auth), req));
     return json(res, 200, {ok: true, user: auth.user});
   }
@@ -787,7 +1035,9 @@ async function route(req, res, url) {
     return json(res, 200, {ok: true});
   }
 
-  // nginx 的 auth_request 子请求：204 = 放行，401 = 跳登录页
+  // 兼容旧反代的鉴权子请求约定：204 = 放行，401 = 拒绝。
+  // 现在的镜像里没有 nginx，鉴权由 note-api 自己做（页面 302 到 login.html，其余 401），
+  // 这个端点只作为外部反代 / 脚本的探针保留。
   if (p === '/api/auth-check') {
     if (authed(req)) {
       res.writeHead(204, {'cache-control': 'no-store'});
@@ -798,18 +1048,26 @@ async function route(req, res, url) {
 
   if (!authed(req)) return json(res, 401, {error: '未登录'});
 
+  // 任何写请求都先让 /api/version 的短缓存失效：否则「保存完立刻轮询」会读到 3 秒前的
+  // 旧指纹，前端据此判断「没有变化」，刚写的内容不刷新（外部编辑器的改动最多滞后 3 秒）。
+  if (req.method !== 'GET' && req.method !== 'HEAD') bumpVaultStamp();
+
   // 轻量指纹：外部编辑器改动 vault 后前端轮询这里决定要不要重新拉 /api/data。
   // v = 各文件 mtime 汇总（+ 条目数），不精确到单文件但足够发现「有变化」。
   if (p === '/api/version' && req.method === 'GET') {
     // 前端每 5 秒轮询一次：这里只能做 walk + stat 的轻量指纹。
     // 以前走全量数据装载（1.5s 缓存永远命中不了）＝ 每个标签页每 5 秒把整个 vault 读两遍。
-    const stamp = vaultStamp(VAULT);
+    // 短缓存 3 秒：多标签页各自 5 秒轮询时，把全库 stat 合并成一次。
+    const stamp = vaultStampCached(VAULT);
     return json(res, 200, {v: stamp.v, files: stamp.n, generatedAt: new Date().toISOString()});
   }
 
   if (p === '/api/data' && req.method === 'GET') {
     const d = loadData(url.searchParams.has('fresh') ? 0 : 1500);
-    reindex(d);
+    // 索引是派生数据，坏了应该「退化成搜不到」，而不是把读路径打死：
+    // 两个实例共用 DATA_DIR / 磁盘满时，syncNotes 的写事务会抛错（database is locked、SQLITE_FULL），
+    // 原来这里不拦就让整个 /api/data 500 —— 看板直接白屏。
+    try { reindex(d); } catch (e) { console.error('[note-api] 索引同步失败（本次跳过）：', e.message); }
     return json(res, 200, {
       snapshot: d.snapshot,
       posts: d.works.map(w => w.post),
@@ -825,7 +1083,7 @@ async function route(req, res, url) {
       semantic: index.semanticEdges(),
       ai: aiInfo(),
       platforms: platformInfo(),
-      meta: {vault: VAULT, counts: d.counts, generatedAt: d.generatedAt, indexed: index.count()}
+      meta: {vaultName: basename(VAULT), counts: d.counts, generatedAt: d.generatedAt, indexed: index.count()}
     });
   }
 
@@ -843,7 +1101,18 @@ async function route(req, res, url) {
       keyToApply = body.aiApiKey.trim();
       delete body.aiApiKey; // aiApiKey 不在 SETTINGS_KEYS，writeSettings 会拒绝未知键
     }
-    const next = writeSettings(body);
+    // 先落 key 再落 settings：反过来的话 settings 写成功、key 写失败，就会留下
+    // 「模型已换、key 还是旧的」，前端显示保存成功但 AI 仍然按旧凭据跑。
+    // settings 校验失败（400）时把 key 回滚成旧值，不让一次失败的请求留下半套配置。
+    const prevKey = loadAiSecret();
+    if (keyToApply != null) saveAiSecret(keyToApply);
+    let next;
+    try {
+      next = writeSettings(body);
+    } catch (e) {
+      if (keyToApply != null) { try { saveAiSecret(prevKey); } catch {} }
+      throw e;
+    }
     // 运行时应用不依赖是否带了 key：只改模型/接口地址也要即时生效（否则保存成功但仍在用旧配置）。
     // key：本次带 aiApiKey 才落秘密文件；'' 表示清除（恢复 env 缺省）。
     if (keyToApply != null) saveAiSecret(keyToApply);
@@ -866,6 +1135,9 @@ async function route(req, res, url) {
 
   if (p === '/api/note' && req.method === 'PUT') {
     const {path, id, body, fm, mtime} = await readBody(req);
+    // body 必须是字符串：原来只挡了 undefined，`body: null` 会走进 frontmatter.setBody 的
+    // `String(newBody == null ? '' : newBody)` 把整篇正文清空并回 200（静默数据丢失），body:{} 会写成 [object Object]。
+    if (body !== undefined && typeof body !== 'string') fail(400, 'body 必须是字符串');
     if (body === undefined && (!fm || !Object.keys(fm).length)) fail(400, '没有要写入的内容');
     // 手动补填作品指标走这条路由：只放行指标键与发布来源键，防止任意键写入。
     // 非对象（字符串/数组）必须在这里挡掉：它会一路进 Object.entries，把 0/1/2 这类脏键写进笔记。
@@ -873,8 +1145,22 @@ async function route(req, res, url) {
     if (fm) {
       const allowed = new Set(['views', 'likes', 'comments', 'saves', 'shares', 'follows', 'impressions', 'ctr', 'duration', 'platform', 'url', 'platformId', 'syncedAt', 'tags', 'summary']);
       for (const k of Object.keys(fm)) if (!allowed.has(k)) fail(400, `不允许写入的键：${k}`);
-      if ('url' in fm && typeof fm.url !== 'string') fail(400, 'url 必须是字符串');
-      if ('platform' in fm && typeof fm.platform !== 'string') fail(400, 'platform 必须是字符串');
+      // 逐键校验「值的形状」：白名单只挡住了键名——实测 tags:{a:1} 会写成 `tags: "[object Object]"`、
+      // views:'abc' 会把数字指标变成字符串，前端的月目标/排序随即变 NaN。
+      if ('tags' in fm) {
+        if (!Array.isArray(fm.tags) || fm.tags.some(t => typeof t !== 'string')) fail(400, 'tags 必须是字符串数组');
+        fm.tags = fm.tags.map(t => t.trim()).filter(Boolean);
+      }
+      for (const k of ['views', 'likes', 'comments', 'saves', 'shares', 'follows', 'impressions', 'ctr', 'duration']) {
+        if (!(k in fm)) continue;
+        if (fm[k] === null || fm[k] === '') continue; // 留空表示不写
+        const n = Number(fm[k]);
+        if (!Number.isFinite(n) || n < 0) fail(400, `${k} 必须是非负数字`);
+        fm[k] = n;
+      }
+      for (const k of ['platform', 'url', 'platformId', 'syncedAt', 'summary']) {
+        if (k in fm && typeof fm[k] !== 'string') fail(400, `${k} 必须是字符串`);
+      }
     }
     const r = writeExisting(target({path, id}), {body, fm, mtime});
     return json(res, 200, {path: r.path, mtime: r.mtime, changed: r.changed, hash: hashOf(r.text)});
@@ -899,8 +1185,12 @@ async function route(req, res, url) {
   if ((p === '/api/idea' || p === '/api/draft') && req.method === 'PUT') {
     const kind = p === '/api/idea' ? 'idea' : 'draft';
     const {path, id, title, body, fm, mtime, requestId} = await readBody(req);
+    // 给了 id 却查不到 = 目标文件已失效（发布 / 改名 / 同步后位置 id 会整体位移），
+    // 绝不能当成「新建」：原来会静默在目录里生成一个孤儿文件，前端以为更新成功，图谱多出一条重复条目。
+    const known = id ? loadData().files[id] : null;
+    if (id && !path && !known) fail(404, `找不到该 id 对应的${kind === 'idea' ? '选题' : '草稿'}：${id}`);
     // 有 path / id 就是改现有的；都没有就新建
-    if (path || (id && loadData().files[id])) {
+    if (path || known) {
       const rel = target({path, id});
       // 标题按 Obsidian 的约定就是文件名，不额外写 title 键；
       // 只有用户已经在属性里写了 title 时，才连那一行一起改，免得文件名和属性对不上。
@@ -912,8 +1202,9 @@ async function route(req, res, url) {
     }
     if (!title) fail(400, '新建需要一个标题');
     const fmClean = cleanFm(kind, fm);
-    // 选题创建时写一次稳定 id：此后增删其他文件、改名都不影响关联
-    if (kind === 'idea' && !fmClean.id) fmClean.id = randomUUID().slice(0, 8);
+    // 选题 / 草稿创建时写一次稳定 id：此后增删其他文件、改名都不影响关联
+    // （草稿的 id 供 /api/publish 写 sourceDraftId，否则这一跳在 UI 路径上永远为空）。
+    if ((kind === 'idea' || kind === 'draft') && !fmClean.id) fmClean.id = randomUUID().slice(0, 8);
     const r = createNote(kind, {title, body, fm: fmClean, requestId});
     return json(res, r.reused ? 200 : 201, {path: r.path, mtime: r.mtime, created: true, id: fmClean.id, reused: r.reused || undefined});
   }
@@ -934,6 +1225,9 @@ async function route(req, res, url) {
       }
     }
     const r = createNote('note', {title: title.trim(), body: String(body || ''), fm: clean, requestId});
+    // 幂等重放（同一 requestId）拿到的是第一次写的那个文件：不能再提交一次，
+    // 也不能再报 created:true——前端会当成新建成功，库里凭空多出一个节点。
+    if (r.reused) return json(res, 200, {path: r.path, mtime: r.mtime, created: false, reused: true});
     gitCommit(r.path, `新建方法笔记 ${r.path}`);
     invalidate();
     return json(res, 201, {path: r.path, mtime: r.mtime, created: true});
@@ -942,44 +1236,101 @@ async function route(req, res, url) {
   // 草稿发布为作品：把 03-创作台/ 下的 .md 移到 02-作品库/ 并写入指标 frontmatter。
   // 这是作品的唯一创建入口（脱离外部编辑器的独立生产链）。
   if (p === '/api/publish' && req.method === 'POST') {
-    const {path, id, title, metrics} = await readBody(req);
-    const from = target({path, id});
-    if (!from.startsWith('03-创作台/')) fail(400, '只能发布 03-创作台/ 下的草稿');
-    const fromAbs = join(VAULT, from);
-    if (!existsSync(fromAbs)) fail(404, `草稿不存在：${from}`);
+    // 发布是「探名 → 建目标 → 删源」三步，中间不能被另一个发布请求插进来：
+    // 两边都看到目标不存在时，rename 到已存在路径会**静默覆盖**对方刚建的文件，
+    // 而那一刻 git 还没提交、.trash 也没有备份 —— 内容直接永久丢失。
+    const gate = acquireJob('publish');
+    try {
+      const {path, id, title, metrics} = await readBody(req);
+      const from = target({path, id});
+      if (!from.startsWith('03-创作台/')) fail(400, '只能发布 03-创作台/ 下的草稿');
+      const fromAbs = join(VAULT, from);
+      if (!existsSync(fromAbs)) fail(404, `草稿不存在：${from}`);
+      // title 传对象/数字时 String() 变成 [object Object]，会直接落成文件名
+      if (title != null && typeof title !== 'string') fail(400, '标题必须是字符串');
 
-    if (metrics != null && (typeof metrics !== 'object' || Array.isArray(metrics))) fail(400, 'metrics 必须是对象');
-    const METRIC_KEYS = ['views', 'likes', 'comments', 'saves', 'shares', 'follows', 'impressions', 'ctr', 'duration'];
-    const fm = {date: new Date().toISOString().slice(0, 10)};
-    if (metrics) for (const k of METRIC_KEYS) {
-      if (metrics[k] == null || metrics[k] === '') continue;
-      const n = Number(String(metrics[k]).replace(/[,，\s]/g, ''));
-      if (!Number.isFinite(n)) fail(400, `指标 ${k} 不是数字`);
-      fm[k] = n;
-    }
+      if (metrics != null && (typeof metrics !== 'object' || Array.isArray(metrics))) fail(400, 'metrics 必须是对象');
+      const METRIC_KEYS = ['views', 'likes', 'comments', 'saves', 'shares', 'follows', 'impressions', 'ctr', 'duration'];
+      // 草稿先读一次：既用来解析来源 id，也用来取 mtime 给写回做乐观锁
+      // （原来传 mtime:null 并注释「刚读过」，实际并没读，外部编辑器同时改这篇草稿会被静默覆盖）。
+      let draftFm = {};
+      let draftMtime = null;
+      try {
+        draftMtime = mtimeOf(fromAbs);
+        draftFm = parse(readFileSync(fromAbs, 'utf8')).fm || {};
+      } catch (e) { console.error('[note-api] 发布前读取草稿失败：', e.message); }
+      // 草稿里已经写了 date（计划发布日期）就保留：不能被「今天」覆盖用户的选择
+      const draftDate = String(draftFm.date || draftFm['日期'] || '').trim();
+      // 发布时间必须按本地时区算：toISOString() 在 UTC 容器里会把东八区凌晨发布记成前一天
+      const fm = {date: draftDate || localYmd()};
+      if (metrics) for (const k of METRIC_KEYS) {
+        if (metrics[k] == null || metrics[k] === '') continue;
+        const n = Number(String(metrics[k]).replace(/[,，\s]/g, ''));
+        if (!Number.isFinite(n)) fail(400, `指标 ${k} 不是数字`);
+        fm[k] = n;
+      }
 
-    // 目标文件名：显式 title > 草稿现有文件名；重名加序号（与 createNote 同规则）
-    const baseName = safeName(title || from.slice('03-创作台/'.length).replace(/\.md$/i, ''));
-    let destRel = posix.join('02-作品库', baseName + '.md');
-    for (let i = 2; existsSync(join(VAULT, destRel)); i++) destRel = posix.join('02-作品库', `${baseName} ${i}.md`);
-    const destAbs = join(VAULT, destRel);
+      // 目标文件名：显式 title > 草稿现有文件名；重名加序号（与 createNote 同规则）
+      const baseName = safeName(title || from.slice('03-创作台/'.length).replace(/\.md$/i, ''));
+      let destRel = posix.join('02-作品库', baseName + '.md');
+      for (let i = 2; existsSync(join(VAULT, destRel)); i++) destRel = posix.join('02-作品库', `${baseName} ${i}.md`);
+      const destAbs = join(VAULT, destRel);
 
-    // 移动 + 写 frontmatter：先移动，再在最终位置用乐观锁写指标（writeExisting 负责备份/提交）
-    mkdirSync(dirname(destAbs), {recursive: true});
-    renameSync(fromAbs, destAbs);
-    const movedRel = destAbs.slice(VAULT.length + 1).split(sep).join('/');
-    gitCommitMulti([from, movedRel], `发布为作品 ${from} → ${movedRel}`);
-    // 只有真的写进去了才报 metricsWritten：写失败（权限/磁盘）时前端不该提示「指标已写入」
-    // date 无论如何都要写进去：它是作品的发布时间，缺了会退化成文件 mtime，
-    // 之后任何一次编辑都会把发布时间改成那天（月目标、时间区间、排序全跟着错）。
-    const hasMetrics = Object.keys(fm).length > 1;
+    // 草稿文件发布后就没了，图谱里「选题 → 草稿 → 作品」会断在最后一跳：
+    // 移动前先把草稿 sources 解析成选题的稳定 id，随作品 frontmatter 一起落盘，
+    // buildGraph 才能直接接边（老的标题回连只在草稿还在库里时成立）。
+    let sourceIdeaId = '', sourceDraftId = '';
+    try {
+      const firstOf = keys => {
+        for (const k of keys) {
+          const v = draftFm[k];
+          if (v != null && String(v).trim()) return String(v).trim();
+        }
+        return '';
+      };
+      sourceDraftId = firstOf(['id', '编号']);
+      const rawId = firstOf(['sourceIdeaId']);
+      const rawSource = firstOf(['source', '来源选题', '选题']);
+      const ideas = loadData().ideas || [];
+      const idea = (rawId && ideas.find(i => String(i.id) === rawId))
+        || (rawSource && (ideas.find(i => String(i.id) === rawSource) || ideas.find(i => i.title === rawSource)));
+      if (idea) sourceIdeaId = String(idea.id);
+    } catch (e) { console.error('[note-api] 发布前解析草稿来源失败：', e.message); }
+    if (sourceIdeaId) fm.sourceIdeaId = sourceIdeaId;
+    if (sourceDraftId) fm.sourceDraftId = sourceDraftId;
+
+    // 先写 frontmatter，再移动文件：反过来的话，写盘失败（磁盘满、只读挂载、权限）时
+    // 草稿已经没了、作品又没指标，而那条 rename 的 git 提交已经把「草稿被删」记进历史。
+    // 只有真的写进去了才报 metricsWritten：date 无论如何都要写（缺了会退化成文件 mtime，
+    // 之后任何一次编辑都会把发布时间改成那天，月目标、时间区间、排序全跟着错）。
+    // 来源字段（sourceIdeaId / sourceDraftId）不是指标，不能把「没填指标」算成已写入。
+    const hasMetrics = METRIC_KEYS.some(k => k in fm);
     let metricsWritten = false;
     try {
-      writeExisting(movedRel, {fm, mtime: null}); // 刚移动完，无并发风险
+      writeExisting(from, {fm, mtime: draftMtime});
       metricsWritten = hasMetrics;
     } catch (e) { console.error('[note-api] 发布写 frontmatter 失败：', e.message); }
+
+    // 移动：目标目录先建好。用「独占创建 + 再删源」而不是 rename ——
+    // rename 到已存在路径在 POSIX/Windows 上都是静默覆盖，会吃掉同名作品的整份内容。
+    mkdirSync(dirname(destAbs), {recursive: true});
+    let placedRel = '';
+    for (let i = 0; i < 1000 && !placedRel; i++) {
+      const tryRel = i === 0 ? destRel : posix.join('02-作品库', `${baseName} ${i + 1}.md`);
+      try {
+        copyFileSync(fromAbs, join(VAULT, tryRel), fsConstants.COPYFILE_EXCL);
+        placedRel = tryRel;
+      } catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+      }
+    }
+    if (!placedRel) fail(409, `同名作品过多：${baseName}`);
+    rmSync(fromAbs, {force: true});
+    const movedRel = placedRel;
+    gitCommitMulti([from, movedRel], `发布为作品 ${from} → ${movedRel}`);
     invalidate();
-    return json(res, 201, {path: movedRel, from, metricsWritten});
+    return json(res, 201, {path: movedRel, from, metricsWritten, sourceIdeaId: sourceIdeaId || undefined});
+    } finally { releaseJob(gate); }
   }
 
   // —— 附件（99-附件/）：图片 / 视频上传与读取，供编辑器插图与预览 ——
@@ -1005,10 +1356,13 @@ async function route(req, res, url) {
     const dot = filename.lastIndexOf('.');
     const stem = safeName(dot > 0 ? filename.slice(0, dot) : filename).slice(0, 50).replace(/\s+/g, '-') || 'attachment';
     const ext = extname(filename).toLowerCase();
-    const rel = posix.join(ATTACHMENTS_DIR, `${stem}-${Date.now()}${ext}`);
+    // 时间戳只到毫秒：多选两张同名图片（或双击提交同一文件）落在同一毫秒时，原来的
+    // writeFileSync 直接截断前一张，两个笔记的 ![[...]] 指向同一路径，前一张永久丢失，
+    // 而两次请求都回 201。加随机后缀，与快照命名保持一致。
+    const rel = posix.join(ATTACHMENTS_DIR, `${stem}-${Date.now()}-${randomBytes(3).toString('hex')}${ext}`);
     insideAttachment(rel); // 白名单兜底校验（正常必过）
     mkdirSync(join(VAULT, ATTACHMENTS_DIR), {recursive: true});
-    writeFileSync(join(VAULT, rel), buf);
+    writeFileSync(join(VAULT, rel), buf, {flag: 'wx'});
     gitCommit(rel, `上传附件 ${rel}`);
     invalidate();
     // name 必须就是真正落盘的文件名：前端拿它拼 ![[...]]。再调一次 Date.now() 会跨毫秒对不上。
@@ -1017,29 +1371,48 @@ async function route(req, res, url) {
 
   if (p === '/api/attachment' && req.method === 'GET') {
     const {abs, rel} = insideAttachment(url.searchParams.get('path'));
-    if (!existsSync(abs)) return json(res, 404, {error: '附件不存在', path: rel});
-    const body = readFileSync(abs);
-    res.writeHead(200, {
+    let st;
+    try { st = statSync(abs); } catch { return json(res, 404, {error: '附件不存在', path: rel}); }
+    // 原来 readFileSync 把整片读进堆：99-附件/ 里被 Syncthing 拷进来的大视频，几个并发就
+    // 能把进程打满；而且没有 Range 时视频不能拖动、iOS Safari 直接不播。改成流式 + 206。
+    const head = {
       'content-type': ATTACH_MIME[extname(rel).toLowerCase()] || 'application/octet-stream',
-      'content-length': body.length,
       'x-content-type-options': 'nosniff',
       'content-security-policy': "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline';",
-      'cache-control': 'private, max-age=3600'
-    });
-    return res.end(body);
+      'cache-control': 'private, max-age=3600',
+      'accept-ranges': 'bytes'
+    };
+    const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
+    if (m && (m[1] || m[2])) {
+      let start = m[1] === '' ? null : Number(m[1]);
+      let end = m[2] === '' ? null : Number(m[2]);
+      if (start == null) { start = Math.max(0, st.size - (end || 0)); end = st.size - 1; }
+      else if (end == null || end >= st.size) end = st.size - 1;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= st.size) {
+        res.writeHead(416, {'content-range': `bytes */${st.size}`});
+        return res.end();
+      }
+      res.writeHead(206, {...head, 'content-length': end - start + 1, 'content-range': `bytes ${start}-${end}/${st.size}`});
+      return createReadStream(abs, {start, end}).pipe(res);
+    }
+    res.writeHead(200, {...head, 'content-length': st.size});
+    return createReadStream(abs).pipe(res);
   }
 
   // limit 同样要 clamp：limit=abc → NaN 会让 node:sqlite 抛 datatype mismatch
   if (p === '/api/search' && req.method === 'GET') {
     const rawLimit = Number(url.searchParams.get('limit') || 20);
     const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 100) : 20;
-    return json(res, 200, {q: url.searchParams.get('q') || '', hits: index.search(url.searchParams.get('q') || '', limit)});
+    const q = url.searchParams.get('q') || '';
+    // 外部编辑器改完立刻搜索：索引只有 /api/data 会同步，这里补一次（hash 短路，无变化时零写入）
+    try { reindex(); } catch (e) { console.error('[note-api] 搜索前同步索引失败：', e.message); }
+    return json(res, 200, {q, hits: searchAll(q, limit)});
   }
 
   if (p === '/api/index' && req.method === 'POST') return json(res, 200, {changed: reindex(), indexed: index.count()});
 
   // —— AI：未配 key 时全部 501，前端据此隐藏 AI 区块 ——
-  if (p === '/api/ai/info' && req.method === 'GET') return json(res, 200, aiInfo());
+  if (p === '/api/ai/info' && req.method === 'GET') return json(res, 200, {...aiInfo(), maxUpload: MAX_BODY});
 
   if (p === '/api/ai/models' && req.method === 'GET') return json(res, 200, {models: await listModels(), taskModels: taskModelsSnapshot()});
 
@@ -1051,36 +1424,59 @@ async function route(req, res, url) {
     return requested;
   }
 
-  if (p.startsWith('/api/ai/') && !aiEnabled() && p !== '/api/ai/info' && p !== '/api/ai/models') return json(res, 501, {error: 'AI 未启用：服务端未配置 AI_API_KEY'});
+  // paths 必须是字符串数组：传字符串时 `paths.includes(rel)` 会做**子串**判断
+  // （{paths:'03-创作台'} 会命中该目录下全部草稿），传数字则整个 filter 语义失效。
+  function relPaths(raw) {
+    if (raw == null) return null;
+    if (!Array.isArray(raw) || raw.some(x => typeof x !== 'string')) fail(400, 'paths 必须是字符串数组');
+    if (raw.length > 500) fail(400, '一次最多 500 个路径');
+    return raw;
+  }
+
+  // 任务轮询必须留在闸外：AI 在任务运行期间被关掉时，前端还得能拿到终态，否则永远空转。
+  if (p.startsWith('/api/ai/') && !p.startsWith('/api/ai/jobs/') && !aiEnabled() && p !== '/api/ai/info' && p !== '/api/ai/models') return json(res, 501, {error: 'AI 未启用：服务端未配置 AI_API_KEY'});
 
   // ① 打标签 + 摘要。body: {paths?: [...], dryRun?: bool}
   // 不传 paths 就处理全部方法笔记；按内容 hash 增量，没变过的跳过。
   if (p === '/api/ai/analyze' && req.method === 'POST') {
-    const {paths, dryRun, model} = await readBody(req);
+    const {paths: rawPaths, dryRun, model} = await readBody(req);
+    const paths = relPaths(rawPaths);
     const useModel = await pickModel(model, 'analyze');
     const d = loadData(0);
-    const targets = d.notes.filter(n => !paths?.length || paths.includes(n.rel));
+    // 参与分析的内容：方法笔记 / AI 热点日报 / 个人知识库（都在 d.notes 里）＋ 作品（d.works）。
+    // id 前缀必须跟图谱一致（note: / personal: / post:）：前端拿 node.id 精确匹配结果，
+    // 个人知识库条目在索引里是 personal:pN，用 'note:' + id 永远对不上。
+    const targets = [
+      ...d.notes.map(n => ({id: noteNodeId(n), rel: n.rel, title: n.title, body: n.body})),
+      ...d.works.map(w => ({id: 'post:' + w.post.id, rel: w.rel, title: w.post.title, body: w.content?.body || ''}))
+    ].filter(x => !paths?.length || paths.includes(x.rel));
     const cached = index.aiCache();
-    // 缓存 id 必须与 embeddings / relate 用同一套（noteNodeId）：个人知识库条目在索引里是 personal:pN，
-    // 用 'note:' + id 永远对不上，syncNotes 清理时也会被当成孤儿删掉 → 每次分析都重算。
-    const need = targets.filter(n => cached.get(noteNodeId(n))?.hash !== hashOf(n.body));
+    const need = targets.filter(x => cached.get(x.id)?.hash !== hashOf(x.body));
     if (dryRun) return json(res, 200, {total: targets.length, todo: need.length, skip: targets.length - need.length, dryRun: true, model: useModel});
-    if (!need.length) return json(res, 200, {total: targets.length, done: 0, message: '全部笔记都分析过了'});
+    if (!targets.length) return json(res, 200, {total: 0, done: 0, message: '没有匹配到可分析的内容（方法笔记 / AI 热点 / 个人知识库 / 作品）'});
+    if (!need.length) return json(res, 200, {total: targets.length, done: 0, message: '全部内容都分析过了'});
     const job = runJob('analyze', need.length, async progress => {
       const results = [];
       for (const n of need) {
         const r = await analyzeNote(n.title, n.body, {model: useModel});
-        index.putAi(noteNodeId(n), hashOf(n.body), r.tags, r.summary);
-        // 写回笔记的 frontmatter：tags = 已有 ∪ AI 生成（去重，AI 的排后面），summary = AI 生成。
-        // 写前读原文拿 mtime 做乐观锁；笔记库是自己的，冲突时跳过并在结果里标注。
+        // 写回内容文件（笔记或作品）的 frontmatter：tags = 已有 ∪ AI 生成（去重，AI 的排后面），
+        // summary = AI 生成。写前读原文拿 mtime 做乐观锁；冲突时跳过并在结果里标注。
         let writeErr = null;
         try {
           const cur = readFileSync(join(VAULT, n.rel), 'utf8');
           const curFm = parseFrontmatter(cur);
-          const merged = [...new Set([...(curFm.tags || []), ...r.tags])].slice(0, 12);
+          // 顺序有讲究：老代码是「已有 ∪ AI 再截断 12 个」，标签多的笔记（≥12 个已有）
+          // 会把 AI 结果整批截掉，接口回 written:true 但文件一个字没变。改成先给 AI 留位置。
+          const cap = 20;
+          const existing = [...new Set(curFm.tags || [])];
+          const ai = [...new Set(r.tags)].filter(t => !existing.includes(t));
+          const merged = [...existing.slice(0, Math.max(0, cap - ai.length)), ...ai].slice(0, cap);
           writeExisting(n.rel, {fm: {tags: merged, summary: r.summary}, mtime: mtimeOf(join(VAULT, n.rel))});
         } catch (e) { writeErr = e.message; }
-        results.push({id: 'note:' + n.id, path: n.rel, title: n.title, ...r, written: !writeErr, error: writeErr});
+        // 缓存必须在写回成功之后才记：先记后写时，一旦写回 409 / ENOENT，下一轮 dryRun 就
+        // 算成「已分析」，面板说「写回失败·可重试」，但重试永远返回「这篇已经分析过了」。
+        if (!writeErr) index.putAi(n.id, hashOf(n.body), r.tags, r.summary);
+        results.push({id: n.id, path: n.rel, title: n.title, ...r, written: !writeErr, error: writeErr});
         progress();
       }
       return results;
@@ -1092,7 +1488,11 @@ async function route(req, res, url) {
   // body: {threshold?: 0.82}
   if (p === '/api/ai/relate' && req.method === 'POST') {
     if (!embedEnabled()) return json(res, 501, {error: 'embedding 未启用：请设置 EMBED_API_KEY 与 EMBED_MODEL（DeepSeek 没有 embedding 接口）'});
-    const {threshold = 0.82} = await readBody(req);
+    const {threshold: rawThreshold = 0.82} = await readBody(req);
+    // 阈值必须校验：传 "abc" / null / 字符串数字时 `sim >= threshold` 恒为 false（全 NaN 比较），
+    // 任务照常跑完却一条边都不产出，前端只能看到「完成」，看不出是参数被吞了。
+    const threshold = Number(rawThreshold);
+    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) fail(400, 'threshold 必须是 0–1 之间的数字');
     const d = loadData(0);
     // 语义边覆盖全部内容（obsidian-independence P1）：方法笔记 / 日报 / 个人知识库 /
     // 作品 / 选题 / 草稿，id 前缀与前端图谱一致——跨星团的「灵感↔作品」「制度↔通报」都能连上。
@@ -1102,23 +1502,35 @@ async function route(req, res, url) {
       ...d.ideas.map(i => ({id: 'idea:' + i.id, title: i.title, text: (i.title || '') + '\n' + (i.note || ''), kind: 'idea'})),
       ...d.drafts.map(x => ({id: 'draft:' + x.id, title: x.title, text: (x.title || '') + '\n' + (x.body || ''), kind: 'draft'}))
     ];
-    const cached = index.aiCache();
     const job = runJob('relate', items.length, async progress => {
       const model = process.env.EMBED_MODEL;
       const have = new Map(index.embeddings(model).map(e => [e.id, e]));
+      // 每篇一次 HTTP 太浪费：embed() 本来就支持一批 16 条，几百篇的库串行发几百个请求
+      // 要跑几分钟，还极易撞网关限流。
+      let batch = [];
+      const flush = async () => {
+        if (!batch.length) return;
+        const vecs = await embed(batch.map(b => b.text));
+        batch.forEach((b, i) => { if (vecs[i]) index.putEmbedding(b.id, model, vecs[i], b.hash); progress(); });
+        batch = [];
+      };
       for (const n of items) {
         const id = n.id, h = hashOf(n.text);
-        if (have.get(id)?.hash !== h) {
-          const [vec] = await embed([n.text.slice(0, 2000)]);
-          index.putEmbedding(id, model, vec, h);
-        }
-        progress();
+        if (have.get(id)?.hash !== h) batch.push({id, hash: h, text: n.text.slice(0, 2000)});
+        if (batch.length >= 16) await flush();
+        if (have.get(id)?.hash === h) progress();
       }
+      await flush();
       const vecs = index.embeddings(model);
       const edges = [];
-      for (let i = 0; i < vecs.length; i++) for (let j = i + 1; j < vecs.length; j++) {
-        const sim = cosine(vecs[i].vec, vecs[j].vec);
-        if (sim >= threshold) edges.push({a: vecs[i].id, b: vecs[j].id, sim: Math.round(sim * 1000) / 1000});
+      for (let i = 0; i < vecs.length; i++) {
+        for (let j = i + 1; j < vecs.length; j++) {
+          const sim = cosine(vecs[i].vec, vecs[j].vec);
+          if (sim >= threshold) edges.push({a: vecs[i].id, b: vecs[j].id, sim: Math.round(sim * 1000) / 1000});
+        }
+        // 两两余弦是纯 CPU 的同步循环：几百篇 = 几十万次点积全压在同一个 tick 里，
+        // 期间所有 HTTP（含 /api/version 轮询与登录）都排队，前端看起来像卡死。
+        if (i % 100 === 99) await new Promise(r => setImmediate(r));
       }
       edges.sort((x, y) => y.sim - x.sim);
       return {edges: edges.slice(0, 400), threshold};
@@ -1128,12 +1540,13 @@ async function route(req, res, url) {
 
   // ③ 从笔记生成选题候选。body: {paths: [...]}（必填，用户在前端勾选笔记）
   if (p === '/api/ai/ideas' && req.method === 'POST') {
-    const {paths, model} = await readBody(req);
+    const {paths: rawIdeaPaths, model} = await readBody(req);
+    const paths = relPaths(rawIdeaPaths);
     const useModel = await pickModel(model, 'ideas');
     if (!paths?.length) fail(400, '请先选择要用哪些笔记（paths）');
     const d = loadData(0);
     const notes = d.notes.filter(n => paths.includes(n.rel));
-    if (!notes.length) fail(404, '选中的笔记不存在');
+    if (!notes.length) fail(404, '选中的笔记不存在：/api/ai/ideas 只接受方法笔记 / AI 热点 / 个人知识库（作品请用「打标签 + 摘要」）');
     const candidates = await generateIdeas(notes, {model: useModel});
     return json(res, 200, {candidates, model: useModel});
   }
@@ -1143,18 +1556,40 @@ async function route(req, res, url) {
   if (p === '/api/ai/ask' && req.method === 'POST') {
     const {question, model: reqModel} = await readBody(req);
     if (!question?.trim()) fail(400, '问题不能为空');
+    // 检索的代价随问题长度线性放大：切出的每个短语一次 FTS 查询，2 字词还必然走两条
+    // %…% 全表扫（正文每行 6000 字）。请求体上限是 4MB，粘贴几 KB 中文就能让单线程
+    // 事件循环被十万级全表扫占死，整个服务（含登录、静态资源）在这段时间无响应。
+    const askQ = String(question).slice(0, 300);
     const useModel = await pickModel(reqModel, 'ask');
     const d = loadData(0);
     const hits = new Map();
     // 关键词召回：整句往往不是任何笔记的子串（FTS trigram 是子串匹配），
     // 按标点和常见停用词切成短语，取较长的片段逐个查，命中多的排前面。
-    const phrases = String(question)
+    const phrases = [...new Set(String(askQ)
       .split(/[？?！!。，,、；;：:\s（）()\[\]{}"'「」…·—\-]+/)
       .flatMap(seg => seg.length > 10 ? [seg.slice(0, 5), seg.slice(5, 10), seg.slice(10)].filter(Boolean) : [seg])
-      .filter(seg => [...seg].length >= 2);
+      .filter(seg => [...seg].length >= 2))].slice(0, 12);
     const scored = new Map();
-    for (const ph of phrases.length ? phrases : [String(question)]) {
+    for (const ph of phrases.length ? phrases : [askQ]) {
       for (const h of index.search(ph, 8)) scored.set(h.id, (scored.get(h.id) || 0) + [...ph].length);
+    }
+    // 整句都是口语虚词时（「我的作品里哪篇讲收件箱？」切出「我的作品里 / 哪篇讲收件 / 箱」），
+    // 片段一个都命中不了，于是库里明明有也回「没有找到」。用 2 字滑窗再兜一次：
+    // trigram 要 ≥3 字，2 字正好走 LIKE 子串匹配，命中条数越多排越前。
+    // 只在问题本身不长时启用并限 30 个窗口，避免长句把全表扫放大成百上千次。
+    if (!scored.size) {
+      const clean = askQ.replace(/[^\p{Script=Han}A-Za-z0-9]+/gu, '');
+      if (clean.length <= 60) {
+        const seen = new Set();
+        let windows = 0;
+        for (let i = 0; i + 2 <= clean.length && windows < 30; i++) {
+          const w = clean.slice(i, i + 2);
+          if (seen.has(w)) continue;
+          seen.add(w);
+          windows++;
+          for (const h of index.search(w, 6)) scored.set(h.id, (scored.get(h.id) || 0) + 1);
+        }
+      }
     }
     for (const [id, w] of [...scored].sort((a, b) => b[1] - a[1]).slice(0, 8))
       hits.set(id, {id, title: index.note(id)?.title || '', body: index.note(id)?.body || '', kw: true});
@@ -1162,7 +1597,7 @@ async function route(req, res, url) {
     if (embedEnabled()) {
       try {
         const model = process.env.EMBED_MODEL;
-        const [qv] = await embed([question]);
+        const [qv] = await embed([askQ]);
         const scored = index.embeddings(model)
           .map(e => ({id: e.id, sim: cosine(qv, e.vec)}))
           .sort((a, b) => b.sim - a.sim).slice(0, 6).filter(x => x.sim >= 0.5);
@@ -1174,7 +1609,7 @@ async function route(req, res, url) {
     }
     const contexts = [...hits.values()].slice(0, 8);
     if (!contexts.length) return json(res, 200, {answer: '笔记库里没有找到相关内容。', refs: [], model: useModel});
-    const text = await answer(question, contexts, {model: useModel});
+    const text = await answer(askQ, contexts, {model: useModel});
     const byId = new Map([...d.works.map(w => ['post:' + w.post.id, w.rel]), ...d.notes.map(n => [noteNodeId(n), n.rel]), ...d.ideas.map(i => ['idea:' + i.id, i.rel]), ...d.drafts.map(x => ['draft:' + x.id, x.rel])]);
     const refs = contexts.map(c => ({id: c.id, title: c.title, path: byId.get(c.id) || null}));
     return json(res, 200, {answer: text, refs, model: useModel});
@@ -1194,6 +1629,13 @@ async function route(req, res, url) {
     if (fm.keyPoints != null) {
       if (!Array.isArray(fm.keyPoints) || fm.keyPoints.some(p => typeof p !== 'string')) fail(400, 'keyPoints 必须是字符串数组');
       out.keyPoints = fm.keyPoints.filter(Boolean);
+    }
+    // tags 原来被静默丢掉：剪藏时传的标签 201 成功却没进 frontmatter，知识库卡片的 chip 区
+    // 永远空、FTS 与 embedding 也少一组关键词（AGENTS.md 里 notes.tags 是有契约的）。
+    if (fm.tags != null) {
+      if (!Array.isArray(fm.tags) || fm.tags.some(t => typeof t !== 'string')) fail(400, 'tags 必须是字符串数组');
+      const list = fm.tags.map(t => t.trim()).filter(Boolean).slice(0, 12);
+      if (list.length) out.tags = list;
     }
     return out;
   }
@@ -1234,18 +1676,28 @@ async function route(req, res, url) {
     const text = page ? htmlToText(page.html) : String(note || '');
 
     // 标题三级来源：og/title 标签 → AI 从正文提炼 →（仍无则报错）。
-    // analyze:false 的请求只借 AI 提炼标题（titleForName），不把 summary/keyPoints 写回——尊重「不分析」语义。
-    let analysis = null, analysisError = null, titleProbe = null;
+    // 提炼这次调用本身就是一次完整分析，成功时直接复用：原来 probe 成功后还会为同一份
+    // 8000 字正文再调一次 analyzeWebPage，token 与延迟白翻一倍。
+    // analyze:false 的请求只借 AI 提炼标题，不把 summary/keyPoints 写回——尊重「不分析」语义。
+    let analysis = null, analysisError = null;
     if (page && !finalTitle && aiEnabled()) {
       try {
-        titleProbe = await analyzeWebPage({url: page.url, title: null, text});
-        if (titleProbe.title) finalTitle = titleProbe.title;
+        analysis = await analyzeWebPage({url: page.url, title: null, text});
+        if (analysis.title) finalTitle = analysis.title;
       } catch (e) { analysisError = e.message; }
     }
-    if (!finalTitle) fail(400, '网页没有标题（AI 也未能从正文提炼），请补一个 title');
+    if (!finalTitle) {
+      // 提炼失败时必须把 AI 的失败原因说出来：原来 analysisError 在这条路径上是死变量，
+      // 用户只看到「网页没有标题」，永远不知道是模型请求挂了。
+      fail(400, analysisError
+        ? `网页没有标题，AI 提炼也失败了：${analysisError}`
+        : '网页没有标题（AI 未启用或未能从正文提炼），请补一个 title');
+    }
 
-    // AI 分析：未启用/失败都不丢剪藏，只带 analysisError；analyze:false 只借标题提炼，不写 summary。
-    if (page && analyze !== false && aiEnabled()) {
+    // 真正的分析（写 summary/keyPoints）：未启用/失败都不丢剪藏，只带 analysisError。
+    // analyze 只认布尔 false 与字符串 'false'：原来 `analyze !== false` 让 'false' 也触发分析。
+    const wantAnalyze = page && !(analyze === false || analyze === 'false') && aiEnabled();
+    if (wantAnalyze && !analysis) {
       try { analysis = await analyzeWebPage({url: page.url, title: finalTitle, text}); }
       catch (e) { analysisError = e.message; }
     }
@@ -1254,7 +1706,8 @@ async function route(req, res, url) {
     let snapshotRel = null;
     if (page) {
       const slug = safeName(finalTitle).slice(0, 50).replace(/\s+/g, '-').toLowerCase() || 'page';
-      snapshotRel = posix.join(SNAPSHOTS_DIR, `${slug}-${Date.now()}.html`);
+      // 加随机后缀：同一篇网页在同一毫秒剪两次会撞同一个文件名，后一次静默覆盖前一次的快照
+      snapshotRel = posix.join(SNAPSHOTS_DIR, `${slug}-${Date.now()}-${randomBytes(3).toString('hex')}.html`);
       mkdirSync(join(VAULT, SNAPSHOTS_DIR), {recursive: true});
       writeFileSync(join(VAULT, snapshotRel), page.html, 'utf8');
     }
@@ -1270,7 +1723,15 @@ async function route(req, res, url) {
     const body = page
       ? `> [!info] 网页剪藏\n> 来源：${page.url}${analysis ? `\n\n${analysis.summary}\n${(analysis.keyPoints || []).map(k => '- ' + k).join('\n')}` : ''}\n\n---\n\n${text}`
       : String(note || '');
-    const r = createNote('personal', {title: finalTitle, body, fm});
+    let r;
+    try {
+      r = createNote('personal', {title: finalTitle, body, fm});
+    } catch (e) {
+      // 笔记没写成（同名冲突 409 / 磁盘错）时快照已经落盘：不清理的话 .snapshots/ 会越堆越多
+      // 第三方 HTML 孤儿文件，还会被 Syncthing / git 同步出去，界面上完全看不到、也没法清。
+      if (snapshotRel) { try { rmSync(join(VAULT, snapshotRel), {force: true}); } catch {} }
+      throw e;
+    }
     const commitPaths = snapshotRel ? [r.path, snapshotRel] : [r.path];
     gitCommitMulti(commitPaths, `剪藏 ${r.path}`);
     invalidate();
@@ -1280,19 +1741,34 @@ async function route(req, res, url) {
   // 重新分析已有剪藏：读快照（或重新抓取）→ AI → 写回 frontmatter（乐观锁）
   if (p === '/api/knowledge/analyze' && req.method === 'POST') {
     const {path, id} = await readBody(req);
+    // 传了 id 却查不到条目时，target() 会退回「缺少 path」，把「这条不存在」说成「参数没给」。
+    if (id && !path && !loadData(0).files[id]) fail(404, `个人知识库里没有这条笔记：${id}`);
     const rel = target({path, id});
     const n = personalByPath(rel);
+    // 位置 id（personal:pN 按 rel 排序编号）会随增删位移：分析栏打开到点「重新分析网页」
+    // 之间若别处增删了一条，files['personal:pN'] 已经指向另一篇，AI 的 summary/tags 会
+    // 静默写进别人家。这里用 rel 反查到的真实 id 复核一次，不一致就要求刷新。
+    if (id && noteNodeId(n) !== String(id)) fail(409, `条目已变动（${id} 现在指向另一篇），请刷新后重试`, {path: rel});
     if (!aiEnabled()) return json(res, 501, {error: 'AI 未启用：服务端未配置 AI_API_KEY'});
     let page;
     try { page = await clipTextOf(n); }
     catch (e) { fail(e instanceof FetchError ? 400 : 502, e.message); }
-    const analysis = await analyzeWebPage({url: n.url, title: n.title, text: page.text});
+    let analysis;
+    try { analysis = await analyzeWebPage({url: n.url, title: n.title, text: page.text}); }
+    catch (e) {
+      // 原来这条没包 try：AI 抛错直接走到全局兜底，回「服务器内部错误」，
+      // 而 /api/knowledge 同条件下会降级保留剪藏并回 analysisError，前端两种口径。
+      fail(502, `AI 分析失败：${e.message}`);
+    }
     const cur = readFileSync(join(VAULT, rel), 'utf8');
+    // mtime 必须取自「读这份正文的同一次 stat」：原来在写之前现取，比较恒等，
+    // 读与写之间被 Obsidian / Syncthing 改动时 AI 会静默盖掉别人的修改。
+    const curMtime = mtimeOf(join(VAULT, rel));
     const oldTags = parseFrontmatter(cur);
     writeExisting(rel, {
       fm: {summary: analysis.summary, ...(analysis.keyPoints.length ? {keyPoints: analysis.keyPoints} : {}),
         tags: [...new Set([...(oldTags.tags || []), ...analysis.tags])].slice(0, 12)},
-      mtime: mtimeOf(join(VAULT, rel))
+      mtime: curMtime
     });
     return json(res, 200, {path: rel, analysis});
   }
@@ -1305,8 +1781,14 @@ async function route(req, res, url) {
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'content-length': body.length,
-      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src * data:; font-src *;",
+      // default-src 'none' 并不覆盖 form-action / base-uri，也不禁止被 iframe 内嵌：
+      // 剪藏页面里的 <form action="https://evil"> + autofocus 能做同源钓鱼跳转，
+      // <meta http-equiv=refresh> 能直接跳走，<img src="https://tracker"> 会把
+      // 「主人确实看过这篇」回执 + Referer（内网地址端口）发给第三方。
+      // sandbox 不给 allow-scripts，脚本、表单、meta 刷新一起废掉。
+      'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
       'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
       'cache-control': 'no-store'
     });
     return res.end(body);
@@ -1324,17 +1806,30 @@ async function route(req, res, url) {
     })();
     const buf = await readRaw(req);
     if (!buf.length) fail(400, '文件是空的');
-    let parsed;
-    try { parsed = await parseUpload(filename, buf); }
-    catch (e) { fail(e instanceof ParseError ? 400 : 500, e.message); }
-    const r = createNote('personal', {
-      title: parsed.title,
-      body: parsed.text,
-      fm: cleanPersonalFm({category: ['灵感', '制度', '推文'].includes(category) ? category : '制度', sourceFile: filename, uploaded: new Date().toISOString().slice(0, 10)})
-    });
-    gitCommit(r.path, `上传 ${r.path}`);
-    invalidate();
-    return json(res, 201, {path: r.path, chars: parsed.text.length});
+    // docx / PDF 解析是同步跑在事件循环里的：不加闸时并行传几个畸形 PDF 就能把
+    // /api/data、登录、静态资源一起卡到分钟级。与 AI / 日报共用同一把闸。
+    const gate = acquireJob('upload');
+    try {
+      let parsed;
+      try { parsed = await parseUpload(filename, buf); }
+      catch (e) {
+        if (e instanceof ParseError) fail(400, e.message);
+        // 非解析类异常（缺 pdfjs-dist、内部 TypeError 等）只写日志：e.message 里有容器
+        // 绝对路径与依赖是否存在的信息，直接回浏览器等于免费侦察。
+        console.error('[note-api] 文档解析内部错误：', e);
+        fail(500, '文档解析失败（服务端内部错误）');
+      }
+      const r = createNote('personal', {
+        title: parsed.title,
+        body: parsed.text,
+        fm: cleanPersonalFm({category: ['灵感', '制度', '推文'].includes(category) ? category : '制度', sourceFile: filename, uploaded: new Date().toISOString().slice(0, 10)})
+      });
+      gitCommit(r.path, `上传 ${r.path}`);
+      invalidate();
+      return json(res, 201, {path: r.path, chars: parsed.text.length});
+    } finally {
+      releaseJob(gate);
+    }
   }
 
   // —— AI 热点（第六星座的数据）——
@@ -1347,40 +1842,66 @@ async function route(req, res, url) {
   // 日报生成与选题筛选都是几十秒级 AI 调用：必须和 /api/ai/* 共用同一把「同时只跑一个」的闸，
   // 否则 cron 与手动请求会各自调一次模型、各写一份选题。
   if (p === '/api/news/refresh' && req.method === 'POST') {
-    if (runningJob) fail(409, '已有 AI 任务在运行，等它结束后再试');
-    const {force} = await readBody(req).catch(() => ({}));
-    const fn = force ? forceRefresh : refreshNews;
-    runningJob = 'news-refresh';
+    const gate = acquireJob('news-refresh');
     try {
-      const r = await fn(index, VAULT);
+      const {force, model: reqModel} = await readBodyOrEmpty(req);
+      // force 只认 true：原来写的是 `force ? ... : ...`，字符串 "false" 也是 truthy，
+      // 会静默走强制重生成、覆盖用户手改过的当天日报。模型也必须在闸内解析（pickModel 会打网关）。
+      const useModel = reqModel === undefined ? undefined : await pickModel(reqModel, 'news');
+      const fn = force === true ? forceRefresh : refreshNews;
+      const r = await fn(index, VAULT, useModel ? {model: useModel} : {});
+      // 日报 .md 刚落地：不失效缓存的话，1.5s 快照窗口内的 /api/data 还是旧数据，
+      // /api/search 与 ask 也看不到当天日报，直到下一次轮询。
+      if (r) { invalidate(); try { reindex(); } catch (e) { console.error('[note-api] 日报后同步索引失败：', e.message); } }
       return json(res, 200, r || {message: '今天的热点日报已生成过'});
-    } finally { runningJob = null; }
+    } catch (e) {
+      // news 模块抛的是带 status 的错误（501 未配 AI / 502 RSS 上游失败 / 409 状态不符）。
+      // 一律塌成 500「服务器内部错误」会让用户分不清是配置错了还是服务坏了。
+      if (e && Number.isInteger(e.status)) return json(res, e.status, {error: e.message});
+      throw e;
+    } finally { releaseJob(gate); }
   }
 
   // 从今天的热点里筛选题：auto=true 直接落盘进 04-选题池（射手座），否则只返回候选给前端预览
   if (p === '/api/news/ideas' && req.method === 'POST') {
-    if (runningJob) fail(409, '已有 AI 任务在运行，等它结束后再试');
-    const {model: reqModel, auto} = await readBody(req).catch(() => ({}));
-    const useModel = await pickModel(reqModel, 'news');
-    runningJob = 'news-ideas';
+    const gate = acquireJob('news-ideas');
     try {
-      const r = await ideasFromNews(index, VAULT, {model: useModel, auto: !!auto, io: {createNote}});
+      const {model: reqModel, auto} = await readBodyOrEmpty(req);
+      // pickModel 会打网关 /v1/models（几百毫秒）：闸必须在它之前就占好
+      const useModel = await pickModel(reqModel, 'news');
+      const r = await ideasFromNews(index, VAULT, {model: useModel, auto: auto === true, io: {createNote}});
       reindex();
       return json(res, 200, r);
-    } finally { runningJob = null; }
+    } catch (e) {
+      if (e && Number.isInteger(e.status)) return json(res, e.status, {error: e.message});
+      throw e;
+    } finally { releaseJob(gate); }
   }
 
   // 平台指标同步：逐篇尝试拉取（未配凭据/平台不支持时逐篇返回 pullable:false，不报错）。
   // body: {path?} —— 传 path 只拉这一篇；不传则遍历所有有 platform + url 的作品。
   if (p === '/api/platforms/pull' && req.method === 'POST') {
-    const {path} = await readBody(req).catch(() => ({}));
-    const d = loadData(0);
-    let works = d.works.filter(w => w.post.platform && w.post.url);
-    if (path) works = works.filter(w => w.rel === path);
-    const results = [];
-    for (const w of works) results.push({path: w.rel, title: w.post.title, platform: w.post.platform, ...(await pullOne(w.post, w.rel, VAULT, {writeExisting, mtimeOf}))});
-    if (results.some(r => r.updated)) reindex();
-    return json(res, 200, {results, info: platformInfo()});
+    // 同步会逐篇写回同一批作品：与 cron、另一个标签页并发时，后到的一方拿着旧 mtime 命中 409，
+    // 或者两边都成功留下两条互相覆盖的提交。所以复用同一把闸。
+    const gate = acquireJob('platforms-pull');
+    try {
+      const {path} = await readBodyOrEmpty(req);
+      // 不能用 loadData()：它的展示窗口只保留最新 30 篇（readVault 的 maxWorks），
+      // 第 31 篇及更早的作品永远不会被同步，而日志里的篇数也被同一个上限骗过去。
+      const d = readVault({vault: VAULT, full: true});
+      let works = d.works.filter(w => w.post.platform && w.post.url);
+      if (path) {
+        works = works.filter(w => w.rel === path);
+        // 过滤为空不能说「没有可同步的作品」：那是「路径写错 / 作品不在库里」，必须 404
+        if (!works.length) fail(404, `没有找到这篇作品（或它没有 platform / url）：${path}`);
+      }
+      // pullAll 内部逐篇 try：单篇失败（文件被外部删掉、写回 409）不会中断整批；
+      // 凭据 / token 类失败是整批共有的，会带 aborted 提前收手。
+      const {results, aborted, error} = await pullAll({works}, VAULT, {writeExisting, mtimeOf});
+      if (results.some(r => r.updated)) reindex();
+      if (aborted) return json(res, 502, {results, info: platformInfo(), aborted: true, error: `同步已中止：${error}`});
+      return json(res, 200, {results, info: platformInfo()});
+    } finally { releaseJob(gate); }
   }
 
   if (p.startsWith('/api/ai/jobs/') && req.method === 'GET') {
@@ -1389,17 +1910,55 @@ async function route(req, res, url) {
     return json(res, 200, job);
   }
 
+  // 已知路径但方法不对：回 405（带 Allow），别让调用方把「方法用错」读成「接口不存在」。
+  // 原来所有未匹配的请求都是 404，前端一改方法就只能看到「没有这个接口」，排查方向全错。
+  const KNOWN_API = new Set(['/api/data', '/api/version', '/api/health', '/api/session', '/api/login', '/api/logout',
+    '/api/auth-check', '/api/settings', '/api/note', '/api/note-new', '/api/idea', '/api/draft', '/api/publish',
+    '/api/attachment', '/api/knowledge', '/api/knowledge/analyze', '/api/knowledge/upload', '/api/knowledge/snapshot',
+    '/api/index', '/api/search', '/api/news', '/api/news/refresh', '/api/news/ideas', '/api/platforms/pull',
+    '/api/ai/info', '/api/ai/models', '/api/ai/analyze', '/api/ai/relate', '/api/ai/ideas', '/api/ai/ask']);
+  if (KNOWN_API.has(p)) {
+    res.setHeader('allow', 'GET, POST, PUT, DELETE');
+    return json(res, 405, {error: `不支持的请求方法：${req.method}`, path: p});
+  }
+
   return json(res, 404, {error: '没有这个接口', path: p});
 }
 
 // 后台任务：AI 调用秒级到几十秒级，不能阻塞 HTTP。同一时刻只跑一个 AI 任务。
+// 闸必须在任何 await 之前**同步**占位：原来的 `if (runningJob) fail()` 与赋值之间夹着
+// readBody / pickModel 的 await，两个并发请求都能穿过检查 → 各自调一次模型、各写一份日报与选题，
+// 而且后完成者把闸置空，第三个请求又能进来。用 token 释放，避免 A 释放掉 B 的占位。
 let runningJob = null;
+// 闸现在同时管 AI 任务、日报、平台同步和发布：一律回「已有 AI 任务在运行」会让用户在
+// 平台同步期间点 AI 分析时以为是 AI 出了错。按占用者给出具体名称。
+const JOB_LABEL = {
+  analyze: 'AI 打标签 + 摘要', relate: 'AI 语义关联', ideas: 'AI 生成选题', ask: 'AI 问答',
+  'news-refresh': '热点日报生成', 'news-ideas': '热点筛选题', 'news-cron': '定时日报',
+  'platforms-pull': '平台指标同步', 'platforms-cron': '定时平台同步', publish: '发布作品', upload: '文档解析入库'
+};
+const JOB_BUSY = kind => `已有任务在运行（${JOB_LABEL[kind] || kind || '其他任务'}），等它结束后再试`;
+function acquireJob(kind) {
+  if (runningJob) fail(409, JOB_BUSY(runningJob.kind));
+  const token = {kind: kind || 'job'};
+  runningJob = token;
+  return token;
+}
+function releaseJob(token) {
+  if (token && runningJob === token) runningJob = null;
+}
 function runJob(kind, total, fn, opts = {}) {
   // 并发跑两个 relate 会各自做全量 embedding 与两两余弦，先启动后完成的还会覆盖较新的语义边
-  if (runningJob) fail(409, '已有 AI 任务在运行，等它结束后再试');
+  const gate = acquireJob(kind);
   const id = randomUUID().slice(0, 8);
-  index.createJob(id, kind, total);
-  runningJob = id;
+  // 占位与建行之间必须兜住：createJob 抛错（SQLite busy / 磁盘满 / 短 id 撞主键）时
+  // 原来闸就永久留在手里，此后所有 AI / 日报 / 平台同步接口都是 409，只能重启进程。
+  try {
+    index.createJob(id, kind, total);
+  } catch (e) {
+    releaseJob(gate);
+    throw e;
+  }
   (async () => {
     let done = 0;
     const progress = () => { done++; index.updateJob(id, {done, message: `${done}/${total}`}); };
@@ -1414,7 +1973,7 @@ function runJob(kind, total, fn, opts = {}) {
     } catch (e) {
       index.updateJob(id, {status: 'error', error: String(e.message || e)});
     } finally {
-      if (runningJob === id) runningJob = null;
+      releaseJob(gate);
       index.pruneJobs(); // 顺手清掉过期的任务记录，别让 /data 里的 jobs 表无限长
     }
   })();
@@ -1451,10 +2010,30 @@ function renameTo(title, rel) {
   }
 }
 
+// 兜底：未捕获的 promise rejection 只记日志，绝不让进程退出。
+// createServer 的回调是 async，任何抛在 try 之外的异常都会变成 unhandledRejection，
+// 而 Node 默认 unhandled-rejections=throw → 整个服务下线（一次请求即可 DoS）。
+process.on('unhandledRejection', e => { console.error('[note-api] unhandledRejection：', e); });
+// uncaughtException 相反：同步栈已经断了，进程状态不可信，继续跑只会「僵尸不退出」——
+// docker ps 仍显示 Up，restart 策略也不会介入。记完日志主动退出，交给 restart: unless-stopped。
+process.on('uncaughtException', e => {
+  console.error('[note-api] uncaughtException，进程退出：', e);
+  process.exit(1);
+});
+
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  // 访问日志只在 VERBOSE=1 时打（默认不刷屏）：排障时至少能看出是谁在打哪个请求、慢在哪。
+  if (process.env.VERBOSE === '1') {
+    const startedAt = Date.now();
+    res.on('finish', () => console.error(`[note-api] ${req.method} ${req.url} ${res.statusCode} ${clientIp(req)} ${Date.now() - startedAt}ms`));
+  }
   try {
-    if (url.pathname.startsWith('/api/')) return await route(req, res, url);
+    // base 不能用客户端可控的 Host：`Host: a b` 会让 new URL 抛 TypeError，
+    // 而那条异常原本在 try 之外 —— 一个畸形头就把服务打挂。路由只用 pathname，固定 base 足够。
+    const url = new URL(req.url, 'http://localhost');
+    // 大小写不敏感地识别 /api 前缀：`/API/data` 落到静态回退会返回 index.html + 200，
+    // 客户端把一段 HTML 当 JSON 解析，错误路径彻底不可读。
+    if (/^\/api\//i.test(url.pathname)) return await route(req, res, url);
     if (STATIC_DIR && (req.method === 'GET' || req.method === 'HEAD')) {
       // 登录页与头像必须公开，否则未登录时连登录表单都打不开
       const publicStatic = url.pathname === '/login.html' || url.pathname === '/avatar.svg';
@@ -1463,7 +2042,10 @@ const server = createServer(async (req, res) => {
         const wantsHtml = String(req.headers.accept || '').includes('text/html') &&
           !url.pathname.startsWith('/assets/');
         if (wantsHtml) {
-          res.writeHead(302, {location: '/login.html', 'cache-control': 'no-store'});
+          // 带上原路径：login.html 的 safeNext() 会在登录后跳回去。
+          // 丢掉它意味着从深链进入、或会话过期后被踢，登录完一律回首页，上下文全没了。
+          const next = '/login.html?next=' + encodeURIComponent(url.pathname + url.search);
+          res.writeHead(302, {location: next, 'cache-control': 'no-store', ...SECURITY_HEADERS});
           return res.end();
         }
         return json(res, 401, {error: '未登录'});
@@ -1473,10 +2055,26 @@ const server = createServer(async (req, res) => {
     json(res, 404, {error: '没有这个路径'});
   } catch (e) {
     if (res.headersSent) return res.end();
-    const code = e instanceof HttpError ? e.code : 500;
-    if (code === 500) console.error('[note-api]', e);
-    json(res, code, {error: e.message, ...(e.extra || {})});
+    // 只有我们自己 fail() 出来的消息能回给客户端。内部异常（EISDIR / SQLite 报错 / 权限）
+    // 的 message 里带服务器绝对路径与内部结构（实测 GET /api/note?path=目录.md 会把
+    // `EISDIR: illegal operation on a directory, read` 和临时目录绝对路径回给浏览器）。
+    if (e instanceof HttpError) return json(res, e.code, {error: e.message, ...(e.extra || {})});
+    console.error('[note-api]', e);
+    // 常见文件系统错误映射成语义状态码：「文件不存在」不该说成 500
+    const map = {ENOENT: 404, EISDIR: 404, ENOTDIR: 404, EACCES: 403, EPERM: 403, ENOSPC: 507, EROFS: 507};
+    const code = map[e.code] || 500;
+    const msg = code === 404 ? '文件不存在'
+      : code === 403 ? '没有权限访问该文件'
+      : code === 507 ? '磁盘空间不足或只读'
+      : '服务器内部错误';
+    json(res, code, {error: msg});
   }
+});
+
+// 监听失败（端口占用是部署期最常见的故障）不能只留一句 throw er 的堆栈
+server.on('error', e => {
+  console.error(`[note-api] 监听 ${HOST}:${PORT} 失败：${e.message}`);
+  process.exit(1);
 });
 
 // auth 自举：没有 DASHBOARD_PASSWORD 时生成随机密码写进 AUTH_FILE 并打印（首次启动）
@@ -1498,37 +2096,108 @@ for (const dir of [...new Set(Object.values(KIND_DIR))]) {
 // 启动时先把索引建好，第一次打开页面就不用等
 try { console.error(`[note-api] 索引 ${reindex()} 条，共 ${index.count()} 条`); }
 catch (e) { console.error('[note-api] 首次索引失败：', e.message); }
+// 上次进程被中断时留在表里的 running 任务永远不会收敛：先标成失败，前端才不会空转到超时
+try {
+  const stale = index.failRunningJobs();
+  if (stale) console.error(`[note-api] 上次运行中断，已把 ${stale} 个未完成的 AI 任务标为失败`);
+} catch (e) { console.error('[note-api] 收口未完成任务失败：', e.message); }
+// 只在 runJob 的 finally 里清 jobs 表的话，长期不跑 AI 的库里旧行（含 relate 最多 400 条边的
+// result JSON）会一直留着，/api/ai/jobs/:id 也永远不返回 404。启动时再收一次。
+try { index.pruneJobs(); } catch {}
+// 崩溃残留的临时文件：留着会被 Obsidian / Syncthing / git 当成普通笔记同步出去
+for (const root of [VAULT, DATA_DIR]) {
+  try {
+    const n = cleanupTempFiles(root);
+    if (n) console.error(`[note-api] 已清理 ${n} 个崩溃残留的临时文件（${root}）`);
+  } catch (e) { console.error('[note-api] 清理临时文件失败：', e.message); }
+}
 
 // AI 热点日报的定时任务（NEWS_CRON=0 关闭）。日报生成后自动筛选题落进 04-选题池。
 if (process.env.NEWS_CRON !== '0') {
   startNewsCron(async () => {
-    const r = await refreshNews(index, VAULT);
-    if (!r) return; // 今天已生成过，不重复筛选
+    // cron 也必须走同一把闸：否则它会和手动的 /api/news/refresh 或正在跑的 analyze
+    // 同时调模型、同时往 04-选题池 写，后写者覆盖前者（而注释一直声称共用一个闸）。
+    let gate;
+    try { gate = acquireJob('news-cron'); } catch { return; } // 有任务在跑就跳过这一轮
     try {
-      const ideas = await ideasFromNews(index, VAULT, {auto: true, io: {createNote}});
-      reindex();
-      console.error(`[news] 已从热点自动筛出 ${ideas.written.length} 个选题进 04-选题池`);
-    } catch (e) { console.error('[news] 自动筛选题失败：', e.message); }
+      const r = await refreshNews(index, VAULT);
+      // 日报落盘后立刻重建索引：原来 reindex 排在 ideasFromNews 之后，一旦筛选题抛错，
+      // 当天的日报就永远进不了 notes 索引（/api/search 与 ask/RAG 都搜不到它）。
+      if (r) { invalidate(); try { reindex(); } catch (e) { console.error('[news] 日报后同步索引失败：', e.message); } }
+      // 手动生成过当天日报时 r 为 null，但那天的选题可能还没筛。幂等统一由 news 表的 ideasAt 判，
+      // 不再用 r 决定要不要筛（原来 r 为 null 就永久跳过当天自动选题，而且没有任何日志）。
+      try {
+        const ideas = await ideasFromNews(index, VAULT, {auto: true, io: {createNote}});
+        if (ideas.written?.length) {
+          reindex();
+          console.error(`[news] 已从热点自动筛出 ${ideas.written.length} 个选题进 04-选题池`);
+        }
+      } catch (e) {
+        console.error('[news] 自动筛选题跳过：', e.message);
+      }
+    } catch (e) {
+      console.error('[news] 定时生成日报失败：', e.message);
+    } finally {
+      releaseJob(gate);
+    }
   });
 }
 
 // 平台指标同步的定时任务（PLATFORM_SYNC_CRON=0 关闭）：每天 SYNC_HOUR 点后拉公众号数据回写 vault。
 if (process.env.PLATFORM_SYNC_CRON !== '0') {
   startPlatformsCron(async () => {
-    const results = await pullAll(loadData(), VAULT, {writeExisting, mtimeOf});
-    const ok = results.filter(r => r.updated).length;
-    if (results.length) console.error(`[platforms] ${results.length} 篇有平台来源，${ok} 篇更新了指标`);
+    // 与 /api/platforms/pull 共用闸：两边同时写同一批作品会产生 409 或重复提交
+    let gate;
+    try { gate = acquireJob('platforms-cron'); } catch { return; }
+    try {
+      // 同 /api/platforms/pull：cron 也必须用全量读，不能用带 30 篇展示窗口的 loadData()
+      const d = readVault({vault: VAULT, full: true});
+      const works = d.works.filter(w => w.post.platform && w.post.url);
+      const {results, aborted, error} = await pullAll({works}, VAULT, {writeExisting, mtimeOf});
+      if (aborted) console.error(`[platforms] 同步已中止：${error}`);
+      if (results.some(r => r.updated)) reindex();
+      if (results.length) console.error(`[platforms] ${results.length} 篇有平台来源`);
+      // 返回统计给 cron：全部失败时不能置「今天已同步」，否则当天剩余 tick 全被跳过
+      return {ok: results.filter(r => r.updated).length, failed: results.filter(r => r.error && r.pullable).length};
+    } finally {
+      releaseJob(gate);
+    }
   });
 }
+
+// 运行期也要收口：只在启动时收一次的话，另一个实例（或本次进程之前的崩溃）留下的 running
+// 行要等到下次重启才变 error，而容器 hostname 每次重建都会变，pid 判据也救不了它。
+// 10 分钟一次，两条 SQL 的代价，unref 保证它不拖住进程退出。
+setInterval(() => {
+  try { index.failRunningJobs(); } catch {}
+  try { index.pruneJobs(); } catch {}
+}, 10 * 60 * 1000).unref();
 
 server.listen(PORT, HOST, () => {
   const auth = currentAuth();
   const authNote = auth
     ? `  已开启登录（用户 ${auth.user}）`
     : (API_TOKEN ? '  （已开启 token 鉴权）' : '  未开启登录');
-  console.error(`[note-api] http://${HOST}:${PORT}  笔记库：${VAULT}${STATIC_DIR ? `  静态目录：${STATIC_DIR}` : ''}${authNote}`);
+  // 版本号必须打出来：容器只挂 :latest 时，升级后行为变了没法知道跑的是哪个 commit，
+  // 也没法据此回滚（CI 同时推 sha-xxxxxxx 标签，见 docs/nas-deployment.md）。
+  const build = process.env.BUILD_VERSION || 'dev';
+  console.error(`[note-api] 版本 ${build}  http://${HOST}:${PORT}  笔记库：${VAULT}${STATIC_DIR ? `  静态目录：${STATIC_DIR}` : ''}${authNote}`);
+  // 未开启登录是合法配置（本机开发 / 纯静态），但部署到局域网时它是致命的：所有 /api 裸奔。
+  // 原来静默放行，日志里看不出来，这里必须显式告警一次。
+  if (!auth) {
+    console.error('[note-api] 警告：未配置 DASHBOARD_PASSWORD / AUTH_FILE，所有 /api 请求都不校验身份。');
+    console.error('[note-api] 仅供本机开发；要在局域网使用，请设置 DASHBOARD_PASSWORD 或 AUTH_FILE。');
+  }
 });
 
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { index.close(); process.exit(0); });
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => {
+  // 先把飞行中的任务落到终态再关库：否则 runJob 在 await 之后调 updateJob 会抛
+  // 「database is not open」，前端只能等下一次启动的收口（而容器 hostname 会变，收口可能永远不生效）。
+  try { index.failMyJobs('服务停止中断'); } catch {}
+  index.close();
+  process.exit(0);
+});
 
 export {server, index, loadData, reindex, target, writeExisting, createNote, removeNote, renameTo, inside, safeName};
+
+

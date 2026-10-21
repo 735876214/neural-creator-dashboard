@@ -24,7 +24,7 @@ export function PageHead({zh, en, sub, subEn, children}) {
 }
 
 // —— 作品库 Works ——
-export function Library({graph, selected, setSelected, onGo, onAction, onModule, aiEnabled, embedEnabled}) {
+export function Library({graph, selected, setSelected, onGo, onAction, onModule, readOnly, aiEnabled, embedEnabled, showToast}) {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState('date');
   const rate = p => p.views ? p.saves / p.views : -1;
@@ -65,6 +65,7 @@ export function Library({graph, selected, setSelected, onGo, onAction, onModule,
       </section>
       {node && <aside className="library-analysis" key={node.id}><Analysis graph={graph} node={node} module={MODULES[0]} onGo={onGo} onAction={onAction} onClose={() => setSelected(null)} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/></aside>}
     </div>
+    <Assistant graph={graph} readOnly={readOnly} aiEnabled={aiEnabled} showToast={showToast} goNote={onGo}/>
   </div>;
 }
 
@@ -93,7 +94,7 @@ function MiniGraph({graph, node}) {
   </svg>;
 }
 
-export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule, onPublish, onToPost, aiEnabled, hydrateErr, onHydrateRetry}) {
+export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDelete, onDirty, readOnly, onGo, onModule, onPublish, onToPost, aiEnabled, showToast, hydrateErr, onHydrateRetry}) {
   const draft = drafts.find(d => d.id === active) || drafts[0];
   const area = useRef(null);
   const [suggest, setSuggest] = useState(null);
@@ -150,7 +151,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         <div className="editor-meta"><span>03-创作台 / 正在写 <em>Writing</em></span>
           <span className="editor-tools">
             <label className="img-insert" title="上传图片并插入 ![[ ]]">
-              <input type="file" accept="image/*" className="visually-hidden" disabled={readOnly} onChange={async e => {
+              <input type="file" accept="image/*" className="visually-hidden" disabled={locked} onChange={async e => {
                 const f = e.target.files?.[0]; e.target.value = '';
                 if (!f) return;
                 const err = await insertImageAtCursor(area, f, v => change('body', v));
@@ -158,7 +159,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
                 // 用户会以为插图成功，直到重开笔记才发现丢了。
                 setImgErr(err || '');
               }}/>
-              <button type="button" className="icon-btn" disabled={readOnly} onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片 Insert image"><Icon name="save" size={14}/></button>
+              <button type="button" className="icon-btn" disabled={locked} onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片 Insert image"><Icon name="save" size={14}/></button>
             </label>
           </span>
           {imgErr ? <span role="alert"><Icon name="info" size={13}/>插图失败：{imgErr} <button type="button" className="pill ghost" onClick={() => setImgErr('')}>知道了 Dismiss</button></span>
@@ -210,7 +211,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
         {!node.deg && <p className="empty-line">写下内容或 [[链接]] 后，这里会长出连接。<em>Links appear as you write.</em></p>}
       </aside>}
     </div>
-    <Assistant graph={graph} readOnly={readOnly} aiEnabled={aiEnabled} showToast={msg => console.info('[assistant]', msg)} goNote={onGo}/>
+    <Assistant graph={graph} readOnly={readOnly} aiEnabled={aiEnabled} showToast={showToast} goNote={onGo}/>
   </div>;
 }
 
@@ -218,7 +219,7 @@ export function Drafts({graph, drafts, setDrafts, active, setActive, onNew, onDe
 const LANES = [['待写', 'To write'], ['待扩展', 'To expand'], ['已转草稿', 'Drafted']];
 const PRI = {高: ['High', 'high'], 中: ['Medium', 'mid'], 低: ['Low', 'low']};
 
-export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule, readOnly}) {
+export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule, readOnly, aiEnabled, showToast}) {
   return <div className="page page-ideas">
     <PageHead zh="选题池" en="Ideas" sub="下一篇，从这里开始。" subEn="Ideas linked to what you have already published.">
       <button className="pill primary" onClick={onNew} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="plus" size={15}/>添加选题 <em>New idea</em></button>
@@ -248,6 +249,7 @@ export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule, readOnly}
         {!list.length && <p className="empty-line">这个状态下还没有选题 <em>Nothing here yet</em></p>}
       </section>;
     })}</div>
+    <Assistant graph={graph} readOnly={readOnly} aiEnabled={aiEnabled} showToast={showToast} defaultCategory="灵感" goNote={onGraph}/>
   </div>;
 }
 

@@ -66,12 +66,39 @@ tags: [笔记系统, 新手教程]
 更新看板：重新拉取镜像即可——图形界面点一次构建/拉取，
 或 `docker compose pull && docker compose up -d`。
 
+**版本可追踪**：镜像同时发布 `:latest`（跟随 main）和 `:sha-<7 位 commit>` 两种标签，
+启动日志第一行会打出 `版本 <BUILD_VERSION>`。`:latest` 每次 push main 都会被覆盖，
+所以**升级前先备份、出问题按 sha 标签回滚**：
+
+```bash
+# 升级前备份笔记库与索引卷（路径按实际挂载改）
+docker run --rm -v "$PWD/notes-vault":/v -v "$PWD":/b alpine tar czf /b/vault-backup.tgz /v
+docker run --rm -v note-api-data:/d -v "$PWD":/b alpine tar czf /b/data-backup.tgz /d
+
+# 回滚：把 compose 里的 image 临时钉到某个 sha，再 up -d
+#   image: ghcr.io/735876214/neural-creator-dashboard:sha-7323d7e
+docker compose up -d
+```
+
+索引卷里的 SQLite 跨版本只做「加列」迁移，旧版本读新库不保证正确——回滚时把
+`data-backup.tgz` 一起还原最稳（`index.sqlite` 本身可以删掉重建，`auth.json` 与
+`session.key` 不要删，删了要重新看密码 / 重新登录）。
+
 ## 3. 起 Docker Compose
 
 ```bash
 cd docker/neural                  # compose 文件所在目录
 docker compose up -d
 ```
+
+> **文件属主**：容器以 `node`（uid/gid 1000）运行，不再用 root。若 NAS 上的笔记目录属于
+> 别的用户（共享目录常见），先在 `.env` 里把 `PUID` / `PGID` 填成那边的 uid/gid，
+> 否则看板写出来的笔记属于 1000，SMB / Obsidian / 文件管理器里改不动也删不掉：
+> ```ini
+> PUID=1000
+> PGID=1000
+> ```
+> 也可以直接 `chown -R 1000:1000 notes-vault`（改成你填的 PUID/PGID）。
 
 `.env` 是可选的：在 compose 文件同目录建一个 `.env`（可参考仓库里的 `deploy/.env.example`，
 NAS 上没有仓库文件时直接新建即可），常用项：
@@ -80,6 +107,8 @@ NAS 上没有仓库文件时直接新建即可），常用项：
 DASHBOARD_USER=admin
 DASHBOARD_PASSWORD=          # 留空 = 首次启动随机生成，docker compose logs note-api 查看
 WEB_PORT=8088                # 看板端口，被占用时改
+# WEB_BIND=0.0.0.0           # 前面挂 HTTPS 反代时改成 127.0.0.1（见下面「用 HTTPS 反代」）
+# DASHBOARD_TZ_OFFSET=8      # 「今天是哪天」的时区偏移（作品日期、月目标、日报归类）
 # AI_API_KEY=sk-...          # 可选：填了才有 AI 区块
 # AI_BASE_URL=https://api.deepseek.com/v1
 # AI_MODEL=deepseek-chat
@@ -100,9 +129,28 @@ docker compose logs note-api
 
 > 极空间的 Container Manager 也可以图形化导入这个 compose 文件。
 >
-> `.env` 的完整变量说明见仓库 `deploy/.env.example`。看板本身用登录页认证，**不要把 `API_TOKEN` 填进 `.env`**——浏览器看板不会携带它，填了会导致读取和保存返回 401。
+> `.env` 的完整变量说明见仓库 `deploy/.env.example`。`API_TOKEN` **只增不减能力**：设置后
+> curl / 脚本可以用 `Authorization: Bearer <token>` 调 `/api`，浏览器会话照常工作（鉴权先试
+> token、失败再回落 Cookie）。想彻底关掉密码登录是另外一回事，请改 `DASHBOARD_PASSWORD`。
 
 浏览器打开 `http://<NAS-IP>:8088`，会先看到登录页；输入用户名和密码后进入看板，星核亮起来就是成功了。8088 被占用时在 `.env` 里改 `WEB_PORT`。
+
+> **用 HTTPS 反代（可选）**：NAS 上再挂一层 Caddy / Traefik / 群晖反代时，两件事必须同时做，
+> 否则反而更不安全：
+>
+> 1. `.env` 里 `WEB_BIND=127.0.0.1`（端口只监听本机，外部只能经反代进来）；
+> 2. `.env` 里 `TRUST_PROXY=1`（note-api 才信任 `X-Forwarded-For` / `X-Forwarded-Proto`）。
+>
+> 只设 `TRUST_PROXY=1` 而端口仍发布在 `0.0.0.0` 时，任何直连请求都能自带 `x-real-ip`
+> 伪造来源 IP，把登录限流绕成无限爆破；相反，只做反代而不设 `TRUST_PROXY` 时，所有请求的
+> 来源 IP 都是反代容器，登录限流退化成「全局共享 8 次/5 分钟」，一个人连错就能把全家锁在门外，
+> 而且 Cookie 的 `Secure` 属性也挂不上。Caddy 最小片段：
+>
+> ```caddyfile
+> dash.example.com {
+>     reverse_proxy 127.0.0.1:8088
+> }
+> ```
 
 > **访问范围**：看板只在局域网内提供访问，没有外网入口、也没有多设备同步——数据全部在 NAS 本地，修改入口统一是看板前端。笔记是明文，请不要把端口转发到公网。
 

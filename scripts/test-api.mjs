@@ -12,6 +12,8 @@ import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 // 和前端用同一份实现，避免测试里内联一份正则、测不到真正跑在页面里的那段逻辑
 import {stripFrontmatter} from '../src/neural/mdfront.js';
+// 直接测索引层：遗留任务收口这类「进程启动时」的逻辑没有 HTTP 入口，只能对 DB 断言
+import {openIndex} from '../server/db.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'ncd-api-'));
@@ -182,6 +184,12 @@ try {
   assert.match(snap.headers.get('content-security-policy') || '', /default-src 'none'/, '快照响应必须带 CSP');
   const snapBad = await json('/api/knowledge/snapshot?path=' + encodeURIComponent('05-方法库 methods/流程/观察记录方法.md'));
   assert.equal(snapBad.status, 400);
+  // 快照目录同样跑一遍穿越矩阵：快照是 HTML，能读到别的 .html 就是同源脚本执行
+  for (const bad of ['06-个人知识库/.snapshots/../../02-作品库/x.html', '.snapshots/x.html',
+    '06-个人知识库/.snapshots/../../../etc/passwd', 'C:\\Windows\\win.ini', '../snap.html']) {
+    const r = await json('/api/knowledge/snapshot?path=' + encodeURIComponent(bad));
+    assert.ok(r.status === 400 || r.status === 404, `快照读取必须挡掉「${bad}」，实际 ${r.status}`);
+  }
   // 非法 category
   const badCat = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({title: 'x', category: '乱写'})});
   assert.equal(badCat.status, 400);
@@ -367,6 +375,72 @@ try {
   assert.ok(d3.body.posts.some(p => p.title === 'e2e 发布稿'), '/api/data posts 应包含新作品');
   ok('草稿发布为作品（/api/publish：移动 + 指标 + 白名单）');
 
+  // 6d3. 发布后「选题 → 草稿 → 作品」不能断：草稿文件被移走，来源选题 / 来源草稿的稳定 id
+  // 必须随作品 frontmatter 落盘，并透传到 /api/data 的 posts（前端图谱靠它接最后一跳）。
+  const srcIdea = await put('/api/idea', {title: 'e2e 来源选题', body: 'x', fm: {id: 'idea-src-e2e'}});
+  assert.equal(srcIdea.status, 201);
+  // 外部编辑器写进草稿的写法：fm id + sourceIdeaId（/api/draft 的白名单不开放 id，只能直接落盘）
+  mkdirSync(join(vault, '03-创作台'), {recursive: true});
+  writeFileSync(join(vault, '03-创作台', 'e2e 来源草稿.md'),
+    '---\nid: draft-src-e2e\nsourceIdeaId: idea-src-e2e\n---\n\n正文\n', 'utf8');
+  const pubLinked = await json('/api/publish', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({path: '03-创作台/e2e 来源草稿.md'})});
+  assert.equal(pubLinked.status, 201, '带来源的草稿发布应 201：' + JSON.stringify(pubLinked.body));
+  const linkedMd = readFileSync(join(vault, pubLinked.body.path), 'utf8');
+  assert.match(linkedMd, /sourceIdeaId: idea-src-e2e/, '作品应写入来源选题 id');
+  assert.match(linkedMd, /sourceDraftId: draft-src-e2e/, '作品应写入来源草稿 id');
+  assert.equal(pubLinked.body.metricsWritten, false, '只写来源字段时 metricsWritten 仍应为 false');
+  assert.equal(pubLinked.body.sourceIdeaId, 'idea-src-e2e', '响应里应回带来源选题 id');
+  const dLinked = await json('/api/data?fresh');
+  const linkedPost = dLinked.body.posts.find(p => p.title === 'e2e 来源草稿');
+  assert.ok(linkedPost, '/api/data posts 应包含带来源的作品');
+  assert.equal(linkedPost.sourceIdeaId, 'idea-src-e2e', 'posts 应透传 sourceIdeaId');
+  assert.equal(linkedPost.sourceDraftId, 'draft-src-e2e', 'posts 应透传 sourceDraftId');
+  // 老格式：草稿只写 source=选题标题，发布时也要解析成稳定 id
+  writeFileSync(join(vault, '03-创作台', 'e2e 标题来源草稿.md'),
+    '---\nsource: e2e 来源选题\n---\n\n正文\n', 'utf8');
+  const pubTitle = await json('/api/publish', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({path: '03-创作台/e2e 标题来源草稿.md'})});
+  assert.equal(pubTitle.status, 201);
+  assert.match(readFileSync(join(vault, pubTitle.body.path), 'utf8'), /sourceIdeaId: idea-src-e2e/,
+    'source=标题 的草稿发布时也应解析成选题 id');
+  ok('发布保留来源（/api/publish：sourceIdeaId / sourceDraftId 落盘并透传）');
+
+  // 6d4. UI 路径同样要成立：看板里新建草稿时就得有稳定 id（不能只有外部手写 frontmatter 的草稿才有），
+  // 否则「草稿 → 作品」这一跳在实际使用中永远拿不到 sourceDraftId。
+  const uiDraft = await put('/api/draft', {title: 'e2e UI 来源草稿', body: '正文', fm: {sourceIdeaId: 'idea-src-e2e'}});
+  assert.equal(uiDraft.status, 201, '新建草稿应 201：' + JSON.stringify(uiDraft.body));
+  assert.match(String(uiDraft.body.id || ''), /^[0-9a-f]{8}$/, '草稿创建应返回稳定 id：' + JSON.stringify(uiDraft.body));
+  const pubUi = await json('/api/publish', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({path: uiDraft.body.path})});
+  assert.equal(pubUi.status, 201);
+  const uiMd = readFileSync(join(vault, pubUi.body.path), 'utf8');
+  // 按「键: 值」读，而不是正则拼 id：纯数字 id 会被 YAML 加上引号，正则比字符串值脆。
+  const fmField = (text, key) => {
+    const m = text.match(new RegExp(`^${key}:\\s*"?([^"\\n]+)"?$`, 'm'));
+    return m ? m[1].trim() : '';
+  };
+  assert.equal(fmField(uiMd, 'sourceDraftId'), uiDraft.body.id,
+    'UI 新建的草稿发布后也要带 sourceDraftId，实际文件：\n' + uiMd);
+  assert.equal(fmField(uiMd, 'sourceIdeaId'), 'idea-src-e2e', 'UI 新建的草稿也要带 sourceIdeaId');
+  ok('草稿稳定 id（/api/draft 生成 id → 发布写 sourceDraftId）');
+
+  // 6d5. 启动时收口遗留任务：只收「已经死掉的实例」留下的行，不能误杀同一 DATA_DIR 上
+  // 另一个活着的实例正在跑的任务（两个 note-api 共用一个卷时会把对方的进度标成失败）。
+  {
+    const idx = openIndex(':memory:');
+    idx.createJob('job-foreign', 'analyze', 1);
+    idx.db.prepare("UPDATE jobs SET host='another-host' WHERE id='job-foreign'").run();
+    idx.createJob('job-dead', 'analyze', 1);
+    idx.db.prepare('UPDATE jobs SET pid=? WHERE id=?').run(2 ** 22 + 12345, 'job-dead'); // 必然不存在的 pid
+    assert.equal(idx.failRunningJobs(), 1, '只应收口 pid 已退出的那一条');
+    assert.equal(idx.job('job-foreign').status, 'running', '别的机器 / 容器上的任务不能被收口');
+    assert.equal(idx.job('job-dead').status, 'error', '死掉的实例留下的任务应收口');
+    assert.match(idx.job('job-dead').error, /服务重启中断/);
+    idx.close();
+    ok('遗留任务收口（/api/ai/jobs：只收死掉的实例，不误杀并发实例）');
+  }
+
   // 附件：png 上传 → 读取 → 非法扩展拒绝
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // PNG magic
   const upImg = await fetch(base + '/api/attachment', {method: 'POST',
@@ -382,7 +456,43 @@ try {
   assert.equal(upSvg.status, 400);
   const upTraversal = await json('/api/attachment?path=' + encodeURIComponent('05-方法库 methods/流程/观察记录方法.md'));
   assert.equal(upTraversal.status, 400);
-  ok('附件上传与读取（/api/attachment：白名单 + 目录钉死）');
+  // 路径穿越不能只测「把 .md 塞进附件目录」这一种最弱形状：真正会伤人的是跳出库、
+  // 跳出附件目录、绝对路径、二次编码、Windows 反斜杠、以及内部目录（.trash / .snapshots）。
+  const badPaths = [
+    '99-附件/../05-方法库/流程/观察记录方法.md',
+    '99-附件/../../outside.md',
+    '../outside.png',
+    '..\\..\\outside.png',
+    '99-附件\\..\\..\\outside.png',
+    '/etc/passwd',
+    'C:\\Windows\\win.ini',
+    '.trash/99-附件/x.png',
+    '.TRASH/99-附件/x.png',
+    '.trash./99-附件/x.png',
+    '99-附件/%2e%2e/%2e%2e/outside.png',
+    '99-附件/%252e%252e%252foutside.png'
+  ];
+  for (const bad of badPaths) {
+    const r = await json('/api/attachment?path=' + encodeURIComponent(bad));
+    assert.ok(r.status === 400 || r.status === 404, `附件读取必须挡掉「${bad}」，实际 ${r.status}`);
+  }
+  // 上传文件名同样不能被用来跳目录（x-filename 是客户端完全可控的）：
+  // 要么 400，要么清洗后仍落在 99-附件/ 下 —— 绝不能出现 .. 或被写到别的目录。
+  for (const badName of ['../evil.png', '..\\evil.png', 'a/b.png', '.trash/x.png']) {
+    const r = await fetch(base + '/api/attachment', {method: 'POST',
+      headers: {'x-filename': encodeURIComponent(badName), 'content-type': 'application/octet-stream'}, body: png});
+    if (r.status !== 400) {
+      const body = await r.json();
+      assert.equal(r.status, 201, `上传文件名「${badName}」只允许 400 或 201，实际 ${r.status}`);
+      assert.ok(String(body.path).startsWith('99-附件/'), `上传文件名「${badName}」被写到 ${body.path}`);
+      assert.ok(!String(body.path).includes('..'), `上传文件名「${badName}」落盘路径带 ..：${body.path}`);
+      assert.equal(body.path.split('/').length, 2, `上传文件名「${badName}」不该产生子目录：${body.path}`);
+    }
+  }
+  const upOk = await fetch(base + '/api/attachment', {method: 'POST',
+    headers: {'x-filename': encodeURIComponent('穿越回归.png'), 'content-type': 'application/octet-stream'}, body: png});
+  assert.equal(upOk.status, 201, '正常上传不能被上面的用例带坏');
+  ok('附件上传与读取（/api/attachment：白名单 + 目录钉死 + 穿越矩阵）');
 
   // 6e. 回归：附件返回的 name 必须就是真正落盘的文件名（前端拿它拼 ![[名称]]）
   const upNamed = await fetch(base + '/api/attachment', {method: 'POST',
@@ -538,7 +648,15 @@ try {
   assert.ok(!readFileSync(join(vault, '.dashboard/settings.json'), 'utf8').includes('secret-one'), 'vault 文件里不得残留明文凭据');
   const platSecretFile = JSON.parse(readFileSync(join(tmp, 'data', 'platform-secrets.json'), 'utf8'));
   assert.equal(platSecretFile['公众号'], 'secret-one', 'secret 应沿用旧值并存在 DATA_DIR');
-  assert.equal(statSync(join(tmp, 'data', 'platform-secrets.json')).mode & 0o777, 0o600, '凭据文件必须是 0600');
+  // POSIX 权限位只在类 Unix 上有意义：Windows 的 chmod 只能切只读位，statSync().mode 永远是
+  // 0o666/0o444。以前这条在 Windows 上必然失败并中断整个测试文件（后半段的用例一条都不跑）。
+  // 这里按平台判断，Windows 上改为验证「服务端确实尝试收紧了权限」，其余平台仍然严格比对 0600。
+  const psMode = statSync(join(tmp, 'data', 'platform-secrets.json')).mode & 0o777;
+  if (process.platform === 'win32') {
+    assert.ok([0o600, 0o666, 0o444].includes(psMode), `Windows 上凭据文件权限位异常：${psMode.toString(8)}`);
+  } else {
+    assert.equal(psMode, 0o600, '凭据文件必须是 0600');
+  }
   ok('只改公众号 AppID 时沿用已存 secret（回归）');
 
   // 6n-2. 设置面板存下的凭据必须被平台模块认出来（键名 platforms.公众号 vs platforms.wechat）
@@ -620,6 +738,26 @@ try {
   assert.equal(verA.status, 200);
   assert.equal(typeof verA.body.v, 'number', '/api/version 的 v 应为数字');
   assert.ok(verA.body.files > 0, '/api/version 应报文件数');
+
+  // 6n-10. /api/data 的形状是前端的唯一入口：字段少一个就是白屏或写回失效，
+  // 而 verify 只用正则读源码，改坏形状没人拦。
+  const shape = await json('/api/data?fresh');
+  assert.equal(shape.status, 200);
+  for (const k of ['snapshot', 'posts', 'postContent', 'notes', 'seedIdeas', 'seedDrafts', 'concepts', 'files', 'figures', 'mtimes', 'settings', 'meta']) {
+    assert.ok(k in shape.body, `/api/data 缺少字段 ${k}：${Object.keys(shape.body)}`);
+  }
+  assert.equal(typeof shape.body.meta?.counts, 'object', 'meta.counts 必须是各模块篇数（首页进度条靠它）');
+  assert.ok(!('vault' in (shape.body.meta || {})), '/api/data 的 meta 不能带出 vault 绝对路径');
+  assert.ok(Array.isArray(shape.body.posts) && Array.isArray(shape.body.notes));
+  assert.equal(typeof shape.body.mtimes, 'object', 'mtimes 必须是 id → mtime 的对象（写回乐观锁靠它）');
+  for (const [id, rel] of Object.entries(shape.body.files)) {
+    assert.match(id, /^(post|note|personal|idea|draft):/, `files 的 key 必须是带类型前缀的 id：${id}`);
+    assert.equal(typeof rel, 'string', `files['${id}'] 必须是相对路径字符串`);
+    assert.ok(!rel.includes('\\'), `files 里必须是 posix 相对路径：${rel}`);
+    assert.ok(rel.length > 0 && !rel.startsWith('/') && !/^[A-Za-z]:/.test(rel), `files 里必须是库内相对路径：${rel}`);
+  }
+  assert.ok(!JSON.stringify(shape.body).includes(ROOT), '/api/data 不能带出服务器绝对路径');
+  ok('/api/data 字段契约（形状 / 前缀 / 相对路径）');
 
   // 6o. 失败路径的契约：非 2xx 必须带中文 {error}，前端才有话可说（sync.js 现在会读它）
   const noAi = await json('/api/ai/ask', {method: 'POST', body: {question: '测试'}});

@@ -37,6 +37,7 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
+            type=semver,pattern={{version}}
 
       - uses: docker/build-push-action@v6
         with:
@@ -44,5 +45,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 启动日志会打出版本号：只挂 :latest 时，没有它就无法判断线上跑的是哪个 commit，
+          # 也没法据此回滚到 :sha-xxxxxxx（见 docs/nas-deployment.md「版本可追踪」）
+          build-args: |
+            BUILD_VERSION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

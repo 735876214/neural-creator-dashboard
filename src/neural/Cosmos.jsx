@@ -220,7 +220,9 @@ export function Cosmos({reduced}) {
       raf = reduced ? 0 : requestAnimationFrame(frame);
       try {
         const dt = Math.max(0, Math.min(.05, (now - last) / 1000)); last = Math.max(last, now);
-        if (document.hidden) return;
+        // 后台标签页里不画；但 reduced 只画一帧（上面已经把 raf 置 0），这里必须把循环重新挂住，
+        // 否则在隐藏标签里打开页面时星点层会一直是空的，切回来也不会补画
+        if (document.hidden) { if (reduced) raf = requestAnimationFrame(frame); return; }
         if (!reduced) t += dt;
         const ctx = cv.getContext('2d');
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);

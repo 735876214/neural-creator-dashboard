@@ -8,14 +8,21 @@
 //
 // 定时：startNewsCron 每小时检查一次，当天还没有日报且已过 NEWS_HOUR（默认 8 点）就生成。
 // 环境变量：NEWS_SOURCE（RSS 地址）、NEWS_HOUR（生成时刻）、NEWS_TZ_OFFSET（默认 8）、NEWS_CRON=0 关闭。
-import {writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, rmSync} from 'node:fs';
-import {dirname, join} from 'node:path';
+import {writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, rmSync, copyFileSync} from 'node:fs';
+import {dirname, basename, join} from 'node:path';
 import {writeDoc} from './frontmatter.mjs';
 import {chat, TASK_MODELS, aiEnabled} from './ai.mjs';
 const NEWS_SOURCE = process.env.NEWS_SOURCE || 'https://aihot.news/feed/all.xml';
-const NEWS_HOUR = Number(process.env.NEWS_HOUR || 8);
+// NEWS_HOUR='08:00' / 'abc' 时 Number() 得到 NaN，`hours < NaN` 恒假 ⇒ 启动即生成日报（与「等到 8 点」相反）。
+const parsedHour = Number(process.env.NEWS_HOUR);
+const NEWS_HOUR = Number.isFinite(parsedHour) && parsedHour >= 0 && parsedHour <= 23 ? parsedHour : 8;
+if (process.env.NEWS_HOUR && NEWS_HOUR !== parsedHour) console.error(`[news] NEWS_HOUR=${process.env.NEWS_HOUR} 不是 0–23 的数字，改用 ${NEWS_HOUR}`);
 const NEWS_DIR = '00-AI热点';
 const MAX_ITEMS = 40;
+
+// 带 HTTP 状态的自定义错误：路由据此回 501 / 502 / 409，而不是把所有原因都塌成 500「服务器内部错误」
+// （同一产品里 /api/ai/* 在未配 key 时回 501，日报却回 500，用户分不清是配置问题还是服务出错）。
+const newsError = (status, message) => Object.assign(new Error(message), {status});
 
 // 容器默认 UTC（镜像不装 tzdata）：用显式偏移判定「几点之后」和「今天是哪天」，
 // 否则 NEWS_HOUR=8 在北京时间是 16:00，凌晨重启还会把日报写到前一天。
@@ -35,8 +42,11 @@ function validMd(path) {
 }
 
 // 同目录临时文件 + rename：写盘中途被杀/断电只会留下完整旧版或完整新版。
+// 临时文件名必须写成「点 + 原名 + pid-时间戳.tmp」：不加前导点的话（原来就是 `path + '.123-169.tmp'`），
+// server/index.mjs 的 TEMP_FILE_RE（/^\..+\.\d+-\d+\.tmp$/）匹配不到，崩溃残留永远不会被清理，
+// 而是被 Obsidian / Syncthing / git 当成普通笔记带走。
 function writeMdAtomic(path, text) {
-  const tmp = path + `.${process.pid}-${Date.now()}.tmp`;
+  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}-${Date.now()}.tmp`);
   try {
     writeFileSync(tmp, text, 'utf8');
     renameSync(tmp, path);
@@ -46,13 +56,27 @@ function writeMdAtomic(path, text) {
   }
 }
 
+// 「今天已经试过几次」：缓存行没了但 .md 也写不进去时（磁盘满 / 目录只读），cron 每 30 分钟
+// 会重新拉一次 RSS 并跑一次完整 AI 汇总。同一天失败 3 次就停下，别再烧模型。
+const attempts = new Map();
+const bumpAttempt = date => {
+  const n = (attempts.get(date) || 0) + 1;
+  attempts.set(date, n);
+  return n;
+};
+
 // —— RSS 2.0 极简解析（只用正则；源是标准 RSS，不值得为此引依赖） ——
 const cdata = s => String(s || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 const stripTags = s => cdata(s).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
 export async function fetchAiNews(source = NEWS_SOURCE) {
-  const res = await fetch(source, {signal: AbortSignal.timeout(20_000), headers: {'user-agent': 'neural-dashboard/0.6'}});
-  if (!res.ok) throw new Error(`RSS 拉取失败：HTTP ${res.status}`);
+  let res;
+  try {
+    res = await fetch(source, {signal: AbortSignal.timeout(20_000), headers: {'user-agent': 'neural-dashboard/0.6'}});
+  } catch (e) {
+    throw newsError(502, `RSS 拉取失败：${e?.name === 'TimeoutError' ? '请求超时（20s）' : (e.message || '网络错误')}`);
+  }
+  if (!res.ok) throw newsError(502, `RSS 拉取失败：HTTP ${res.status}`);
   const xml = await res.text();
   const items = [];
   for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
@@ -80,7 +104,7 @@ export async function fetchAiNews(source = NEWS_SOURCE) {
 
 // —— AI 汇总：一段日报 + 主题分组。每条带原文链接（按标题匹配回 RSS 条目）。 ——
 export async function digestNews(items, {model} = {}) {
-  if (!aiEnabled()) throw new Error('AI 未启用：热点日报需要 AI 汇总');
+  if (!aiEnabled()) throw newsError(501, 'AI 未启用：热点日报需要 AI 汇总');
   const list = items.map((it, i) => `${i + 1}. ${it.title}${it.summary ? '｜' + it.summary.slice(0, 80) : ''}`).join('\n');
   const out = await chat([
     {role: 'system', content: '你是 AI 行业动态的编辑。只输出被要求的内容。输出 JSON：{"digest":"200字以内的当日 AI 动态综述","topics":[{"name":"主题名","titles":["属于该主题的条目原文标题"]}]}'},
@@ -89,6 +113,8 @@ export async function digestNews(items, {model} = {}) {
   // 标题 → 原条目的链接；AI 抄标题可能抄得不完全一致，用「包含」匹配兜底
   const byTitle = items.map(it => ({t: it.title, link: it.link}));
   const linkOf = title => {
+    // AI 会漏抄标题：空串时 `title.includes(x.t)` 恒真，会把第一条的链接错配给所有空标题。
+    if (!title) return '';
     const hit = byTitle.find(x => x.t === title) || byTitle.find(x => x.t.includes(title) || title.includes(x.t));
     return hit?.link || '';
   };
@@ -122,30 +148,58 @@ export async function refreshNews(index, vaultDir, io = {}) {
   // vault 里文件还在且完整（没被手动删 / 没被写坏）才复用缓存
   const mdPath = join(vaultDir, NEWS_DIR, `${date}.md`);
   if (cached && validMd(mdPath)) return null;
+  // 同一天连续失败（磁盘满 / 目录只读 / RSS 长期 5xx）时别每 30 分钟再烧一次完整 AI 汇总
+  if ((attempts.get(date) || 0) >= 3) {
+    console.error('[news] 今天的日报已经连续生成失败 3 次，等明天再试');
+    return null;
+  }
 
   const items = await fetchAiNews();
-  if (!items.length) throw new Error('RSS 里没有可用条目');
-  const r = await digestNews(items);
-  index.putNews(date, {...r, items: items.map(i => ({title: i.title, link: i.link, date: i.date?.toISOString?.() || null})), model: TASK_MODELS.news});
+  if (!items.length) throw newsError(502, 'RSS 里没有可用条目');
+  const r = await digestNews(items, {model: io.model});
+  const payload = {...r, items: items.map(i => ({title: i.title, link: i.link, date: i.date?.toISOString?.() || null})), model: TASK_MODELS.news};
 
-  // 写进 vault（自动进图谱）；文件已完整存在（比如重启后补写）就跳过，残缺的会重写覆盖
+  // 先落 .md，再写 SQLite：反过来的话，写盘失败（ENOSPC / EROFS）会留下「/api/news 有今天这份、
+  // vault 里却没有」的分叉，图谱看不到、次日还会重新烧一次完整汇总。
+  // 文件已完整存在（比如重启后补写）就跳过，残缺的会重写覆盖。
   if (!validMd(mdPath)) {
-    mkdirSync(dirname(mdPath), {recursive: true});
-    writeMdAtomic(mdPath, renderMd(date, items, r));
+    try {
+      mkdirSync(dirname(mdPath), {recursive: true});
+      writeMdAtomic(mdPath, renderMd(date, items, r));
+    } catch (e) {
+      bumpAttempt(date);
+      throw e;
+    }
   }
+  index.putNews(date, payload);
+  attempts.delete(date);
   return {date, digest: r.digest, topics: r.topics.length, items: items.length};
+}
+
+// 强制刷新前的备份：用户可能在 Obsidian 里手改过当天日报（补评论、删误报条目），
+// 而「强制」这条路原来是直接整份覆盖、既没 .trash 备份也没有独立 git 提交点。
+function backupExisting(vaultDir, rel, abs) {
+  try {
+    const dst = join(vaultDir, '.trash', rel.replace(/\.md$/i, `-${new Date().toISOString().replace(/[:.]/g, '-')}.md`));
+    mkdirSync(dirname(dst), {recursive: true});
+    copyFileSync(abs, dst);
+  } catch (e) { console.error('[news] 备份旧日报失败：', e.message); }
 }
 
 // 手动强制刷新（忽略当天缓存，重新拉取汇总）
 export async function forceRefresh(index, vaultDir, io = {}) {
   const date = localDate();
   const items = await fetchAiNews();
-  if (!items.length) throw new Error('RSS 里没有可用条目');
-  const r = await digestNews(items);
-  index.putNews(date, {...r, items: items.map(i => ({title: i.title, link: i.link, date: i.date?.toISOString?.() || null})), model: TASK_MODELS.news});
+  if (!items.length) throw newsError(502, 'RSS 里没有可用条目');
+  const r = await digestNews(items, {model: io.model});
   const mdPath = join(vaultDir, NEWS_DIR, `${date}.md`);
+  if (existsSync(mdPath)) backupExisting(vaultDir, `${NEWS_DIR}/${date}.md`, mdPath);
   mkdirSync(dirname(mdPath), {recursive: true});
   writeMdAtomic(mdPath, renderMd(date, items, r));
+  // clearIdeasAt：日报内容整份换了，旧日报「已自动筛过选题」的标记必须作废，
+  // 否则新日报永远轮不到自动筛选题（COALESCE 会把旧标记一直保留）。
+  index.putNews(date, {...r, items: items.map(i => ({title: i.title, link: i.link, date: i.date?.toISOString?.() || null})), model: TASK_MODELS.news, clearIdeasAt: true});
+  attempts.delete(date);
   return {date, digest: r.digest, topics: r.topics.length, items: items.length};
 }
 
@@ -157,7 +211,11 @@ export function listNews(index, limit = 14) { return index.listNews(limit); }
 // 返回 {candidates, written}：candidates 是给前端预览的；written 是已直接落盘的（auto 模式）。
 export async function ideasFromNews(index, vaultDir, {model, auto = false, io = {}} = {}) {
   const news = index.listNews(1, true)[0];
-  if (!news) throw new Error('还没有热点日报：先 POST /api/news/refresh 生成一份');
+  if (!news) throw newsError(404, '还没有热点日报：先 POST /api/news/refresh 生成一份');
+  // 「SQLite 里最新一行」不等于「今天的日报」：cron 在 NEWS_HOUR 之前、生成失败、或用户删了 .md 时，
+  // 拿旧日报筛选题会把 sourceNews 写成旧日期，图谱里选题挂在一个不存在的日报上。
+  if (news.date !== localDate()) throw newsError(409, `今天还没有热点日报（最新一份是 ${news.date}）：先 POST /api/news/refresh 生成`);
+  if (!validMd(join(vaultDir, NEWS_DIR, `${news.date}.md`))) throw newsError(409, `今天的日报文件不完整或已被删除：${NEWS_DIR}/${news.date}.md`);
   // 幂等闸必须放在 AI 调用之前：放在生成候选之后，cron 与手动同时触发时
   // 两边都会先各调一次模型、各写 3 个选题（第二份还会被重名保护改名成「标题 2」）。
   if (auto && news.ideasAt) return {candidates: [], written: [], skipped: '今天的选题已自动落盘过'};
@@ -166,6 +224,10 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
   for (const n of data) {
     if (n.kind === 'post' || n.kind === 'note') myWorks.push(`【${n.title}】${String(n.body || '').slice(0, 200)}`);
   }
+  // 跨日去重：48h 抓取窗口下同一热点会连续两天被选中，落盘时撞名 → 「标题 2」，
+  // 图谱里同一个热点挂两个几乎相同的选题。
+  const existingIdeas = new Set();
+  for (const n of data) if (n.kind === 'idea' && n.title) existingIdeas.add(String(n.title).trim());
   const items = (news.items || []).map(i => `- ${i.title}`).join('\n');
   const out = await chat([
     {role: 'system', content: '你是创作者的选题策划。只输出被要求的内容。输出 JSON：{"ideas":[{"title":"…","platform":"小红书","priority":"高|中|低","note":"选题理由：为什么现在写、和创作者已有内容的关联、切入角度（80字内）","newsTitles":["依据的热点标题"]}]}'},
@@ -183,20 +245,23 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
   })).filter(i => i.title);
   if (!auto || !candidates.length) return {candidates, written: []};
   // auto：直接落盘进 04-选题池（复用 createNote 的固定模板，文件名即标题）。
-  // 防重：当天已自动落过（news 表记了 ideasAt）就不再落——否则每次手动触发都会攒一堆新题。
+  // 幂等标记必须在落盘**之前**抢好：原来的顺序是全部写盘成功后才记 ideasAt，一旦中途失败
+  // （磁盘满 / 目录权限 / 同名冲突）或进程被杀，同日再触发会重新调模型、重新落盘，
+  // 重名保护把新题改成「标题 2」——正好变成「攒一堆新题」。
+  try { index.putNews(news.date, {...news, ideasAt: new Date().toISOString()}); }
+  catch (e) { console.error('[news] 记录选题幂等标记失败：', e.message); }
   const createNote = io.createNote;
   const written = [];
-  for (const c of candidates) {
+  const fresh = candidates.filter(c => !existingIdeas.has(c.title.trim()));
+  for (const [i, c] of fresh.entries()) {
     // 正文保留依据的热点条目与原文链接，frontmatter 记 sourceNews，图谱据此连回日报。
     const sources = c.newsTitles.length
-      ? ['', '依据热点：', ...c.newsTitles.map((t, i) => `- ${c.newsLinks?.[i] ? `[${t}](${c.newsLinks[i]})` : t}`)].join('\n')
+      ? ['', '依据热点：', ...c.newsTitles.map((t, k) => `- ${c.newsLinks?.[k] ? `[${t}](${c.newsLinks[k]})` : t}`)].join('\n')
       : '';
     const body = `${c.note || ''}${sources}`.trim();
-    const r = createNote('idea', {title: c.title, body, fm: {platform: c.platform, priority: c.priority, status: '待写', note: c.note, sourceNews: news.date}});
+    // requestId 让 createNote 的重放缓存兜住「同一份日报重试落盘」：重试不会写出第二份
+    const r = createNote('idea', {title: c.title, body, fm: {platform: c.platform, priority: c.priority, status: '待写', note: c.note, sourceNews: news.date}, requestId: `news-idea:${news.date}:${i}`});
     written.push({...c, path: r.path});
-  }
-  if (written.length) {
-    index.putNews(news.date, {...news, ideasAt: new Date().toISOString()});
   }
   return {candidates, written};
 }
@@ -205,6 +270,7 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
 function digestNewsLinks(items) {
   const byTitle = (items || []).map(it => ({t: it.title, link: it.link || ''}));
   const linkOf = title => {
+    if (!title) return ''; // 同上：空标题会匹配到第一条
     const hit = byTitle.find(x => x.t === title) || byTitle.find(x => x.t.includes(title) || title.includes(x.t));
     return hit?.link || '';
   };
@@ -226,3 +292,4 @@ export function startNewsCron(runOnce) {
   setInterval(tick, 30 * 60_000).unref();
   setTimeout(tick, 15_000).unref(); // 启动后稍等片刻先试一次
 }
+

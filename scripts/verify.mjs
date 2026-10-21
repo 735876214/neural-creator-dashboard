@@ -61,6 +61,11 @@ function check(m, label, {allowEmptyPosts = false} = {}) {
     if (typeof p.id !== 'string' || !p.id) errs.push(`作品缺少 id：${p.title}`);
     if (!/^\d{4}-\d{2}-\d{2}/.test(p.date || '')) errs.push(`作品日期格式不对：${p.title}`);
     if (typeof p.views !== 'number') errs.push(`作品 views 必须是数字：${p.title}`);
+    // 互动率是 (赞+评+藏+转)/观看：任何一个指标是字符串或缺失，分析栏就显示 "NaN%"
+    // （note-api 会 ??"0"，手写 my-data.local.js 与老导入器不会）。
+    for (const k of ['likes', 'comments', 'saves', 'shares']) {
+      if (p[k] != null && typeof p[k] !== 'number') errs.push(`作品 ${k} 必须是数字：${p.title}`);
+    }
     if (!m.postContent.some(c => c.title === p.title)) errs.push(`postContent 里找不到作品：${p.title}`);
   }
   if (new Set(m.posts.map(p => p.id)).size !== m.posts.length) errs.push('作品 id 有重复');
@@ -72,6 +77,13 @@ function check(m, label, {allowEmptyPosts = false} = {}) {
         ? /^06-个人知识库\/.+/ .test(n.path || '')
         : /^05-方法库 methods\/[^/]+\/.+/.test(n.path || '');
     if (!okPath) errs.push(`笔记 path 格式不对：${n.title}`);
+    // 前缀只能出现一次：曾经 root 级方法笔记被拼成
+    // `05-方法库 methods/05-方法库 methods/x.md`，图谱据此多造一个同名二级目录节点，
+    // 而上面那条正则对双前缀照样通过，契约形同虚设。
+    if (n.kind !== 'news' && n.kind !== 'personal') {
+      const hits = (n.path || '').split('05-方法库 methods/').length - 1;
+      if (hits !== 1) errs.push(`笔记 path 里「05-方法库 methods/」应只出现一次：${n.path}`);
+    }
   }
   // 老数据（导入脚本）用序号数字 id，看板里新建的选题是服务端生成的稳定字符串 id，两者都合法。
   const okId = v => (typeof v === 'number' && Number.isFinite(v)) || (typeof v === 'string' && v.trim() !== '');
@@ -358,7 +370,7 @@ if (!/cards\.push\(ps\.length/.test(r5Graph)) {
   fail('askGraph 的「作品表现」分支没有判空（空库时 ps[0].short 会抛错，助手卡在检索中）');
 } else ok('本地检索在空作品库时不会抛错');
 // 个人知识库必须复用 FOLDERS 的 f:personal，不能再造一个 f:个人知识库 的重复目录节点。
-if (!/isPersonal \? 'f:personal' : 'f:' \+ sub/.test(r5Graph)) {
+if (!/const subId = isPersonal \? 'f:personal' : isNews \? 'f:00-AI热点' : 'f:' \+ sub;/.test(r5Graph)) {
   fail("个人知识库的目录节点 id 没有复用 f:personal（会多出重复目录节点并锚到方法库方向）");
 } else ok('个人知识库复用 f:personal 目录节点');
 
@@ -480,7 +492,7 @@ if (!/const TZ_OFFSET = Number\.isFinite\(TZ_OFFSET_RAW\) \? TZ_OFFSET_RAW : 8;/
   fail('日报 .md 仍是原地覆盖写：写坏会留下半截文件且被当成已生成');
 } else if (!/if \(auto && news\.ideasAt\) return \{candidates: \[\], written: \[\], skipped/.test(r12NewsSrc)) {
   fail('选题落盘的幂等闸在 AI 调用之后：cron 与手动并发会重复落盘 + 双倍计费');
-} else if (!/runningJob = 'news-refresh';/.test(r12SrvSrc) || !/runningJob = 'news-ideas';/.test(r12SrvSrc)) {
+} else if (!/acquireJob\('news-refresh'\)/.test(r12SrvSrc) || !/acquireJob\('news-ideas'\)/.test(r12SrvSrc)) {
   fail('/api/news/* 绕开「同时只跑一个 AI 任务」的闸');
 } else if (!/const limit = Number\.isFinite\(raw\) \? Math\.min\(Math\.max\(Math\.trunc\(raw\), 1\), 90\) : 14;/.test(r12SrvSrc)) {
   fail('/api/news 的 limit 没校验：NaN 会导致 500');
@@ -507,8 +519,9 @@ if (!/const uniqIdea = uniqueId\(\);/.test(r14VaultSrc)
   || !/id: uniqIdea\(stableId \|\| i \+ 1\)/.test(r14VaultSrc)
   || !/id: uniqDraft\(stableId \|\| 'draft-' \+ \(i \+ 1\)\)/.test(r14VaultSrc)) {
   fail('重复 fm id 没去重：files 被覆盖 + 索引撞主键，/api/data 会整个 500');
-} else if (!/const moved = \[\];/.test(r14DbSrc)
-  || !/DELETE FROM semantic_edges WHERE a = \? OR b = \?/.test(r14DbSrc)) {
+} else if (!/const dropped = \[\];/.test(r14DbSrc)
+  || !/const relocated = \[\];/.test(r14DbSrc)
+  || !/for \(const id of \[\.\.\.dropped, \.\.\.relocated\]\) dropEdge\.run\(id, id\);/.test(r14DbSrc)) {
   fail('位置 id 位移后旧语义边不会作废：图谱会连到别的节点');
 } else if (!/if \(files\[key\] !== r\.path\) \{ if \(!isPending\(key\)\) refs\.delete\(key\); continue; \}/.test(r14PersistSrc)) {
   fail('refreshData 重播基线不校验 path：id 位移后会把正文写进另一个文件');
@@ -517,7 +530,7 @@ if (!/const uniqIdea = uniqueId\(\);/.test(r14VaultSrc)
 // —— 第十五轮审查：并发与幂等 ——
 const r15SrvSrc = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
 const r15PersistSrc = readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8');
-if (!/const at = rel => \{ try \{ return new Date\(statSync\(join\(VAULT, rel\)\)\.mtimeMs\)\.toISOString\(\); \} catch \{ return null; \} \};/.test(r15SrvSrc)
+if (!/try \{ return new Date\(statSync\(join\(VAULT, rel\)\)\.mtimeMs\)\.toISOString\(\); \} catch \{ missing\+\+; return null; \}/.test(r15SrvSrc)
   || !/if \(!mtime\) return;/.test(r15SrvSrc)) {
   fail('reindex 的 statSync 没兜底：快照缓存窗口里文件被外部删掉会让 /api/data 整个 500');
 } else if (!/function createMemoHit\(requestId\)/.test(r15SrvSrc) || !/createMemoPut\(requestId, rel\);/.test(r15SrvSrc)
@@ -607,8 +620,13 @@ const r19Vault = readFileSync(join(ROOT, 'server/vault.mjs'), 'utf8');
 if (!/export function vaultStamp\(dir\)/.test(r19Vault)
   || !/\{v: v \+ n, n\}/.test(r19Vault)) {
   fail('/api/version 没有轻量指纹（每 5 秒轮询会把整个 vault 读两遍）');
-} else if (/loadData\(\)/.test((r19Srv.match(/if \(p === '\/api\/version' && req\.method === 'GET'\) \{([\s\S]*?)\n  \}/) || [])[1] || '')) {
-  fail('/api/version 又走回 loadData()：轮询会重新全库读盘');
+} else if (!(() => {
+  // 先取 /api/version 的路由体再判断里面有没有 loadData()。原来用 `|| ''` 兜底：
+  // 路由被重写（缩进/大括号变了）时 match 返回 null，断言就真空通过了。
+  const body = (r19Srv.match(/if \(p === '\/api\/version' && req\.method === 'GET'\) \{([\s\S]*?)\n  \}/) || [])[1];
+  return typeof body === 'string' && body.length > 0 && !/loadData\(\)/.test(body);
+})()) {
+  fail('/api/version 又走回 loadData()：轮询会重新全库读盘（或路由改写后这条检查已失效，请同步更新）');
 } else if (!/function acceptsGzip\(req\)/.test(r19Srv) || !/head\['content-encoding'\] = 'gzip';/.test(r19Srv)) {
   fail('JSON / 静态资源没有 gzip 协商（手机上下载几 MB 中文 JSON）');
 } else if (!/const iters = N\.length > 1200 \? 90 : N\.length > 700 \? 160 : N\.length > 400 \? 300 : 520;/.test(r19Graph)) {
@@ -620,6 +638,32 @@ if (!/export function vaultStamp\(dir\)/.test(r19Vault)
 } else if (!/const FLOW_LIMIT = 300;/.test(r19Vault) || !/ideasTotal: bucket\.ideas\.length, drafts: draftsOut\.length, draftsTotal: bucket\.drafts\.length/.test(r19Vault)) {
   fail('选题/草稿桶没有上限：payload 与图谱节点数会无界增长');
 } else ok('规模与性能（指纹 / gzip / 布局分档 / 邻接表 BFS / 绘制降级 / 桶上限）');
+
+// —— 第九轮审查：/api/data 字段契约（产出侧 ↔ 消费侧）——
+const r9Vault = readFileSync(join(ROOT, 'server/vault.mjs'), 'utf8');
+const r9Graph = readFileSync(join(ROOT, 'src/neural/graph.js'), 'utf8');
+const r9Persist = readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8');
+const r9Analysis = readFileSync(join(ROOT, 'src/neural/Analysis.jsx'), 'utf8');
+const r9Pages = readFileSync(join(ROOT, 'src/neural/pages.jsx'), 'utf8');
+if (!/clipped: String\(pick\(x\.fm, \['clipped'/.test(r9Vault)) {
+  fail('vault.mjs 没有透传 personal.clipped：知识库列表永远按路径排序、剪藏日期不显示');
+} else if (!/localeCompare\(String\(a\.personal\?\.clipped/.test(r9Pages)) {
+  // 原来这里只查「pages.jsx 里出现过 .clipped」——页面上任何一处 .clipped 字样都能满足
+  // （只显示日期不排序也算），排序被删掉照样通过。改成盯住那次真正用于排序的比较。
+  fail('个人知识库页面不再按 clipped 排序（服务端白透传了）');
+} else if (!/const cover = c\?\.cover \|\| figuresOf\['post:' \+ p\.id\]/.test(r9Graph)) {
+  fail('作品没接上封面兜底：postContent 从不产出 cover，作品封面是死代码');
+} else if (!/const tail = segs\.length > 1 \? segs\.join\('\/'\) : \['未分类'/.test(r9Vault)) {
+  fail('根级方法笔记的展示 path 又会拼出双前缀（图谱会多一个同名目录节点）');
+} else if (!/bucket\.ideas\.slice\(\)\.sort\(/.test(r9Vault) || !/bucket\.drafts\.slice\(\)\.sort\(/.test(r9Vault)) {
+  fail('选题/草稿没有排序就编号：位置 id 会随 readdir 顺序漂移，语义边与写回口令挂错对象');
+} else if (!/export const isLive = storeIsLive;/.test(r9Persist)) {
+  fail('persist.isLive 与 store.isLive 不是同一套判定：编辑会被静默丢弃');
+} else if (!/const kindSpec = kind => KINDS\[kind\] \|\| KINDS\.ghost;/.test(r9Analysis)) {
+  fail('分析栏直接查 KINDS[kind]：未知 kind 会让右侧面板白屏');
+} else if (!/const searchTerms = q =>/.test(r9Graph) || !/out\.set\(t, Math\.max\(out\.get\(t\) \|\| 0, 2\)\)/.test(r9Graph)) {
+  fail('本地检索没有中文二元组切词：整句当一个 token，中文提问永远检索不到');
+} else ok('数据契约（clipped / cover / 双前缀 / 位置 id 排序 / isLive 单一口径 / KINDS 兜底 / 中文切词）');
 
 for (const w of warnings) console.log('  ! ' + w);
 if (errors.length) { console.error('\n未通过：'); errors.forEach(e => console.error('  ✗ ' + e)); process.exit(1); }
