@@ -167,13 +167,18 @@ const aiFail = e => {
 
 // 部署模式下静态资源与 /api 都由 note-api 直出（镜像里没有 nginx），所以压缩必须在这里做：
 // /api/data 在真实库上常是 1–3 MB 中文 JSON（压缩比 6–10×），手机上不压缩就是几秒白屏。
-// 标签合并的唯一口径：已有标签 + AI 标签（去重），但先给 AI 留位置再截断。
-// 「已有 ∪ AI 再截断」在标签多的条目上会把 AI 结果整批截掉：接口回 written:true，
-// 文件一个字没变，前端把这次算出来的标签当「已写入」显示。两条 AI 链路共用这一份。
+// 标签合并的唯一口径：人工标签永远排前面且不删，AI 标签只填空余名额。
+// 历史上有过两种错法，都要避免：
+// ①「已有 ∪ AI 再截断」——标签多的条目上 AI 结果整批被截，接口回 written:true，文件一个字没变；
+// ②「先给 AI 留位置再截断」（old.slice(0, cap - ai.length)）——AI 一次给满 20 个时
+//    old.slice(0,0) 把人工标签全删了，等于 AI 打标吃掉人工成果。
+// 所以返回 {tags, added}：tags 是合并后的完整列表，added 是真正新增的 AI 标签（用来判断有没有变化），
+// 名额不足时 added 为空数组而不是悄悄删人工标签。
 function mergedTags(existing, aiTags, cap = 20) {
   const old = [...new Set((existing || []).map(t => String(t).trim()).filter(Boolean))];
   const ai = [...new Set((aiTags || []).map(t => String(t).trim()).filter(Boolean))].filter(t => !old.includes(t));
-  return [...old.slice(0, Math.max(0, cap - ai.length)), ...ai].slice(0, cap);
+  const added = ai.slice(0, Math.max(0, cap - old.length));
+  return {tags: [...old, ...added], added};
 }
 
 function acceptsGzip(req) {
@@ -1340,7 +1345,12 @@ async function route(req, res, url) {
         if (k in fm && typeof fm[k] !== 'string') fail(400, `${k} 必须是字符串`);
       }
     }
-    const r = writeExisting(target({path, id}), {body, fm, mtime, requireMtime: true});
+    // 能整篇覆盖的只有「笔记类」文件：界面上可编辑的三种（方法笔记 / AI 热点日报 / 个人知识库）
+    // 与前端「可编辑」开关一致。作品的正文归发布流程管（/api/publish 建文件、指标回填只改 fm），
+    // 原来这条写接口不区分类型，curl 一句就能把作品正文整篇清空，护栏只在前端按钮上。
+    const relToEdit = target({path, id});
+    if (relToEdit.startsWith(KIND_DIR.post + '/')) fail(400, '作品正文不能在笔记编辑里改：发布后请用指标回填，或直接编辑 02-作品库 下的文件');
+    const r = writeExisting(relToEdit, {body, fm, mtime, requireMtime: true});
     return json(res, 200, {path: r.path, mtime: r.mtime, changed: r.changed, hash: hashOf(r.text)});
   }
 
@@ -1480,6 +1490,15 @@ async function route(req, res, url) {
     if (sourceIdeaId) fm.sourceIdeaId = sourceIdeaId;
     if (sourceDraftId) fm.sourceDraftId = sourceDraftId;
 
+    // 草稿的话题与摘要要跟着内容走：草稿文件发布后会被 rm，frontmatter 里没带过去的 tags
+    // 就等于永久丢失——图谱上同一篇内容从草稿变作品时，作品与话题/选题池的边全断。
+    const draftTags = Array.isArray(draftFm.tags)
+      ? draftFm.tags.map(t => String(t).trim()).filter(Boolean)
+      : [];
+    if (draftTags.length) fm.tags = draftTags;
+    const draftSummary = String(draftFm.summary || '').trim();
+    if (draftSummary) fm.summary = draftSummary;
+
     // 先写 frontmatter，再移动文件：反过来的话，写盘失败（磁盘满、只读挂载、权限）时
     // 草稿已经没了、作品又没指标，而那条 rename 的 git 提交已经把「草稿被删」记进历史。
     // 只有真的写进去了才报 metricsWritten：date 无论如何都要写（缺了会退化成文件 mtime，
@@ -1523,6 +1542,9 @@ async function route(req, res, url) {
 
   // —— 附件（99-附件/）：图片 / 视频上传与读取，供编辑器插图与预览 ——
   const ATTACH_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.mp4', '.mov', '.mp3', '.pdf']);
+  // 允许「上传」的扩展名（读取仍走 ATTACH_EXT，老文件不受影响）。少一个 .svg：SVG 能内联
+  // <script>，附件 URL 被直接导航时会执行，前端 accept="image/*" 又只是浏览器约束。
+  const ATTACH_UPLOAD_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4', '.mov', '.mp3', '.pdf']);
   const ATTACH_MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.mp3': 'audio/mpeg', '.pdf': 'application/pdf'};
   function insideAttachment(rel) {
     const raw = String(rel || '').replace(/\\/g, '/').trim();
@@ -1545,6 +1567,11 @@ async function route(req, res, url) {
     const dot = filename.lastIndexOf('.');
     const stem = safeName(dot > 0 ? filename.slice(0, dot) : filename).slice(0, 50).replace(/\s+/g, '-') || 'attachment';
     const ext = extname(filename).toLowerCase();
+    // 扩展名白名单：前端的 accept="image/*" 只是浏览器约束，curl 一句就能把 .html / .js
+    // 塞进 99-附件/。读取端虽然有 nosniff + CSP + ATTACH_MIME 白名单兜底，但「不许落盘」比
+    // 「落了但不许执行」干净得多（附件目录还会被 Syncthing / git 同步出去）。
+    // 比 ATTACH_EXT 少 .svg：SVG 里可以带 <script>，直接导航到附件 URL 时会执行。
+    if (!ATTACH_UPLOAD_EXT.has(ext)) fail(400, `不支持的附件类型：${ext || '无扩展名'}（只允许 ${[...ATTACH_UPLOAD_EXT].join(' / ')}）`);
     // 时间戳只到毫秒：多选两张同名图片（或双击提交同一文件）落在同一毫秒时，原来的
     // writeFileSync 直接截断前一张，两个笔记的 ![[...]] 指向同一路径，前一张永久丢失，
     // 而两次请求都回 201。加随机后缀，与快照命名保持一致。
@@ -1629,7 +1656,8 @@ async function route(req, res, url) {
   // ① 打标签 + 摘要。body: {paths?: [...], dryRun?: bool}
   // 不传 paths 就处理全部方法笔记；按内容 hash 增量，没变过的跳过。
   if (p === '/api/ai/analyze' && req.method === 'POST') {
-    const {paths: rawPaths, dryRun, model} = await readBody(req);
+    // overwriteSummary：显式允许 AI 覆盖已有的人工摘要（默认不覆盖，见下面的写回段）。
+    const {paths: rawPaths, dryRun, model, overwriteSummary: forceSummary, force} = await readBody(req);
     const paths = relPaths(rawPaths);
     const useModel = await pickModel(model, 'analyze');
     const d = loadData(0);
@@ -1641,7 +1669,9 @@ async function route(req, res, url) {
       ...d.works.map(w => ({id: 'post:' + w.post.id, rel: w.rel, title: w.post.title, body: w.content?.body || ''}))
     ].filter(x => !paths?.length || paths.includes(x.rel));
     const cached = index.aiCache();
-    const need = targets.filter(x => cached.get(x.id)?.hash !== hashOf(x.body));
+    // force：忽略内容 hash 缓存强制重跑。缓存键是正文 hash，人工改过 tags/summary 不会触发重算，
+    // 于是「AI 写错了想重跑一次」原来没有任何出路（dryRun 永远回「已经分析过」）。
+    const need = force === true ? targets : targets.filter(x => cached.get(x.id)?.hash !== hashOf(x.body));
     // 单次上限：几百篇的库点一次「分析全部」就是几百次模型调用（几分钟、一大笔 token），
     // 中途也没有地方停。默认 20 篇一批，剩下的下次再跑（hash 增量，已完成的会跳过）。
     const maxItems = Math.max(1, Number(process.env.AI_MAX_ITEMS) || 20);
@@ -1665,23 +1695,41 @@ async function route(req, res, url) {
           progress();
           continue;
         }
-        // 写回内容文件（笔记或作品）的 frontmatter：tags = 已有 ∪ AI 生成（去重，AI 的排后面），
+        // 写回内容文件（笔记或作品）的 frontmatter：tags = 人工标签在前 + AI 新增（去重），
         // summary = AI 生成。写前读原文拿 mtime 做乐观锁；冲突时跳过并在结果里标注。
         let writeErr = null;
+        let keptSummary = false;
+        let wrote = false;
+        // 已有的人工摘要不能被 AI 覆盖：`summaryBy: ai` 这个标记用来区分「这行摘要是我（AI）写的」
+        // 与「这行摘要是用户手写的」。没有标记的一律当人工成果保护，只有显式 overwriteSummary
+        // 或本来就带 ai 标记时才重写。
+        const overwriteSummary = forceSummary === true;
         try {
           const cur = readFileSync(join(VAULT, n.rel), 'utf8');
           const curFm = parseFrontmatter(cur);
           const merged = mergedTags(curFm.tags, r.tags);
           // summary 空串在 frontmatter.render() 里表示「删除这个键」：模型没给摘要时不能把
           // 用户已有的 summary 抹掉（写回成功还会把这一篇标记成「已分析」，从此不再重跑）。
-          const fmPatch = {tags: merged};
-          if (r.summary) fmPatch.summary = r.summary;
-          writeExisting(n.rel, {fm: fmPatch, mtime: mtimeOf(join(VAULT, n.rel))});
+          const fmPatch = {};
+          if (merged.added.length) fmPatch.tags = merged.tags;
+          const humanSummary = String(curFm.summary || '').trim() && String(curFm.summaryBy || '') !== 'ai';
+          if (r.summary && humanSummary && !overwriteSummary) {
+            keptSummary = true;
+          } else if (r.summary) {
+            fmPatch.summary = r.summary;
+            fmPatch.summaryBy = 'ai';
+          }
+          // 一个字都不用改时就别写盘：既省一次 mtime 变更（会触发外部改动提示），
+          // 也不会出现「回 written:true 但文件没变」的假成功。
+          if (Object.keys(fmPatch).length) {
+            writeExisting(n.rel, {fm: fmPatch, mtime: mtimeOf(join(VAULT, n.rel))});
+            wrote = true;
+          }
         } catch (e) { writeErr = e.message; }
         // 缓存必须在写回成功之后才记：先记后写时，一旦写回 409 / ENOENT，下一轮 dryRun 就
         // 算成「已分析」，面板说「写回失败·可重试」，但重试永远返回「这篇已经分析过了」。
         if (!writeErr) index.putAi(n.id, hashOf(n.body), r.tags, r.summary);
-        results.push({id: n.id, path: n.rel, title: n.title, ...r, written: !writeErr, error: writeErr});
+        results.push({id: n.id, path: n.rel, title: n.title, ...r, written: !writeErr && wrote, unchanged: !writeErr && !wrote, keptSummary, error: writeErr});
         progress();
       }
       return results;
@@ -2031,17 +2079,15 @@ async function route(req, res, url) {
     // 读与写之间被 Obsidian / Syncthing 改动时 AI 会静默盖掉别人的修改。
     const curMtime = mtimeOf(join(VAULT, rel));
     const oldTags = parseFrontmatter(cur);
-    writeExisting(rel, {
-      // summary 只在非空时才写：空串在 render() 里表示删键，会把剪藏原有的摘要抹掉
-      // 标签合并口径必须和 /api/ai/analyze 一致：先给 AI 的标签留位置再截断。
-      // 原来是「已有 ∪ AI 再截 12 个」——剪藏每次重分析都并进最多 6 个 AI 标签，
-      // 第 2 次之后就满 12 个，此后 AI 结果整批被截掉，文件一个字不变却照样回 200，
-      // 前端把这次算出来的标签当「已写入」渲染，关掉面板就消失。
-      fm: {...(analysis.summary ? {summary: analysis.summary} : {}), ...(analysis.keyPoints.length ? {keyPoints: analysis.keyPoints} : {}),
-        tags: mergedTags(oldTags.tags, analysis.tags)},
-      mtime: curMtime
-    });
-    return json(res, 200, {path: rel, analysis});
+    const merged = mergedTags(oldTags.tags, analysis.tags);
+    // 剪藏首次生成时 summary 是 AI 写的（带 summaryBy: ai）；用户之后手改过、或手写的摘要
+    // 不该被「重新分析网页」静默覆盖，规则与 /api/ai/analyze 完全一致。
+    const humanSummary = String(oldTags.summary || '').trim() && String(oldTags.summaryBy || '') !== 'ai';
+    const fm = {...(analysis.summary && !humanSummary ? {summary: analysis.summary, summaryBy: 'ai'} : {}), ...(analysis.keyPoints.length ? {keyPoints: analysis.keyPoints} : {}),
+      ...(merged.added.length ? {tags: merged.tags} : {})};
+    // 没有任何要改的键时不写盘：写一次只会让 mtime 变一次（触发外部改动提示），内容一个字没动。
+    if (Object.keys(fm).length) writeExisting(rel, {fm, mtime: curMtime});
+    return json(res, 200, {path: rel, analysis, keptSummary: !!humanSummary});
     } finally { clipAnalyzing.delete(rel); }
   }
 
