@@ -119,7 +119,16 @@ function App() {
     // 位置 id（i3 / draft-3）是「排序后第 N 个」，外部新建/删除一篇就会让同一个 id
     // 指向另一个文件。rel 相同才算「还是同一条」：否则把本地未落盘的编辑盖到新记录上，
     // 用户看到的是 A 的标题配 B 的备注（写回仍按各自 path + mtime 走，不会写错文件）。
-    const sameRecord = (local, fresh) => !local?.rel || !fresh?.rel || local.rel === fresh.rel;
+    // 但 /api/data 下发时会把每条记录的 rel 剥掉（服务端不愿多暴露路径），本地记录与服务端
+    // 快照的 rel 都是 undefined，原来的 `local.rel === fresh.rel` 恒真、等于没判。改为拿
+    // persist 里「上次加载 / 写入时记下的路径」和本次快照的 files 比对：路径变了就说明这个
+    // id 已经换了一篇文件。
+    const sameRecord = (key, local) => {
+      if (!local) return true;
+      const wasAt = persist.refPath(key);
+      const nowAt = getFiles()[key];
+      return !wasAt || !nowAt || wasAt === nowAt;
+    };
     if (isLive()) {
       if (Array.isArray(d.seedIdeas)) setIdeas(list => {
         const byId = new Map(list.map(x => [x.id, x]));
@@ -127,7 +136,7 @@ function App() {
         // 只有「本地还有未落盘改动」的条目才能在服务端快照里消失后继续留着；
         // 否则外部（Obsidian / 另一台设备）删掉的选题会一直复活，再编辑还会被写回 vault。
         const kept = list.filter(x => !freshIds.has(x.id) && persist.isPending(persist.ideaKey(x.id)));
-        return [...(d.seedIdeas || []).map(x => (byId.get(x.id) && persist.isPending(persist.ideaKey(x.id)) && sameRecord(byId.get(x.id), x)) ? byId.get(x.id) : x), ...kept];
+        return [...(d.seedIdeas || []).map(x => (byId.get(x.id) && persist.isPending(persist.ideaKey(x.id)) && sameRecord(persist.ideaKey(x.id), byId.get(x.id))) ? byId.get(x.id) : x), ...kept];
       });
       if (Array.isArray(d.seedDrafts)) setDrafts(list => {
         const freshIds = new Set((d.seedDrafts || []).map(x => x.id));
@@ -135,7 +144,7 @@ function App() {
         const kept = list.filter(x => !freshIds.has(x.id) && persist.isPending(persist.draftKey(x.id)));
         return [...(d.seedDrafts || []).map(x => {
           const prev = list.find(y => y.id === x.id);
-          return (prev && persist.isPending(persist.draftKey(x.id)) && sameRecord(prev, x)) ? prev : x;
+          return (prev && persist.isPending(persist.draftKey(x.id)) && sameRecord(persist.draftKey(x.id), prev)) ? prev : x;
         }), ...kept];
       });
     }
@@ -392,7 +401,9 @@ function App() {
 
     {live
       ? <SyncBanner items={saveItems} onRetry={persist.retry} onOverwrite={persist.overwriteConflict} onRefresh={() => location.reload()} onDiff={key => setModal({diff: key})}
-          onDiscard={key => { persist.discardLocal(key); setToast('已放弃本地改动，保留 NAS 上的版本 · Local edits discarded'); }}
+          // 放弃本地改动 = 以 NAS 为准：光清掉 outbox 还不够，页面里的 state 仍是旧内容，
+          // 用户接着打一个字就又把它排进 outbox 写回 NAS（等于「放弃」没生效）。必须重拉一次。
+          onDiscard={key => { persist.discardLocal(key); persist.refreshData().catch(() => {}); setToast('已放弃本地改动，保留 NAS 上的版本 · Local edits discarded'); }}
           onDismiss={key => persist.dismissNotice(key)}/>
       : <div className="sync-banner glass read-only" role="status">
           <span className="sb-title"><Icon name="info" size={14}/>未连接 NAS 笔记库 · 只读演示 <em>Read-only (no NAS)</em></span>
@@ -565,6 +576,7 @@ function ReadModal({node, onClose, editable}) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [serverText, setServerText] = useState(null); // 409 时的 NAS 版本，diff 用
+  const [conflictMtime, setConflictMtime] = useState(null); // 409 时 NAS 那版的锁：只在用户明确选择后使用
   const [diffView, setDiffView] = useState(null); // {a, b} 内部 diff 弹窗
 
   // 部署模式下拉服务器上的原文（带 mtime 做乐观锁）；本地模式直接用图谱里的 body。
@@ -592,8 +604,12 @@ function ReadModal({node, onClose, editable}) {
       });
       if (res.status === 409) {
         const j = await res.json().catch(() => ({}));
-        setErr('文件已被其他编辑器改动，未覆盖 · Conflict: file changed elsewhere, not overwritten');
-        setMtime(j.mtime);
+        setErr('文件已被其他编辑器改动，未覆盖 · Conflict: file changed elsewhere, not overwritten。请先「对比差异」再决定保留哪边');
+        // 409 回带的 mtime 是「NAS 上别人刚写的那版」的锁。把它塞进 state 之后，用户再点一次
+        // 保存就会拿着别人的 mtime 把自己的旧正文写上去——乐观锁被这条路径自己绕过了。
+        // 冲突期间锁清空，保存按钮改成必须先看 diff / 复制再决定（见下面 disabled 条件）。
+        setConflictMtime(j.mtime ?? null);
+        setMtime(null);
         setServerText(persist.stripFrontmatter(j.content || '')); // NAS 当前正文，供 diff；不再直接覆盖编辑框（丢输入）
         return;
       }
@@ -638,7 +654,7 @@ function ReadModal({node, onClose, editable}) {
             </label>}
           </div>
           {err && <p className="quiet" role="alert">{err}
-              {serverText != null && <> · <button className="text-btn" onClick={() => setDiffView({a: serverText, b: text, mtime: mtime})}>对比差异 <em>Diff</em></button></>}
+              {serverText != null && <> · <button className="text-btn" onClick={() => setDiffView({a: serverText, b: text, mtime: conflictMtime})}>对比差异 <em>Diff</em></button></>}
             </p>}
           <div className="form-actions">
             <button className="pill ghost" onClick={() => { setEditing(false); setErr(''); setServerText(null); }} disabled={busy}>取消 <em>Cancel</em></button>
@@ -650,8 +666,13 @@ function ReadModal({node, onClose, editable}) {
       aText={persist.stripFrontmatter(diffView.a)} bText={diffView.b}
       aLabel="NAS 版本 NAS" bLabel="我的编辑 Mine"
       onClose={() => setDiffView(null)}
-      onKeepServer={() => { setText(persist.stripFrontmatter(diffView.a)); setMtime(diffView.mtime); setDiffView(null); setErr(''); setServerText(null); }}
-      onKeepMine={() => { setDiffView(null); setServerText(null); setErr('保留本地编辑，重新保存将覆盖 NAS · Keeping mine'); }}/>}
+      onKeepServer={() => { setText(persist.stripFrontmatter(diffView.a)); setMtime(diffView.mtime); setDiffView(null); setErr(''); setServerText(null); setConflictMtime(null); }}
+      onKeepMine={() => {
+        // 用户明确选了「保留我的编辑」才把 NAS 那版的 mtime 装回去：这样保存是有意的覆盖，
+        // 而不是冲突后自动带锁重试。
+        setMtime(diffView.mtime);
+        setDiffView(null); setServerText(null); setErr('保留本地编辑，再点保存将覆盖 NAS · Keeping mine');
+      }}/>}
   </Modal>;
 }
 

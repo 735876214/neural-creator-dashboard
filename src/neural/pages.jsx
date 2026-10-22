@@ -16,6 +16,10 @@ import {PublishModal, insertImageAtCursor} from './NoteModal';
 
 const fmt = v => v == null ? '—' : Number(v).toLocaleString('zh-CN');
 
+// graph.js 的 node.shared 存的是「分区:概念名」（knowledge:复盘）：比较用带前缀的键，
+// 界面只该显示概念名。没有 sharedNames 时现场剥一次前缀兜底。
+const sharedNamesOf = n => n?.sharedNames || (n?.shared || []).map(s => s.slice(s.indexOf(':') + 1));
+
 export function PageHead({zh, en, sub, subEn, children}) {
   return <header className="page-head">
     <div><p className="eyebrow">{en.toUpperCase()} <span>{zh}</span></p><h1>{sub}</h1><p className="page-sub">{subEn}</p></div>
@@ -238,7 +242,7 @@ export function Ideas({graph, ideas, onEdit, onNew, onGraph, onModule, readOnly,
             <div className="ic-top"><span className="ic-pri"><i/>{idea.priority} <em>{pen}</em></span><span className="ic-plat">{idea.platform}</span></div>
             <h3>{idea.title || '未命名选题'}</h3>
             <p>{idea.note || '还没有创作备注。'}</p>
-            {n?.shared?.length > 0 && <div className="chip-row">{n.shared.slice(0, 5).map(c => <span key={c} className="chip static" style={{'--kc': KINDS.concept.color}}>{c}</span>)}</div>}
+            {sharedNamesOf(n).length > 0 && <div className="chip-row">{sharedNamesOf(n).slice(0, 5).map(c => <span key={c} className="chip static" style={{'--kc': KINDS.concept.color}}>{c}</span>)}</div>}
             <div className="ic-reach"><Icon name="link" size={13}/>{works.length ? <>可延伸 {works.length} 篇作品 <em>builds on {works.length} works</em></> : <>暂无关联作品 <em>No related works</em></>}</div>
             <footer>
               <button className="pill ghost" onClick={() => onGraph(n.id)}><Icon name="concept" size={14}/>图谱 <em>Graph</em></button>

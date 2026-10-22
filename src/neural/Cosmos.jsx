@@ -152,24 +152,40 @@ export function Cosmos({reduced}) {
 
   // 生成星云画布（分两批，首屏先出来再渐渐显影）
   useEffect(() => {
-    const w = window.innerWidth, h = window.innerHeight;
     const S = 2;                                  // 生成分辨率 = 视口的 1/2，柔化后放大
     let stopped = false;
+    // 视口尺寸必须每次重建时现取：原来的 w/h 是挂载时算死的，
+    // 窗口放大或转屏后位图仍按旧尺寸烘、又被 CSS 拉到 116%，星云发虚且银河带与星点错位。
     const build = (ref, opt) => {
       if (stopped || !ref.current) return;
-      const cv = buildSky(Math.max(2, Math.round(w / S)), Math.max(2, Math.round(h / S)), {...opt, scaleInv: S});
+      const w = Math.max(2, Math.round(window.innerWidth / S));
+      const h = Math.max(2, Math.round(window.innerHeight / S));
+      const cv = buildSky(w, h, {...opt, scaleInv: S});
       const el = ref.current;
       el.width = cv.width; el.height = cv.height;
       el.getContext('2d').drawImage(cv, 0, 0);
       requestAnimationFrame(() => el.classList.add('on'));
     };
-    const t1 = setTimeout(() => build(nebARef, {
+    const paintA = () => build(nebARef, {
       layers: [{...SKY.nebula[1], scale: 1.15}], milky: true, dust: 2600, seed: 3
-    }), 40);
-    const t2 = setTimeout(() => build(nebBRef, {
+    });
+    const paintB = () => build(nebBRef, {
       layers: [{...SKY.nebula[0], scale: .85}, {...SKY.nebula[2], scale: 1.7}], milky: false, dust: 1600, seed: 17
-    }), 320);
-    return () => { stopped = true; clearTimeout(t1); clearTimeout(t2); };
+    });
+    const t1 = setTimeout(paintA, 40);
+    const t2 = setTimeout(paintB, 320);
+    // 尺寸变化后按新视口重烘（防抖 400ms：拖动窗口时别每帧烧两遍 2600 粒星尘）
+    let reT = 0;
+    const onResize = () => {
+      clearTimeout(reT);
+      reT = setTimeout(() => { paintA(); paintB(); }, 400);
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      stopped = true;
+      clearTimeout(t1); clearTimeout(t2); clearTimeout(reT);
+      window.removeEventListener('resize', onResize);
+    };
   }, []);
 
   // 每帧：星光错相闪烁 + 偶发流星

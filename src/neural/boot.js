@@ -10,7 +10,7 @@
 //
 // 登录：note-api 开了登录时，/api/session 会返回 required:true / authenticated:false，
 // 这时跳转到独立的 login.html；登录成功后再回到当前页。纯静态模式没有这个接口，直接跳过。
-import {setApiData, setError, beginLoad, ARRAY_FIELDS} from '../data/store.js';
+import {setApiData, setError, beginLoad, assertApiPayload} from '../data/store.js';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 const EXPECT_API = import.meta.env.VITE_API_BASE !== undefined;
@@ -22,6 +22,19 @@ let authRequired = false;
 // 收到过 note-api 的 HTTP 响应（哪怕 401/500）就说明这里是部署模式：
 // 这条事实不能只靠构建期的 VITE_API_BASE 判断（生产镜像的 npm run build 不传 build-arg）。
 let serverSeen = false;
+
+// 哪些状态码才算「note-api 在，只是这次没成功」：401/403（要登录）与 502/503/504（网关后面有东西）。
+// 404 一律当纯静态站（GitHub Pages、nginx 静态托管对 /api/session 就是 404），
+// 500 也不认（`npm run dev` 没起后端时 vite 代理回的是 500）。
+// 以前是「有任何状态码就算见过后端」，静态站于是被挂上「正在后台重试」的横幅并每 20 秒空转，
+// 与 AGENTS.md「纯静态模式不要联网」冲突。
+const backendStatus = s => s === 401 || s === 403 || s === 502 || s === 503 || s === 504;
+
+// 老浏览器没有 AbortSignal.timeout：直接调用会同步抛 TypeError，被当成网络错误走完全部重试。
+// 与 persist.js 里的写法保持同一口径，不支持时就不带 signal。
+const timeoutSignal = ms =>
+  typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(ms) : undefined;
 
 function redirectToLogin() {
   if (redirecting) return;
@@ -59,11 +72,10 @@ function notice(text) {
 }
 
 async function fetchJson(path, init) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {accept: 'application/json', ...(init?.headers || {})},
-    signal: AbortSignal.timeout(TIMEOUT)
-  });
+  const opts = {...init, headers: {accept: 'application/json', ...(init?.headers || {})}};
+  const signal = timeoutSignal(TIMEOUT);
+  if (signal) opts.signal = signal;
+  const res = await fetch(`${API_BASE}${path}`, opts);
   if (!res.ok) {
     const err = new Error(`note-api 返回 HTTP ${res.status}`);
     err.status = res.status;
@@ -75,7 +87,7 @@ async function fetchJson(path, init) {
 async function checkSession() {
   try { return await fetchJson('/api/session'); }
   catch (e) {
-    if (e.status) serverSeen = true; // 有 HTTP 状态码 = 后端在，只是这次没成功
+    if (backendStatus(e.status)) serverSeen = true; // 后端在，只是这次没成功
     return null; // 纯静态站、旧版 note-api、或者接口还没起来
   }
 }
@@ -86,7 +98,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function selfHeal() {
   const timer = setInterval(async () => {
     try {
-      const r = await fetch(`${API_BASE}/api/data`, {headers: {accept: 'application/json'}});
+      const signal = timeoutSignal(8000); // 离线时不要每 20 秒再叠一个永不返回的请求
+      const r = await fetch(`${API_BASE}/api/data`, signal
+        ? {headers: {accept: 'application/json'}, signal}
+        : {headers: {accept: 'application/json'}});
       if (r.ok) { clearInterval(timer); location.reload(); }
     } catch { /* 继续等 */ }
   }, 20_000);
@@ -110,7 +125,7 @@ async function boot() {
     try { json = await fetchJson('/api/data'); }
     catch (e) {
       if (e.status === 401 && authRequired) { redirectToLogin(); return; }
-      if (e.status) serverSeen = true;
+      if (backendStatus(e.status)) serverSeen = true;
       lastErr = e;
       if (e.status && e.status < 500) break; // 401 之外的 4xx 重试没意义
       if (attempt < 3) await sleep(600 * 2 ** attempt);
@@ -118,13 +133,12 @@ async function boot() {
   }
   try {
     if (!json) throw lastErr || new Error('读不到笔记库');
-    // 五个数组字段是图谱推导的输入：任何一个不是数组都说明这不是一份可用的 /api/data
-    // （老版本 note-api、中间层裁剪、序列化失败都会这样），走回退分支而不是带着残缺数据渲染。
-    const missing = ARRAY_FIELDS.filter(k => k !== 'semantic' && !Array.isArray(json[k]));
-    if (missing.length) throw new Error(`note-api 返回的数据形状不对（缺少 ${missing.join('、')}）`);
-    setApiData(json, seq);
+    // 形状校验（五个数组字段是图谱推导的输入）抽到 store.js 共用：refreshData 那条路径也得过。
+    // 校验失败抛的是 status=502 的错，下面 catch 会据此提示并后台自愈，而不是静默退化成「只读演示」。
+    setApiData(assertApiPayload(json), seq);
   } catch (e) {
     if (e.status === 401 && authRequired) { redirectToLogin(); return; }
+    if (backendStatus(e.status)) serverSeen = true;
     setError(e);
     console.warn('[boot] 读不到 note-api，回退到本地数据：', e.message);
     if (EXPECT_API || serverSeen) {

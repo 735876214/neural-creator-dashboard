@@ -45,8 +45,14 @@ export function ConstellationBand({page, onGo}) {
       if (Math.abs(d - DPR) < .01) return;
       DPR = d; setDpr(d);
     };
+    // 拖到 DPR 不同的屏幕上时 window 的 resize 不一定会来（分辨率单独变化）。
+    // 照 Home.jsx 的做法再挂一条 matchMedia(resolution) 兜底，否则星座轨会一直停在旧密度上发虚。
+    const mq = typeof window.matchMedia === 'function'
+      ? window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+      : null;
     window.addEventListener('resize', sync);
-    return () => window.removeEventListener('resize', sync);
+    mq?.addEventListener?.('change', sync);
+    return () => { window.removeEventListener('resize', sync); mq?.removeEventListener?.('change', sync); };
   }, []);
   const figs = useMemo(() => Object.fromEntries(MODULES.map(m => [m.id, miniOf(m.id)])), [dpr]);
   useEffect(() => {
@@ -67,7 +73,10 @@ export function ConstellationBand({page, onGo}) {
     </div>
     <div className="cb-figs">
       {MODULES.map((m, i) => {
-        const [zh, en] = nameOf(m.id), n = countsOf(m.id), on = m.id === page;
+        // MODULES 的 id 与内页的路由名不完全一致（个人知识库 id 是 personal、内页叫 knowledge），
+        // 直接拿 page 比 id 会让知识库内页七片全暗、aria-current 也丢。
+        const cur = page === 'knowledge' ? 'personal' : page;
+        const [zh, en] = nameOf(m.id), n = countsOf(m.id), on = m.id === cur;
         return <button key={m.id} className={`cb-fig ${on ? 'on' : ''}`}
           onClick={() => onGo && onGo(m.id)} style={{'--mod': T.modules[m.id].color, '--dy': `${ARC[i] ?? 0}px`}}
           aria-current={on ? 'true' : undefined}

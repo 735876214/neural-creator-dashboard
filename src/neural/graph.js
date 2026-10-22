@@ -115,7 +115,9 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     const parts = String(n.path || '').split(/[\\/]/).filter(Boolean);
     const isNews = n.kind === 'news';
     const isPersonal = n.kind === 'personal';
-    const sub = isNews ? (parts[0] || '00-AI热点') : isPersonal ? '06-个人知识库' : (parts[1] || '未分类');
+    // 方法库根目录下的笔记（05-方法库 methods/foo.md）没有子目录，parts[1] 就是文件名本身：
+    // 直接拿它当子目录会造出一个 f:foo.md 幽灵目录节点。与服务端 vault.mjs 一样兜到「未分类」。
+    const sub = isNews ? (parts[0] || '00-AI热点') : isPersonal ? '06-个人知识库' : (parts.length > 2 ? parts[1] : '未分类');
     // 个人知识库的目录节点 id 必须复用 FOLDERS 里的 f:personal：
     // 否则会多出一个 f:个人知识库 的重复目录节点，还被当方法库子目录锚到 0° 方向。
     const subId = isPersonal ? 'f:personal' : isNews ? 'f:00-AI热点' : 'f:' + sub;
@@ -198,7 +200,10 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     if (n.kind !== 'note' && n.kind !== 'draft') continue;
     const wikiLink = (target, alias) => {
       if (target.includes('{{')) return;
-      const name = target.split('#')[0].split('/').pop().trim();
+      // 目标先去锚点/路径，再剥 .md：byName 注册文件名时已经剥过扩展名（上面 194 行），
+      // 这里不剥的话 [[观察记录方法.md]] 永远命中不了，会造一个 ghost 节点，
+      // 还沿用它拼出 `观察记录方法.md.md` 的假路径。
+      const name = target.split('#')[0].split('/').pop().replace(/\.md$/i, '').trim();
       if (!name) return;
       let id = byName.get(name.toLowerCase());
       if (!id) {
@@ -217,9 +222,12 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
   }
 
   // 话题标签：frontmatter 的 tags 与正文里的 #话题 都自动成为节点（大小写合并）。
+  // `#` 前面的字符不限于空白：中文写作里「这条讲的是#选题方法论」极常见，原来只认
+  // 行首或空格，整类话题被静默丢掉。服务端 server/vault.mjs 用同一个正则，两处要同步。
+  const HASHTAG_RE = /(?:^|[\s，。,.!?！？、；;:：()（）\[\]{}【「《>])#([^\s#，。,.!?！？、；;:：()（）\[\]{}]+)/g;
   const hashtagsOf = text => {
     const out = [];
-    for (const m of String(text || '').matchAll(/(?:^|\s)#([^\s#，。,.!?！？、；;:：()（）\[\]{}]+)/g)) {
+    for (const m of String(text || '').matchAll(HASHTAG_RE)) {
       const t = m[1].replace(/^#/, '').trim();
       if (t && !/^\d+$/.test(t)) out.push(t);
     }
@@ -250,11 +258,25 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
   // 20 个概念 × 1500 节点 = 3 万次、累计上亿字符的临时分配，一次刷新多花 0.2–0.5 s。
   const lowOf = new Map(content.map(n => [n.id, String(n.text || '').toLowerCase()]));
   const mentions = new Map();
+  // 词表里的词可能是中文（子串匹配）或拉丁（必须按词边界匹配）。
+  // ・拉丁词用 includes 会在别的单词里命中：「AI」→ ai 命中 said / email / main，
+  //   于是凭空长出概念节点，还会凑够两条共现长出 resonance 边；
+  // ・反过来，手写词表 ["AI", ["AI"]] 时正文已小写、词没小写，永远命中不了，概念整体消失。
+  // 所以：词先小写；纯拉丁词用前后不能粘字母数字的边界匹配，其余仍按子串。
+  const matchersOf = terms => terms
+    .map(t => String(t).toLowerCase().trim())
+    .filter(Boolean)
+    .map(t => {
+      if (!/^[a-z0-9][a-z0-9 +#._-]*$/.test(t)) return text => text.includes(t);
+      const esc = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return text => new RegExp(`(?<![a-z0-9])${esc}(?![a-z0-9])`).test(text);
+    });
   for (const [name, terms] of CONCEPTS) {
     const byPart = new Map();
+    const match = matchersOf(terms);
     for (const n of content) {
       const low = lowOf.get(n.id) || '';
-      if (!terms.some(t => low.includes(t))) continue;
+      if (!match.some(f => f(low))) continue;
       const p = PARTITION_OF(n);
       byPart.set(p, [...(byPart.get(p) || []), n]);
     }
@@ -286,9 +308,16 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
 
   // AI 语义边（/api/ai/relate 的 embedding 结果）。服务端持久化，前端任务完成后也会
   // 通过 setSemantic 更新运行时仓，所以图谱无需刷新就能重建。
+  // 语义相关本来没有方向：同一对以 a→b、b→a 两条进来时必须先去重，
+  // 否则 link() 的 ab/ba 各加一次 → both:true，stats.mutual 与节点的「双向」计数虚增。
+  const seenPairs = new Set();
   for (const e of (getData().semantic || [])) {
-    if (!e?.a || !e?.b) continue;
-    link(e.a, e.b, 'semantic', e.sim ? Math.max(1, Math.round(e.sim * 10)) : 1);
+    if (!e?.a || !e?.b || e.a === e.b) continue;
+    const [x, y] = e.a < e.b ? [e.a, e.b] : [e.b, e.a];
+    const pair = x + '\u0000' + y;
+    if (seenPairs.has(pair)) continue;
+    seenPairs.add(pair);
+    link(x, y, 'semantic', e.sim ? Math.max(1, Math.round(e.sim * 10)) : 1);
   }
 
   const list = [...nodes.values()];
@@ -302,7 +331,12 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     if (l.both) { A.mutual++; B.mutual++; A.out++; B.out++; A.in++; B.in++; }
     else { idx.get(l.s).out++; idx.get(l.t).in++; }
   }
-  for (const n of list) n.shared = mentions.get(n.id) || [];
+  for (const n of list) {
+    n.shared = mentions.get(n.id) || [];
+    // shared 里存的是「分区:概念名」（knowledge:复盘），比较时要用带前缀的键，
+    // 但界面上直接 join 会显示成 works:复盘。另给一份只有概念名的视图供展示用。
+    n.sharedNames = n.shared.map(s => s.slice(s.indexOf(':') + 1));
+  }
   return {nodes: list, links, index: idx};
 }
 
@@ -391,7 +425,9 @@ export function forceLayout(graph) {
   const iters = N.length > 1200 ? 90 : N.length > 700 ? 160 : N.length > 400 ? 300 : 520;
   // 位置已经沿用上一次的热启动时，只需要小幅松弛：绝大多数节点没动，重排 90 轮纯属浪费。
   const warm = N.length > 200 && fresh / Math.max(1, N.length) < .15;
-  const steps = warm ? Math.max(12, Math.round(iters * .3)) : iters;
+  // 一条新节点都没有（fresh === 0）时全部位置都能原样沿用，迭代只会把它们从上次的结果上
+  // 推走：直接 0 轮。数据每次刷新、每段草稿停顿都会走到这里，上千节点时这是白帧的主因。
+  const steps = fresh === 0 ? 0 : warm ? Math.max(12, Math.round(iters * .3)) : iters;
   for (let it = 0; it < steps; it++) {
     const alpha = 1 - it / steps;
     for (let i = 0; i < N.length; i++) for (let j = i + 1; j < N.length; j++) {

@@ -133,10 +133,9 @@ export const SPECS = {
     edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7], [7, 8], [8, 9], [2, 10], [3, 11], [5, 12], [8, 13], [8, 14]]
   },
   // AI 热点 → 仙女座 Andromeda：连线照抄 d3-celestial constellations.lines.json 的 And 特征
-  //（17 个折点 / 5 段：W 外支 π-β-μ-ν、主线 δ-ε-ζ-η-λ-κ-ι、北支 γ-ξ-ο-θ-51、α 收尾），没有自创一段。
-  // 星等取自恒星命名亮星表（Hipparcos）。
-  // AI 热点 → 仙女座 Andromeda：连线照抄 d3-celestial constellations.lines.json 的 And 特征
-  //（17 个折点 / 5 段：W 外支 π-β-μ-ν、主线 δ-ε-ζ-η-λ-κ-ι、北支 γ-ξ-ο-θ-51、α 收尾），没有自创一段。
+  //（16 个折点 / 4 段：W 外支 π-β-μ-ν、主线 δ-ε-ζ-η-λ-κ-ι、北支 γ-ξ-ο-θ-51、α 收尾），没有自创一段。
+  // κ 以前在这个表里登记了两遍（同名同坐标的副本），那条边实际连到副本上，
+  // 看上去凭空多出一段线，主星也虚报成 17 颗 —— 已按原表去重。
   // 星等取自恒星命名亮星表（Hipparcos）。
   news: {
     zh: '仙女座', en: 'Andromeda', nodes: 10,
@@ -156,10 +155,9 @@ export const SPECS = {
       {ra: -14.5197, dec: 42.326, mag: 3.87, n: 'μ Mu'},
       {ra: 0.9943, dec: 29.0552, mag: 2.06, n: 'α Alpheratz'},
       {ra: 14.1884, dec: 38.4993, mag: 4.34, n: 'π Pi'},
-      {ra: 17.433, dec: 35.6206, mag: 4.14, n: 'κ Kappa 2'},
       {ra: -3.4915, dec: 46.4203, mag: 4.61, n: 'ν Nu'}
     ],
-    edges: [[14, 11], [11, 12], [12, 16], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [2, 7], [7, 10], [10, 8], [8, 9], [13, 0], [7, 15]]
+    edges: [[14, 11], [11, 12], [12, 15], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [2, 7], [7, 10], [10, 8], [8, 9], [13, 0]]
   },
   // 个人知识库 → 猎户座 Orion：连线照抄 d3-celestial constellations.lines.json 的 Ori 特征
   //（北支 β-λ-γ、腰带 δ-ε-ζ、南支 β-κ-α / γ-ζ-α 剑与盾牌 μ-π1-π2-π3-π4-π5-π6 拱弧），
@@ -408,5 +406,8 @@ export function baked(id, dpr = 2) {
 }
 
 // 标注上的一行「星数 · 连线」——数字来自真实星表，不是模块条目数
-export const countsOf = id => ({stars: SPECS[id].stars.length, edges: SPECS[id].edges.length, nodes: SPECS[id].nodes});
+// 缺表时给 0 而不是抛错：这个函数在 render 期被内页星座轨调用，抛一次就是整页白屏。
+export const countsOf = id => (SPECS[id]
+  ? {stars: SPECS[id].stars.length, edges: SPECS[id].edges.length, nodes: SPECS[id].nodes}
+  : {stars: 0, edges: 0, nodes: 0});
 export const nameOf = id => SPECS[id] ? [SPECS[id].zh, SPECS[id].en] : ['', ''];

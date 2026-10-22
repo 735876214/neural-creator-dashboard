@@ -50,6 +50,20 @@ export const beginLoad = () => ++loadSeq;
 // 所以先删掉非数组的键（保留 sample 的原值），再由 boot.js 决定要不要整体回退。
 export const ARRAY_FIELDS = ['posts', 'postContent', 'notes', 'seedIdeas', 'seedDrafts', 'concepts', 'semantic'];
 
+// /api/data 的形状校验。boot.js 与 persist.refreshData 两条装载路径都必须过这道门：
+// 只挡启动那一次的话，写盘后 / 5s 轮询 / 放弃本地改动这些 refresh 仍会调 setApiData，
+// 而 setApiData 只是删掉非数组键 —— sample 的 notes、concepts 会留在原位，
+// source 却已经变成 'api'，于是界面进入可编辑态、图上是示例数据混着真笔记。
+export function assertApiPayload(json) {
+  const missing = ARRAY_FIELDS.filter(k => k !== 'semantic' && !Array.isArray(json?.[k]));
+  if (missing.length) {
+    const err = new Error(`note-api 返回的数据形状不对（缺少 ${missing.join('、')}）`);
+    err.status = 502; // 语义上就是「后端给了不可用的响应」，boot 据此提示并后台自愈
+    throw err;
+  }
+  return json;
+}
+
 export function setApiData(payload, seq) {
   if (seq != null && seq !== loadSeq) return false;
   const {files: f, figures: g, mtimes: t, settings: s, meta: m, ...rest} = payload || {};

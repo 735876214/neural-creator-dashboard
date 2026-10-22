@@ -270,6 +270,9 @@ function pollJob(id, tries = 120) {
   })();
 }
 
+// shared 里是「分区:概念名」的键（knowledge:复盘），比较必须用带前缀的键；
+// 展示则要剥掉前缀，否则分析栏写着「共同提及：works:复盘、knowledge:观察」。
+const bareName = s => s.slice(s.indexOf(':') + 1);
 const sharedConcepts = (a, b) => (a.shared || []).filter(x => (b.shared || []).includes(x));
 
 function analyze(graph, node) {
@@ -278,7 +281,7 @@ function analyze(graph, node) {
   const d = {out: node.out - node.mutual, back: node.in - node.mutual, both: node.mutual};
   const top = [...nb.mutual].sort((a, b) => b.link.w - a.link.w)[0];
   const partner = top && graph.index.get(top.id);
-  const resonance = partner ? [['双向共振最强', 'Strongest resonance', `与「${partner.short || partner.title}」互相呼应，共同提及：${sharedConcepts(node, partner).join('、') || LINK_KINDS[top.link.kind]}。`, 'gold']] : [];
+  const resonance = partner ? [['双向共振最强', 'Strongest resonance', `与「${partner.short || partner.title}」互相呼应，共同提及：${sharedConcepts(node, partner).map(bareName).join('、') || LINK_KINDS[top.link.kind]}。`, 'gold']] : [];
   const connectivity = () => {
     const pct = 100 * C.filter(c => c.deg <= node.deg).length / C.length;
     const avg = C.reduce((s, c) => s + c.deg, 0) / C.length;
@@ -329,7 +332,7 @@ function analyze(graph, node) {
       tiles: [['outlink', d.out, '出链', 'Outgoing'], ['back', d.back, '反链', 'Backlinks'], ['link', d.both, '双向共振', 'Mutual'], ['file', (node.body || '').length, '字数', 'Chars']],
       insights: [...resonance,
         ...(ghosts.length ? [['未创建的双链', 'Unresolved links', `${ghosts.length} 个 [[双链]] 指向尚未出现的笔记：${ghosts.slice(0, 3).map(x => graph.index.get(x.id).short).join('、')}${ghosts.length > 3 ? ' 等' : ''}。`, 'warn']] : []),
-        ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文没有命中概念词。', 'info']]
+        ['提及概念', 'Concepts', node.shared.length ? node.shared.map(bareName).join('、') : '正文没有命中概念词。', 'info']]
     };
   }
   if (node.kind === 'idea') {
@@ -371,7 +374,7 @@ function analyze(graph, node) {
       insights: [
         ...(published.length ? [['已发布作品', 'Published', published.map(x => `「${x.short || x.title}」`).join('、'), 'gold']] : []),
         ...resonance,
-        ['提及概念', 'Concepts', node.shared.length ? node.shared.join('、') : '正文还没有命中概念词，可以在创作台用 [[ ]] 链接笔记。', 'info']
+        ['提及概念', 'Concepts', node.shared.length ? node.shared.map(bareName).join('、') : '正文还没有命中概念词，可以在创作台用 [[ ]] 链接笔记。', 'info']
       ]
     };
   }
@@ -478,9 +481,14 @@ function MetricsEditor({node}) {
   const save = async () => {
     setBusy(true); setMsg('');
     try {
-      // 先拉原文拿 mtime 做乐观锁；正文不动，只写 frontmatter
+      // 先拉原文拿 mtime 做乐观锁；正文不动，只写 frontmatter。
+      // 这一步原来没有 res.ok 判断：读取失败（404 / 500 / 被反代挡掉）时 r.json() 拿到的是
+      // {error:…}，cur.mtime 是 undefined，随后的 PUT 等于不带锁写入，直接盖掉别人的改动。
       const rel = getFiles()['post:' + node.post.id];
-      const cur = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(rel))).then(r => r.json());
+      const got = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(rel)));
+      if (!got.ok) throw new Error(`读取原文失败（HTTP ${got.status}），已取消写入`);
+      const cur = await got.json();
+      if (!cur?.mtime) throw new Error('读取原文失败（没有拿到 mtime），已取消写入以免覆盖他人改动');
       const fm = {syncedAt: `手动 ${new Date().toISOString().slice(0, 10)}`};
       // 先全量校验再写盘：以前是「边写边提示跳过」，提示随即被「已写入」覆盖，
       // 用户看到成功、实际只有部分字段进了文件。

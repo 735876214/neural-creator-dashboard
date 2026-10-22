@@ -49,10 +49,14 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
     // 先建邻接表再 BFS：原来是「每个出队节点扫一遍全部连线」＝ O(N×L)，
     // 1500 节点 / 4000 条边时约 600 万次比较，同步跑在 effect 里会紧跟布局再来一次卡顿。
     const adj = new Map();
+    // 悬停高亮用的第二条邻接表：跳过 contain 边（目录归属不该算「亮邻居」），
+    // 避免每次 hover 的每一帧都重新全量扫一遍 graph.links。
+    const adjHL = new Map();
+    const link = (m, a, b) => { if (!m.has(a)) m.set(a, []); m.get(a).push(b); };
     for (const l of graph.links) {
-      if (!adj.has(l.a)) adj.set(l.a, []);
-      if (!adj.has(l.b)) adj.set(l.b, []);
-      adj.get(l.a).push(l.b); adj.get(l.b).push(l.a);
+      link(adj, l.a, l.b); link(adj, l.b, l.a);
+      if (l.kind === 'contain') continue;
+      link(adjHL, l.a, l.b); link(adjHL, l.b, l.a);
     }
     const depth = new Map([['core', 0]]), q = ['core'];
     while (q.length) {
@@ -83,7 +87,7 @@ export function NetworkCanvas({graph, layout, live, reduced}) {
       const hl = hover ? new Set(graph.nodes.filter(n => n.kind === hover).map(n => n.id)) : null;
       // 边的 a/b 是字典序归一过的（graph.js 的 link()），所以「亮邻居」必须双向判断：
       // 只顺着 a→b 走的话，前缀排在前面的邻居（concept:/note: 之类）永远点不亮。
-      if (hl) { const seed = [...hl]; for (const l of graph.links) { if (l.kind === 'contain') continue; if (seed.has(l.a)) hl.add(l.b); else if (seed.has(l.b)) hl.add(l.a); } }
+      if (hl) { const seed = [...hl]; for (const id of seed) for (const o of adjHL.get(id) || []) hl.add(o); }
       const grow = reduced ? 1 : Math.min(1, Math.max(0, (t - .35) / 2.2));
       const prog = x => reduced ? 1 : Math.min(1, Math.max(0, (t - .4 - x.d * .32 - x.seed * .35) / .9));
       const pos = x => {
