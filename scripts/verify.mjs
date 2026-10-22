@@ -453,8 +453,12 @@ if (!/\? \{enabled: true, model: EMBED_MODEL/.test(r9AiSrc)) {
 const r10SrvSrc = readFileSync(join(ROOT, 'server/index.mjs'), 'utf8');
 const r10PersistSrc = readFileSync(join(ROOT, 'src/neural/persist.js'), 'utf8');
 const r10MainSrc = readFileSync(join(ROOT, 'src/neural/main.jsx'), 'utf8');
-if (!/writeFileSync\(tmp, after, 'utf8'\);\s*\n\s*renameSync\(tmp, abs\);/.test(r10SrvSrc)) {
-  fail('笔记写盘还是原地覆盖：进程被杀会留下半截 .md（应临时文件 + rename）');
+// 写盘必须是「临时文件 → fsync → rename → fsync 目录」：只 rename 不 fsync 时，
+// 掉电后目录项可能已指向新 inode 而数据块还在页缓存里，恢复出来是 0 字节文件。
+if (!/function writeAtomicSync\(abs, data, opts\)[\s\S]{0,500}renameSync\(tmp, abs\);/.test(r10SrvSrc)
+  || !/fsyncPath\(tmp, true\);/.test(r10SrvSrc)
+  || !/writeAtomicSync\(abs, after, 'utf8'\)/.test(r10SrvSrc)) {
+  fail('笔记写盘不是「临时文件 + fsync + rename」：进程被杀/掉电会留下半截或 0 字节 .md');
 } else if (/index\.putAi\('note:' \+ n\.id/.test(r10SrvSrc)) {
   fail('AI 分析缓存用 note: 前缀：个人知识库（personal:）缓存永远对不上又会被清理删掉');
 } else if (!/if \(setApiData\(payload, seq\) === false\) return;/.test(r10PersistSrc)
@@ -462,7 +466,7 @@ if (!/writeFileSync\(tmp, after, 'utf8'\);\s*\n\s*renameSync\(tmp, abs\);/.test(
   fail('采纳远端快照后没有重播 refs 乐观锁基线：外部改动后本地必然撞一次假 409');
 } else if (!/onHydrateRetry/.test(r10MainSrc)) {
   fail('拉全文失败被静默吞掉：编辑器会一直锁在「正在载入全文」');
-} else ok('写盘原子性与多端冲突（临时文件 + rename / 缓存 id / 基线重播 / 全文重试）');
+} else ok('写盘原子性与多端冲突（临时文件 + fsync + rename / 缓存 id / 基线重播 / 全文重试）');
 
 // —— 第十一轮审查：平台同步链路 ——
 const r11PlatSrc = readFileSync(join(ROOT, 'server/platforms.mjs'), 'utf8');
@@ -501,10 +505,14 @@ if (!/const TZ_OFFSET = Number\.isFinite\(TZ_OFFSET_RAW\) \? TZ_OFFSET_RAW : 8;/
 // —— 第十三轮审查：登录与回退链路 ——
 const r13BootSrc = readFileSync(join(ROOT, 'src/neural/boot.js'), 'utf8');
 const r13MainSrc = readFileSync(join(ROOT, 'src/neural/main.jsx'), 'utf8');
-if (!/if \(e\.status\) serverSeen = true;/.test(r13BootSrc)
+if (!/if \(backendStatus\(e\.status\)\) serverSeen = true;/.test(r13BootSrc)
   || !/if \(EXPECT_API \|\| serverSeen\) \{/.test(r13BootSrc)
   || !/function selfHeal\(\)/.test(r13BootSrc)) {
   fail('部署模式连通失败只靠构建期 VITE_API_BASE 判断：生产镜像不传 build-arg，提示与自愈都不会出现');
+} else if (!/const backendStatus = s => s === 401 \|\| s === 403 \|\| s === 502 \|\| s === 503 \|\| s === 504;/.test(r13BootSrc)) {
+  fail('「见过后端」的判定没排除 404/500：静态托管的 404 与 vite 代理的 500 会让纯静态站也自愈空转');
+} else if (!/const timeoutSignal = ms =>/.test(r13BootSrc) || !/if \(signal\) opts\.signal = signal;/.test(r13BootSrc)) {
+  fail('boot 里的 AbortSignal.timeout 没有降级：老浏览器会同步抛 TypeError，被当成网络错误走完全部重试');
 } else if (!/for \(let attempt = 0; attempt < 4 && !json; attempt\+\+\)/.test(r13BootSrc)) {
   fail('/api/data 没有重试：容器刚起来时一次超时就永久落到示例数据');
 } else if (!/if \(!activeTruncated\) \{ setHydrateErr\(null\); return; \}/.test(r13MainSrc)) {
@@ -664,6 +672,31 @@ if (!/clipped: String\(pick\(x\.fm, \['clipped'/.test(r9Vault)) {
 } else if (!/const searchTerms = q =>/.test(r9Graph) || !/out\.set\(t, Math\.max\(out\.get\(t\) \|\| 0, 2\)\)/.test(r9Graph)) {
   fail('本地检索没有中文二元组切词：整句当一个 token，中文提问永远检索不到');
 } else ok('数据契约（clipped / cover / 双前缀 / 位置 id 排序 / isLive 单一口径 / KINDS 兜底 / 中文切词）');
+
+// —— 第十九轮审查：装载路径的形状闸、超时与纯静态不联网 ——
+const r19Store = readFileSync(join(ROOT, 'src/data/store.js'), 'utf8');
+if (!/export function assertApiPayload\(json\)/.test(r19Store)) {
+  fail('store 没有共用的 /api/data 形状校验：只有 boot 挡，写盘后与 5s 轮询的 refresh 会放行残缺数据');
+} else if (!/assertApiPayload\(await res\.json\(\)\)/.test(r9Persist) || !/setApiData\(assertApiPayload\(json\), seq\)/.test(r13BootSrc)) {
+  fail('boot 与 persist.refreshData 没有都走 assertApiPayload：示例数组会混进实时库还标成 source=api');
+} else if (!/AbortSignal\.timeout\(8000\)/.test(r9Persist) || !/fetch\(API \+ '\/api\/data\?fresh', signal \? \{signal\} : undefined\)/.test(r9Persist)) {
+  fail('refreshData 没有超时：一次悬挂请求就让 5s 轮询永久停摆，外部改动不再刷新');
+} else if (!/const HASHTAG_RE =/.test(r9Graph) || !/【「《>\]\)#/.test(r9Graph) || !/【「《>\]\)#/.test(r9Vault)) {
+  fail('#话题 只认行首/空格：中文正文里「讲的是#选题方法论」整类话题被丢掉（前后端要同步）');
+} else ok('装载路径（形状闸共用 / refresh 超时 / 纯静态不联网 / 中文话题）');
+
+// —— 第二十轮审查：图谱推导的边界 ——
+if (!/replace\(\/\\\.md\$\/i, ''\)\.trim\(\);/.test(r9Graph)) {
+  fail('[[笔记.md]] 没有剥扩展名：命中不了已有笔记，造 ghost 节点并拼出 foo.md.md 的假路径');
+} else if (!/const matchersOf = terms =>/.test(r9Graph) || !/\(\?<!\[a-z0-9\]\)/.test(r9Graph)) {
+  fail('概念词没有词边界：拉丁词「ai」会在 said/email 里命中，长出一堆无来源的概念节点');
+} else if (!/n\.sharedNames = n\.shared\.map\(/.test(r9Graph) || !/sharedNamesOf\(n\)\.length > 0/.test(r9Pages)) {
+  fail('node.shared 带分区前缀直接上屏：分析栏与选题卡会显示 works:复盘');
+} else if (!/parts\.length > 2 \? parts\[1\] : '未分类'/.test(r9Graph)) {
+  fail('方法库根目录笔记会把文件名当子目录：造出 f:foo.md 幽灵目录节点');
+} else if (!/const seenPairs = new Set\(\);/.test(r9Graph)) {
+  fail('语义边没按无序对去重：反向量条进来就变成「双向」，stats.mutual 虚增');
+} else ok('图谱推导（双链扩展名 / 概念词边界 / sharedNames / 根级子目录 / 语义边去重）');
 
 for (const w of warnings) console.log('  ! ' + w);
 if (errors.length) { console.error('\n未通过：'); errors.forEach(e => console.error('  ✗ ' + e)); process.exit(1); }

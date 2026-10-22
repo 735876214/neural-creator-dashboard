@@ -54,6 +54,10 @@ services:
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
       AUTH_FILE: /data/auth.json
       SESSION_DAYS: ${SESSION_DAYS:-30}
+      # 非浏览器客户端（curl / 脚本）用的 Bearer token。原来这里漏了转发：.env 里写了
+      # API_TOKEN 也进不了容器，tokenAuthed() 永远为假，脚本一直 401 且没有任何提示。
+      # 浏览器会话不受影响（index.mjs 先试 token，再回落 Cookie）。
+      API_TOKEN: ${API_TOKEN:-}
       # —— AI（可选）——
       AI_API_KEY: ${AI_API_KEY:-}
       AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com/v1}

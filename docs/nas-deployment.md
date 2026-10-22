@@ -99,6 +99,17 @@ docker compose up -d
 > PGID=1000
 > ```
 > 也可以直接 `chown -R 1000:1000 notes-vault`（改成你填的 PUID/PGID）。
+>
+> **数据卷也要一起改**：`note-api-data` 命名卷（挂到容器内 `/data`）在首次创建时会继承镜像里
+> `/data` 的属主 1000:1000。`PUID` / `PGID` 只换进程身份、不会动这个卷，所以当 PUID≠1000 时
+> 进程打得开 `/vault`、却写不进 `/data/index.sqlite`，`server/index.mjs` 顶层建索引直接抛
+> `EACCES` 退出，`restart: unless-stopped` 下就变成无限重启、日志只有一段堆栈。升级前一定要
+> 把数据卷也改成同一个 uid/gid：
+> ```sh
+> chown -R 1043:1043 /path/to/Docker/neural/note-api-data   # 换成你的 PUID/PGID 与路径
+> ```
+> 从旧的 root 版镜像升级过来同理（老卷属主是 root）。`chown` 只需做一次，之后新建的文件都由
+> 容器自己以 PUID 身份创建。
 
 `.env` 是可选的：在 compose 文件同目录建一个 `.env`（可参考仓库里的 `deploy/.env.example`，
 NAS 上没有仓库文件时直接新建即可），常用项：

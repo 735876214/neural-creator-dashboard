@@ -230,7 +230,7 @@ notes-vault/
 | `DATA_DIR` | `.note-api` | SQLite 索引（可删可重建）与**必须持久化**的运行时文件：`session.key`、`auth.json`（未设 `DASHBOARD_PASSWORD` 时生成的登录密码）、`ai-secrets.json`（AI key）、`platform-secrets.json`（公众号 Secret，0600）。看板配置在 `vault/.dashboard/settings.json` |
 | `PORT` / `HOST` | `8787` / `0.0.0.0` | 监听地址 |
 | `STATIC_DIR` | 无 | 同时托管 `dist/`；静态资源由 note-api 自己鉴权后直出（镜像里没有 nginx） |
-| `API_TOKEN` | 无 | 仅用于 curl / 脚本等非浏览器客户端；浏览器看板不携带，填了会导致看板请求 401。看板部署用登录页 + 会话 Cookie |
+| `API_TOKEN` | 无 | 给 curl / 脚本等非浏览器客户端用的 Bearer token：带上 `Authorization: Bearer <token>` 即可调 `/api/*`。浏览器看板不受影响——请求先试 token，没有就回落到会话 Cookie，两者可同时存在。compose 部署需在 `.env` 里设同名的 `API_TOKEN`（已转发到容器） |
 | `VAULT_GIT` | 开 | vault 是 git 仓库时每次写入自动 commit；`0` 关闭 |
 | `MAX_BODY` | 2 MB | 请求体上限（字节）；compose 部署版设为 4 MB |
 | `AI_PROTOCOL` | `openai` | 或 `anthropic` |

@@ -165,6 +165,18 @@ npm run build
 
 `dist/` 是纯静态文件，可以放到任何静态托管（GitHub Pages、Vercel、Netlify、Cloudflare Pages 等）。构建使用相对路径，部署在子路径下也能正常加载。纯静态页面只读；需要在线编辑选题/草稿/目标时，按 **[NAS 部署说明](docs/nas-deployment.md)** 启动 note-api，数据会实时写入 vault 与 `vault/.dashboard/settings.json`。NAS 部署模式带独立的登录页与会话 Cookie，未登录访问会先跳到 `login.html`。
 
+用 Docker 跑 note-api（仓库根的 `docker-compose.yml`）时，两条最容易踩的坑写在下面：
+
+- **`API_TOKEN`**：`docker-compose.yml` 的 environment 是白名单式逐个列举，变量不写进去就不会进容器。`.env` 里的 `API_TOKEN` 现在会转发进容器，设置后 `curl -H "Authorization: Bearer <token>"` 可以直接调 `/api/*`（浏览器仍走会话 Cookie，两者互不影响）。不设就留空，脚本通道关闭。
+- **`PUID` / `PGID`**：容器以 `user: "${PUID:-1000}:${PGID:-1000}"` 运行，**两个挂载点都要对齐属主**：`notes-vault`（bind mount，你的笔记库）和 `note-api-data`（SQLite 索引卷）。只 chown 前者，进程仍会在 `/data/index.sqlite` 上拿到 `EACCES`，表现是容器刚起来就退出、反复重启：
+
+  ```bash
+  chown -R 1043:1043 /path/to/Docker/neural/notes-vault      # 换成你的 PUID/PGID
+  chown -R 1043:1043 /path/to/Docker/neural/note-api-data
+  ```
+
+  从早期的 root 版镜像升级过来同理（老卷属主是 root），只需做一次，之后新建文件都由容器自己写。
+
 ## 关于素材
 
 - 星核、七簇星团与星穹背景**全部由代码在 Canvas 上逐帧自绘**，页面里没有任何图片或视频素材文件，`npm run verify` 会校验这一点。

@@ -217,11 +217,17 @@
   const form = $('form'), user = $('username'), pass = $('password');
   const submit = $('submit'), status = $('status'), reveal = $('reveal');
 
-  // 只允许站内跳转，避免 ?next=//evil.example 这类开放重定向
+  // 只允许站内跳转，避免 ?next=//evil.example 这类开放重定向。
+  // 不能只做字符串前缀判断：浏览器解析 URL 前会删掉 \t \r \n，"/\t/evil.example" 会被当成
+  // "//evil.example" 跳出站外。所以先挡控制字符，再按 origin 比对。
   function safeNext(raw) {
     const next = String(raw || '');
-    if (!next.startsWith('/') || next.startsWith('//') || next.startsWith('/\\')) return '/';
-    return next;
+    if (/[\u0000-\u001f\u007f]/.test(next)) return '/';
+    try {
+      const u = new URL(next, location.origin);
+      if (u.origin !== location.origin) return '/';
+      return u.pathname + u.search + u.hash;
+    } catch { return '/'; }
   }
   const next = safeNext(new URLSearchParams(location.search).get('next'));
 
