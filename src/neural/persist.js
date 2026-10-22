@@ -43,6 +43,9 @@ const retryTimers = new Map();
 const attempts = new Map();
 // key -> 最近一次成功写入的 payload 签名，避免无变化的重复写
 const savedSigs = new Map();
+// key -> 待发删除 {path}。删除没有 payload/sig，不进 outbox，但「重试」必须能把它再发一次
+// （详见下面「—— 删除 ——」段的说明）。
+const pendingDeletes = new Map();
 
 // 全局状态版本：给 usePendingSaves 提供稳定快照
 let version = 0;
@@ -58,6 +61,13 @@ const DEFAULT_STATE = {state: 'idle', at: 0};
 
 export const ideaKey = id => 'idea:' + id;
 export const draftKey = id => 'draft:' + id;
+
+// 全站统一的本地稳定 id（8 位字符串）。新建选题 / 草稿 / 知识库条目一律用它，
+// 不要再用 Date.now()：数字 id 与字符串 id 混用有两个真实后果——
+// ① ideaPayload / draftPayload 只回写字符串 id，数字 id 由服务端自己 randomUUID()，
+//    本地 key 与文件内 id 脱钩，下一轮 /api/data 合并时这条会被当成「服务端没有的旧条目」丢掉；
+// ② 草稿的 sourceIdeaId 也要求字符串，数字来源只能退回标题回连，选题一改名就断链重复建稿。
+export const newLocalId = () => (globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + Math.random().toString(36).slice(2))).slice(0, 8);
 
 // —— refs ——
 
@@ -342,6 +352,9 @@ export function flushKey(key) {
     markSelfWrite(); // 登记「这次写盘是本页写的」：自动刷新轮询据此不再弹假的外部改动提示
     attempts.delete(key);
     clearTimeout(retryTimers.get(key)); retryTimers.delete(key);
+    // 写盘成功说明这条记录又被救回来了（删除失败后用户继续编辑并保存）：撤掉待发删除，
+    // 否则退避重试还会把刚保存的内容删掉。
+    pendingDeletes.delete(key);
 
     if (item.kind === 'settings') {
       setState(key, {state: 'saved', message: undefined, serverMtime: undefined});
@@ -364,12 +377,21 @@ export function flushKey(key) {
 export function retry(key) {
   attempts.delete(key);
   setState(key, {state: 'saving', message: undefined});
+  // 删除没有 outbox 条目，走 flushKey 会 `outbox.get(key)` 为空直接 return，
+  // 状态就永远卡在「保存中」（刷新页面草稿还会复活）。待发删除单独记在 pendingDeletes。
+  if (pendingDeletes.has(key)) return flushDelete(key);
   return flushKey(key);
 }
 
 export function flushNow() {
   attempts.clear();
   for (const [key, t] of timers) { clearTimeout(t); timers.delete(key); }
+  // 待发删除也要一起冲：「重试全部」不能只覆盖 outbox 里的写盘。
+  for (const key of pendingDeletes.keys()) {
+    if (getSaveState(key).state === 'conflict') continue;
+    setState(key, {state: 'saving', message: undefined});
+    flushDelete(key);
+  }
   return Promise.all([...outbox.keys()].map(key => {
     if (getSaveState(key).state === 'conflict') return null;
     setState(key, {state: 'saving', message: undefined});
@@ -454,6 +476,49 @@ export function overwriteConflict(key) {
 
 // —— 删除 ——
 
+// 待发删除：key → {path}。删除不经过 outbox（没有 payload、没有 sig），但没有队列记录时
+// 「重试」就没有任何东西可发：原来删除失败只 setState(pending)，retry() → flushKey() →
+// outbox.get(key) 为空 → 直接 return，状态永远卡在「保存中」，刷新页面草稿复活。
+// 记在 pendingDeletes（文件顶部）里之后，retry / flushNow / 退避重试都能把 DELETE 再发一次。
+export const isDeletePending = key => pendingDeletes.has(key);
+
+function retryLaterDelete(key) {
+  const n = (attempts.get(key) || 0) + 1;
+  attempts.set(key, n);
+  const delay = Math.min(30000, 2000 * 2 ** (n - 1));
+  clearTimeout(retryTimers.get(key));
+  retryTimers.set(key, setTimeout(() => { retryTimers.delete(key); flushDelete(key); }, delay));
+  setState(key, {state: 'pending', message: '离线，删除尚未同步到 NAS · Offline — delete not synced'});
+}
+
+// 真正发 DELETE 的那一步：成功的收尾与原先内联在 deleteDraft 里的完全一致。
+function flushDelete(key) {
+  return enqueue(key, async () => {
+    const item = pendingDeletes.get(key);
+    if (!item) return;
+    const path = item.path || refFor(key)?.path;
+    if (!path) { pendingDeletes.delete(key); states.delete(key); emit(); return; }
+    let res;
+    try {
+      res = await fetch(API + '/api/note?path=' + encodeURIComponent(path), {method: 'DELETE'});
+    } catch {
+      retryLaterDelete(key); // 离线：留在 pendingDeletes，等退避重试或用户点重试
+      return;
+    }
+    if (res.ok || res.status === 404) {
+      markSelfWrite(); // 删除也是一次写盘，不登记就会在下一轮轮询里变成假的「外部改动」
+      pendingDeletes.delete(key);
+      clearTimeout(retryTimers.get(key)); retryTimers.delete(key);
+      refs.delete(key); savedSigs.delete(key); attempts.delete(key); states.delete(key); clearCreateId(key); emit();
+      return;
+    }
+    const j = await res.json().catch(() => ({}));
+    if (res.status >= 500 || res.status === 429) { retryLaterDelete(key); return; }
+    pendingDeletes.delete(key); // 4xx：重发也不会成功，收口成可见的失败
+    setState(key, {state: 'error', message: (j.error || '删除失败') + ` · HTTP ${res.status}`});
+  });
+}
+
 export async function deleteDraft(id) {
   const key = draftKey(id);
   clearTimeout(timers.get(key)); timers.delete(key);
@@ -475,20 +540,11 @@ export async function deleteDraft(id) {
   }
 
   outbox.delete(key);
-  try {
-    const res = await fetch(API + '/api/note?path=' + encodeURIComponent(current.path), {method: 'DELETE'});
-    if (res.ok || res.status === 404) {
-      markSelfWrite(); // 删除也是一次写盘，不登记就会在下一轮轮询里变成假的「外部改动」
-      refs.delete(key); savedSigs.delete(key); attempts.delete(key); states.delete(key); clearCreateId(key); emit();
-      return {ok: true, gone: true};
-    }
-    const j = await res.json().catch(() => ({}));
-    setState(key, {state: 'error', message: (j.error || '删除失败') + ` · HTTP ${res.status}`});
-    return {ok: false, gone: false, error: j.error || `删除失败：HTTP ${res.status}`};
-  } catch {
-    setState(key, {state: 'pending', message: '离线，删除尚未同步到 NAS · Offline — delete not synced'});
-    return {ok: false, gone: false, error: '离线，删除尚未同步到 NAS'};
-  }
+  pendingDeletes.set(key, {path: current.path});
+  attempts.delete(key);
+  await flushDelete(key);
+  if (!pendingDeletes.has(key)) return {ok: true, gone: true};
+  return {ok: false, gone: false, error: getSaveState(key).message || '删除尚未同步到 NAS'};
 }
 
 // —— 完整正文读取（/api/data 的正文被 clean() 截断到 6000 字）——

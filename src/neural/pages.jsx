@@ -1,12 +1,12 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {KINDS, CONTENT, MODULES, neighbors, latent, LINK_EN} from './graph';
 import {Icon} from './icons';
-import {Analysis, Count} from './Analysis';
+import {Analysis, Count, tagWholeVault} from './Analysis';
 import {ConstellationBand} from './ConstellationBand';
 import {snapshot} from '../data';
 import {posts} from './works';
 import {T} from './theme';
-import {useSaveState, draftKey, apiUrl, refreshData, markSelfWrite} from './persist';
+import {useSaveState, draftKey, apiUrl, refreshData, markSelfWrite, newLocalId} from './persist';
 import {getFiles} from '../data/store';
 import {useReducedMotion} from './useReducedMotion';
 import {SaveBadge} from './SaveStatus';
@@ -15,6 +15,11 @@ import {Modal} from './useModal';
 import {PublishModal, insertImageAtCursor} from './NoteModal';
 
 const fmt = v => v == null ? '—' : Number(v).toLocaleString('zh-CN');
+
+// 页面上的写请求统一带超时：剪藏最坏要 200s（抓取 20s + AI 60s×3 次重试），没有超时的话
+// 请求悬挂期间 busy 一直为真，按钮和输入框全禁用，用户只能刷新页面。
+const writeSignal = () => (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+  ? AbortSignal.timeout(210000) : undefined);
 
 // graph.js 的 node.shared 存的是「分区:概念名」（knowledge:复盘）：比较用带前缀的键，
 // 界面只该显示概念名。没有 sharedNames 时现场剥一次前缀兜底。
@@ -265,6 +270,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
     .sort((a, b) => String(b.personal?.clipped || '').localeCompare(String(a.personal?.clipped || ''))), [graph]);
   const [cat, setCat] = useState('灵感');
   const [url, setUrl] = useState('');
+  const [failedClip, setFailedClip] = useState(null); // {path, error}：剪藏成功但 AI 分析失败
   const [busy, setBusy] = useState(false);
   const [composing, setComposing] = useState(null); // '灵感' | '制度'
   const [formTitle, setFormTitle] = useState('');
@@ -273,19 +279,39 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
 
   const relOf = n => n.path; // personal 节点的 path 就是 vault 相对路径（06-个人知识库/xxx.md）
 
+  // 重跑某条剪藏的 AI 分析（剪藏时 analysisError 的那条）。
+  const retryClipAnalysis = async () => {
+    if (!failedClip || busy) return;
+    setBusy(true);
+    try {
+      const res = await fetch(apiUrl('/api/knowledge/analyze'), {method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({path: failedClip.path}), signal: writeSignal()});
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+      markSelfWrite();
+      await refreshData().catch(() => {});
+      setFailedClip(null);
+      showToast(j.keptSummary ? '分析完成（保留了你手写的摘要）' : 'AI 分析已完成');
+    } catch (err) { showToast('重试分析失败：' + err.message); }
+    finally { setBusy(false); }
+  };
+
   const clip = async e => {
     e.preventDefault();
     if (!url.trim() || busy || readOnly) return;
     setBusy(true);
     try {
-      const res = await fetch(apiUrl('/api/knowledge'), {method: 'POST', headers: {'content-type': 'application/json'},
+      const res = await fetch(apiUrl('/api/knowledge'), {method: 'POST', headers: {'content-type': 'application/json'}, signal: writeSignal(),
         body: JSON.stringify({url: url.trim(), category: '推文'})});
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
       setUrl('');
       markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
-      await refreshData();
-      showToast(j.analysisError ? '剪藏已保存，但 AI 分析失败：' + j.analysisError : '网页已剪藏，快照与摘要已写入知识库');
+      await refreshData().catch(() => {}); // 写盘已经成功：刷新失败不能报成「保存失败」，那会让用户重试重复入库
+      // 分析失败时条目已经进库（summary 为空）。只弹一句 toast 的话，用户既不知道能重试、
+      // 也不知道去哪儿重试；这里留一个常驻入口，直接重发 /api/knowledge/analyze。
+      setFailedClip(j.analysisError ? {path: j.path, error: j.analysisError} : null);
+      showToast(j.analysisError ? '剪藏已保存，AI 分析失败，可点「重试 AI 分析」' : '网页已剪藏，快照与摘要已写入知识库');
     } catch (err) { showToast('剪藏失败：' + err.message); }
     finally { setBusy(false); }
   };
@@ -294,14 +320,14 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
     if (!formTitle.trim() || readOnly) return;
     setBusy(true);
     try {
-      const res = await fetch(apiUrl('/api/knowledge'), {method: 'POST', headers: {'content-type': 'application/json'},
+      const res = await fetch(apiUrl('/api/knowledge'), {method: 'POST', headers: {'content-type': 'application/json'}, signal: writeSignal(),
         body: JSON.stringify({title: formTitle, note: formBody, category: composing})});
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
       setComposing(null);
       setFormTitle(''); setFormBody(''); // 不复位的话下次「新建灵感」会带着上一次的标题/正文，直接保存就重复入库
       markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
-      await refreshData();
+      await refreshData().catch(() => {}); // 写盘已经成功：刷新失败不能报成「保存失败」，那会让用户重试重复入库
       showToast('已保存到个人知识库（06-个人知识库/）');
     } catch (err) { showToast('保存失败：' + err.message); }
     finally { setBusy(false); }
@@ -310,11 +336,11 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
   const remove = async n => {
     if (!window.confirm(`删除「${n.short || n.title}」？NAS 上的 .md 文件会先备份到 vault/.trash/ 再删除。`)) return;
     try {
-      const res = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(relOf(n))), {method: 'DELETE'});
+      const res = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(relOf(n))), {method: 'DELETE', signal: writeSignal()});
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
       markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
-      await refreshData();
+      await refreshData().catch(() => {}); // 写盘已经成功：刷新失败不能报成「保存失败」，那会让用户重试重复入库
       showToast('已删除，原文件备份在 vault/.trash/');
     } catch (err) { showToast('删除失败：' + err.message); }
   };
@@ -322,7 +348,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
   // 转为选题 / 转为草稿：预填并把本条标题以 [[双链]] 引用进正文，进现有创作链
   const toIdea = n => {
     if (readOnly) return;
-    onEditIdea({id: Date.now(), title: n.short || n.title, platform: '小红书', priority: '中', status: '待写',
+    onEditIdea({id: newLocalId(), title: n.short || n.title, platform: '小红书', priority: '中', status: '待写',
       note: `来自个人知识库「${n.short || n.title}」。${n.personal?.summary ? '\n要点：' + n.personal.summary : ''}\n\n切入点：`});
   };
   const toDraft = n => {
@@ -344,6 +370,10 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
         <button className="pill ghost" disabled={readOnly} onClick={() => setComposing('灵感')}><Icon name="spark" size={14}/>新建灵感 <em>Spark</em></button>
         <button className="pill ghost" disabled={readOnly} onClick={() => setComposing('制度')}><Icon name="file" size={14}/>新建制度 <em>Policy</em></button>
       </div>
+      {failedClip && <p className="quiet kbar-warn" role="status">
+        「{failedClip.path.split('/').pop()}」已存进知识库，但 AI 分析失败：{failedClip.error}
+        <button className="text-btn" onClick={retryClipAnalysis} disabled={readOnly || busy}>重试 AI 分析 <em>Retry analysis</em></button>
+      </p>}
     </section>
     <div className="seg kcats" role="group" aria-label="按分类浏览 Browse by category">
       {CATS.map(([zh, en]) => <button key={zh} className={cat === zh ? 'active' : ''} onClick={() => setCat(zh)}>{zh}<em>{en}</em><b>{items.filter(n => (n.personal?.category || '灵感') === zh).length}</b></button>)}
@@ -394,6 +424,7 @@ export function Knowledge({graph, readOnly, onGraph, onModule, onAction, onNewDr
 // —— 方法库 Methods（kind: note 的内页；新建笔记入口在这里）——
 export function Methods({graph, readOnly, onGo, onAction, onModule, showToast, onNew, aiEnabled, embedEnabled}) {
   const [q, setQ] = useState('');
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [sel, setSel] = useState(null);
   const items = useMemo(() => graph.nodes.filter(n => n.kind === 'note')
     .filter(n => {
@@ -407,16 +438,23 @@ export function Methods({graph, readOnly, onGo, onAction, onModule, showToast, o
     if (!window.confirm(`删除「${n.short || n.title}」？NAS 上的 .md 文件会先备份到 vault/.trash/ 再删除。`)) return;
     try {
       const rel = getFiles()?.[n.id] || n.path;
-      const res = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(rel)), {method: 'DELETE'});
+      const res = await fetch(apiUrl('/api/note?path=' + encodeURIComponent(rel)), {method: 'DELETE', signal: writeSignal()});
       if (!res.ok) throw new Error('HTTP ' + res.status);
       setSel(null);
       showToast('已删除，原文件备份在 vault/.trash/');
       markSelfWrite(); // 看板自己写的，别让自动刷新弹「外部改动」
-      await refreshData();
+      await refreshData().catch(() => {}); // 写盘已经成功：刷新失败不能报成「保存失败」，那会让用户重试重复入库
     } catch (err) { showToast('删除失败：' + err.message); }
   };
   return <div className="page page-methods">
     <PageHead zh="方法库" en="Methods" sub="把做法沉淀成方法。" subEn="Every practice becomes a method.">
+      {/* 整库打标签：以前只能一篇篇点开分析栏，方法库有几十篇时几乎没人会做 */}
+      {aiEnabled && <button className="pill ghost" disabled={readOnly || bulkBusy} onClick={async () => {
+        setBulkBusy(true);
+        try { const r = await tagWholeVault(); showToast(r.msg); }
+        catch (err) { showToast('AI 打标失败：' + err.message); }
+        finally { setBulkBusy(false); }
+      }}>{bulkBusy ? '分析中…' : <><Icon name="spark" size={14}/>整库打标签 <em>Tag all</em></>}</button>}
       <button className="pill primary" onClick={onNew} disabled={readOnly} title={readOnly ? '未连接 NAS，只读' : ''}><Icon name="plus" size={15}/>新建笔记 <em>New note</em></button>
     </PageHead>
     <ConstellationBand page="methods" onGo={onModule}/>

@@ -102,6 +102,12 @@ main, .site-foot { position: relative; z-index: 1; }
 .pill:disabled { opacity: .4; cursor: not-allowed; }
 .text-btn { border: 0; background: none; color: var(--text-2); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
 .text-btn:hover { color: var(--gold); }
+/* AI 候选选题列表（分析栏）：一行一条 + 「加入选题池」 */
+.an-ideas { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.an-ideas li { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+.an-ideas li > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 剪藏成功但 AI 分析失败时的常驻重试提示 */
+.kbar-warn { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 0; color: var(--warn, #ffb37a); }
 
 /* —— 首页舞台 —— */
 .home-stage { position: relative; height: 100vh; min-height: 640px; overflow: hidden; }

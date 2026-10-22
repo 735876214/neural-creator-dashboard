@@ -2,7 +2,7 @@ import React, {useEffect, useMemo, useState} from 'react';
 import {KINDS, CONTENT, MODULES, neighbors, latent, askGraph, LINK_KINDS, LINK_EN} from './graph';
 import {Icon} from './icons';
 import {profileFor, bandsOf, outerCountOf} from './v41';
-import {isLive, getMeta, getFiles, setSemantic} from '../data/store';
+import {isLive, getMeta, getFiles, setSemantic, subscribe} from '../data/store';
 import {aiAnalyze, aiRelate, aiIdeas, aiModels, pickedModel, setPickedModel} from './sync';
 import {apiUrl, refreshData, markSelfWrite} from './persist';
 
@@ -95,11 +95,14 @@ function Insights({items}) {
 // AI 区块：方法笔记与个人知识库（网页剪藏）显示。
 // note：打标签 + 摘要写回 frontmatter；语义边刷新后重算。
 // personal：调 /api/knowledge/analyze 重跑网页分析（摘要 + 要点 + 标签）。
-function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn}) {
+function AiPanel({graph, node, onGo, onAction, onToast, aiEnabled, embedEnabled: embedOn}) {
   // aiEnabled 由调用方传入（App 拉取 /api/ai/info 的单一事实源，配置保存后即时刷新）。
   // hooks 必须在条件 return 之前：aiEnabled 运行中翻转（开着分析栏去设置里启用 AI）时
   // 不能改变本组件的 hook 数量，否则 React 抛 hooks 数量不匹配。
   const [state, setState] = useState({busy: false, msg: '', tags: null, summary: null, related: null});
+  // 「已经分析过」的第二次点击才强制重跑：缓存键是正文 hash，人工改过 tags/summary 不会触发
+  // 重算，想纠错重跑原来毫无出路；但不能第一次点击就默默烧一次模型调用。
+  const forceRef = React.useRef(false);
   const isPersonal = node.kind === 'personal';
   const isPost = node.kind === 'post';
   // node.id 已经是图谱完整 id（note: / personal: / post: 前缀由 graph.js 加好），这里不能再拼一次，
@@ -149,15 +152,19 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
         // 打标签 + 摘要，写回 frontmatter（tags / summary 键）
         const dry = await aiAnalyze([rel], true);
         if (!dry.total) return {msg: '这篇没有可分析的内容（服务端没找到对应文件）'};
-        if (!dry.todo) return {msg: '这篇已经分析过了'};
-        const job = await aiAnalyze([rel]);
+        if (!dry.todo) {
+          // 先给提示、不改任何东西；再点一次才带 force 重跑（白名单缓存键是正文 hash）。
+          if (!forceRef.current) { forceRef.current = true; return {msg: '这篇已经分析过了；再点一次「打标签 + 摘要」可强制重跑'}; }
+          forceRef.current = false;
+        }
+        const job = await aiAnalyze([rel], false, dry.todo ? {} : {force: true});
         // 服务端在「两步之间已经没待办了」时返回 200 {total:0}，没有 job：这里要兜住，
         // 否则读 job.job.id 抛 TypeError，面板显示一条看不懂的失败。
         if (!job?.job?.id) return {msg: job?.message || '这篇已经分析过了'};
         // 单篇默认 60 秒够用；但分析是「每条一次模型调用」的串行循环，批量调用时
         // 前端先超时会让 markSelfWrite/refreshData 被跳过，后台写盘反而被当成外部改动。
         // 与 relate 一样按任务总量放大上限。
-        const r = await pollJob(job.job.id, Math.max(120, (job.job.total || 1) * 10 + 60));
+        const r = await pollJob(job.job.id, jobTries(job.job.total));
         // 写盘发生在后台任务里，指纹要等任务结束才稳定：此刻登记 + 刷新，轮询才不会误报外部改动
         markSelfWrite();
         await refreshData().catch(() => {});
@@ -171,7 +178,8 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
         const job = await aiRelate();
         // relate 是「每条内容一次 embedding」的串行循环，上百条远超默认 60 秒；
         // 按 total 放大上限，别让前端先超时、服务端还持有 409 闸。
-        const r = await pollJob(job.job.id, Math.max(120, (job.job.total || 0) * 8 + 240));
+        // embedding 单条通常 1–2 秒，但网关抖动时一次就可能吃掉 60s：按 20s/条给预算。
+        const r = await pollJob(job.job.id, jobTries(job.job.total, 20000));
         const edges = r.result?.edges || [];
         // 写入运行时仓：主图谱立即重建，语义边不用刷新页面才出现。
         setSemantic(edges);
@@ -182,9 +190,21 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
       {/* 生成选题走 /api/ai/ideas，服务端只收 d.notes 里的文件：作品（post:）传进去会 404 */}
       {!isPost && <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
         const r = await aiIdeas([rel]);
-        return {msg: r.candidates?.length ? '候选选题：' + r.candidates.map(c => c.title).join('；') : '没有生成候选'};
+        // 候选同时放进 state：原来只拼成一句 toast，用户看到几个标题却没有任何办法把它们
+        // 放进选题池（AI 辅助选题的价值一半在生成、另一半在入库）。
+        return {msg: r.candidates?.length ? '候选选题：' + r.candidates.map(c => c.title).join('；') : '没有生成候选',
+          ideas: r.candidates || []};
       }, '选题候选已生成')}>生成选题 <em>Seed ideas</em></button>}
     </div>}
+    {state.ideas?.length > 0 && <ul className="an-ideas">
+      {state.ideas.map((c, i) => <li key={i}>
+        <span>{c.title}</span>
+        <button className="text-btn" onClick={() => {
+          onAction?.({type: 'addIdea', ideaList: [c]});
+          setState(s2 => ({...s2, ideas: s2.ideas.filter((_, j) => j !== i)}));
+        }}>加入选题池 <em>Add</em></button>
+      </li>)}
+    </ul>}
     {state.busy && <p className="quiet">AI 正在处理…
       {/* 取消入口：任务卡在慢网关上时不用等超时，也不至于整块面板一直锁着 */}
       <button className="pill ghost" style={{marginLeft: 8}} aria-label="取消当前 AI 任务 Cancel task"
@@ -200,7 +220,7 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
 function ModelPicker({models, value, onChange}) {
   if (!models.length) return null; // 拉不到列表就隐藏，请求仍用服务端默认模型
   return <select className="model-picker" value={value || ''} onChange={e => onChange(e.target.value || null)}
-    aria-label="选择 AI 模型 Choose AI model" title="本次会话使用的 AI 模型">
+    aria-label="选择 AI 模型 Choose AI model" title="默认 AI 模型（写进 NAS 设置，多处同时改会互相覆盖）Default model — saved to NAS settings">
     <option value="">默认模型</option>
     {models.map(m => <option key={m.id} value={m.id}>{m.name}{m.reasoning ? '（思考型）' : ''}</option>)}
   </select>;
@@ -215,6 +235,10 @@ function AskBox({graph, node, onGo, aiEnabled}) {
   const ai = isLive() && !!aiEnabled;
   // 只在第一次挂 AI 时拉一次模型列表
   useEffect(() => { if (ai) aiModels().then(setModels); }, [ai]);
+  // 模型选择要跟着 NAS 设置走：设置面板（或另一个标签页）改了默认模型后，这里原来只在挂载时
+  // 取过一次 pickedModel()，问答会继续用旧模型，而 Assistant 是每次现取的 —— 两个入口不一致。
+  const storeModel = React.useSyncExternalStore(subscribe, () => pickedModel(), () => null);
+  useEffect(() => { setModel(storeModel); }, [storeModel]);
   const choose = id => { setModel(id); setPickedModel(id); };
   const submit = async e => {
     e.preventDefault();
@@ -257,6 +281,13 @@ function AskBox({graph, node, onGo, aiEnabled}) {
     {res && <div className="an-ask-res">{res.map((c, i) => <div key={i} className={`ask-card mini tone-${c.tone}`}>
       <h4>{c.title} <em>{c.en}</em>{c.local && <small> · 本地 local</small>}</h4>
       {c.text && <p>{c.text}</p>}
+      {!c.local && c.text && ai && (c.saved === true
+        ? <small className="quiet">已存入方法库 <em>Saved to notes</em></small>
+        : <button className="text-btn" disabled={busy} onClick={async () => {
+            const r = await saveAnswer(c, q);
+            setRes(list => list.map(x => (x === c ? {...x, saved: r.ok ? true : (r.error || '保存失败'), saveErr: !r.ok} : x)));
+          }}>存为方法笔记 <em>Save as note</em></button>)}
+      {c.saveErr && <small className="quiet" role="alert">保存失败：{c.saved}</small>}
       {c.refs?.length > 0 && <div className="chip-row">{c.refs.map(rf => <Chip key={rf.id} graph={graph} id={rf.id} onGo={onGo}/>)}</div>}
       {c.items?.length > 0 && <div className="chip-row">{c.items.slice(0, 6).map(id => <Chip key={id} graph={graph} id={id} onGo={onGo}/>)}</div>}
       {c.local?.map((lc, k) => <div key={k} className="local-card">
@@ -273,6 +304,23 @@ function AskBox({graph, node, onGo, aiEnabled}) {
   </div>;
 }
 
+// 把 AI 回答落成一篇方法笔记：原来答案只活在这个卡片里，换个节点、刷新一下全文就没了——
+// 「AI 问出来的东西」恰恰是最该沉淀成方法库条目的。写入走 /api/note-new（与新建笔记同一契约）。
+async function saveAnswer(card, question) {
+  const title = `AI 问答：${String(question || '').trim().slice(0, 24) || '要点整理'}`;
+  const refs = (card.refs || []).map(rf => `- [[${rf.id.replace(/^[a-z]+:/, '')}]]`).join('\n');
+  const body = `${card.text}\n${refs ? `\n## 引用\n${refs}\n` : ''}\n> 由 AI 问答（${new Date().toLocaleDateString('zh-CN')}）整理，请自行核对。`;
+  try {
+    const res = await fetch(apiUrl('/api/note-new'), {method: 'POST', headers: {'content-type': 'application/json'},
+      body: JSON.stringify({title, body, fm: {tags: ['AI问答']}}), signal: AbortSignal.timeout(30000)});
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+    markSelfWrite();
+    await refreshData().catch(() => {});
+    return {ok: true, path: j.path};
+  } catch (e) { return {ok: false, error: e.message}; }
+}
+
 // 正在等的任务 id：慢网关上一个人工任务能耗掉几分钟，原先只能干等（或者刷新页面，
 // 而刷新后服务端那个任务仍在占着闸）。有 id 就能在面板上点「取消」。
 let inflightJobId = null;
@@ -284,6 +332,31 @@ async function cancelInflight() {
     if (res.ok && j.ok) return '正在取消…';
     return j.error || j.message || '取消失败';
   } catch (e) { return '取消失败：' + e.message; }
+}
+
+// 轮询预算必须盖住服务端的最坏耗时，否则「面板说失败、库其实被改了」：
+// 服务端单条约 AI_TIMEOUT(默认 60s) × 3 次尝试 + 1s/2s 退避 ≈ 183s，批量还是逐条串行。
+// 原来的 Math.max(120, total*10+60) 对单篇只有 60s，慢网关或 429 重试时前端先抛「任务超时」，
+// 后台仍在写回 —— 用户看到失败重做，实际文件已经被改过两次。
+// tries 按「每 500ms 一次」计，所以 = 预算毫秒 / 500。
+const jobTries = (total, perItemMs = 200000) => Math.ceil(((total || 1) * perItemMs + 20000) / 500);
+
+// 整库打标签：方法库一页页点「打标签 + 摘要」太慢，这里给列表页一个入口。
+// 走同一条 /api/ai/analyze（服务端逐条串行 + 每条落盘），前端只负责轮询和汇报。
+export async function tagWholeVault() {
+  const dry = await aiAnalyze(undefined, true);
+  if (!dry.total) return {ok: false, msg: '没有可分析的方法笔记'};
+  if (!dry.todo) return {ok: false, msg: `方法库都已打过标签（${dry.total} 篇）`};
+  if (!window.confirm(`将用 AI 分析 ${dry.todo} 篇方法笔记（每篇一次模型调用，可能要几分钟）。继续？`)) {
+    return {ok: false, msg: '已取消'};
+  }
+  const job = await aiAnalyze();
+  if (!job?.job?.id) return {ok: false, msg: job?.message || '没有可分析的内容'};
+  const r = await pollJob(job.job.id, jobTries(job.job.total));
+  if (r.status !== 'done') return {ok: false, msg: `分析未完成：${r.error || r.status}`};
+  const written = (r.result || []).filter(x => x.written).length;
+  const failed = (r.result || []).filter(x => !x.written).length;
+  return {ok: true, msg: `AI 打标完成：写入 ${written} 篇${failed ? `，失败 ${failed} 篇` : ''}`};
 }
 
 function pollJob(id, tries = 120) {
@@ -303,7 +376,8 @@ function pollJob(id, tries = 120) {
         if (j.status === 'error') throw new Error(j.error || '任务失败');
         await new Promise(r => setTimeout(r, 500));
       }
-      throw new Error('任务超时');
+      // 说清「后台可能还在跑」：这时候写回可能刚好落盘，让用户以为可以原样重做。
+      throw new Error('任务超时（服务端可能仍在写回，稍后刷新看看结果）');
     } finally { inflightJobId = null; }
   })();
 }
@@ -601,7 +675,7 @@ export function Analysis({graph, node, module, onGo, onAction, onClose, aiEnable
       <Insights items={a.insights}/>
       {node.tags?.length > 0 && <section className="an-section"><h3>话题标签 <em>Topics</em></h3><div className="chip-row">{node.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div></section>}
       {node.kind === 'post' && <MetricsEditor node={node}/>}
-      {AI_KINDS.has(node.kind) && <AiPanel graph={graph} node={node} onGo={onGo} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/>}
+      {AI_KINDS.has(node.kind) && <AiPanel graph={graph} node={node} onGo={onGo} onAction={onAction} aiEnabled={aiEnabled} embedEnabled={embedEnabled}/>}
       <Links graph={graph} node={node} onGo={onGo}/>
     </div>
     <AskBox graph={graph} node={node} onGo={onGo} aiEnabled={aiEnabled}/>

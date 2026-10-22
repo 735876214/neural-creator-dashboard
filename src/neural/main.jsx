@@ -28,7 +28,8 @@ import './neural.css';
 // 刷新合并不会把这条新记录当成「服务端已删除」丢掉。绝不能从既有 id 推算
 // （Math.max(0, ...ideas.map(i => i.id)) 遇到 note-api 写的短 uuid 就是 NaN，
 // 第二条新选题会带着上一个 key 去 PUT，把第一条的文件改名覆盖）。
-const newLocalId = () => (globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + Math.random().toString(36).slice(2))).slice(0, 8);
+// 实现统一放在 persist.newLocalId（知识库页「转为选题」也要用同一份口径）。
+const newLocalId = persist.newLocalId;
 
 function Modal({title, en, onClose, children, wide}) {
   const ref = useRef(null), closeRef = useRef(onClose);
@@ -188,6 +189,8 @@ function App() {
   const layout = useMemo(() => forceLayout(graph), [graph]);
   const draftsRef = useRef(drafts);
   useEffect(() => { draftsRef.current = drafts; }, [drafts]);
+  const ideasRef = useRef(ideas);
+  useEffect(() => { ideasRef.current = ideas; }, [ideas]);
   const goalSave = persist.useSaveState('goal');
   const pendingSaves = persist.usePendingSaves();
   const saveItems = pendingSaves.map(({key, state}) => {
@@ -346,7 +349,34 @@ function App() {
     if (a.type === 'url') window.open(a.url, '_blank', 'noopener');
     if (a.type === 'snapshot') window.open(persist.apiUrl('/api/knowledge/snapshot?path=' + encodeURIComponent(a.path)), '_blank', 'noopener');
     if (a.type === 'publish') publishDraft(a.draftId, a.platform);
+    if (a.type === 'addIdea') addAiIdeas(a.ideaList || []);
   }, [graph, drafts, ideas]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // AI 候选选题落盘：面板里「加入选题池」按的是这个。id 用时间戳+序号，稳定且不撞
+  // （老数据里 id 是序号数字、看板新建的是字符串 id，两种图谱都认）。
+  function addAiIdeas(candidates) {
+    if (!live) { setToast('未连接 NAS，当前为只读演示 · Read-only (no NAS)'); return; }
+    const base = Date.now().toString(36);
+    const seen = new Set(ideasRef.current.map(i => i.title));
+    const fresh = [];
+    candidates.forEach((c, i) => {
+      const title = String(c?.title || '').trim();
+      if (!title || seen.has(title)) return;
+      seen.add(title);
+      fresh.push({
+        id: `ai-${base}-${i}`,
+        title,
+        platform: String(c.platform || '小红书'),
+        priority: ['高', '中', '低'].includes(c.priority) ? c.priority : '中',
+        status: '待写',
+        note: String(c.note || '')
+      });
+    });
+    if (!fresh.length) { setToast('候选都已在选题池里了 · Already in the pool'); return; }
+    setIdeas(list => [...list, ...fresh]);
+    for (const it of fresh) persist.saveIdeaNow(it);
+    setToast(`已加入选题池 ${fresh.length} 条 · Added to ideas`);
+  }
 
   // 半自动发布：补全正文（看板缓存截断过）→ 打开发布对话框
   function publishDraft(draftId, platform) {
@@ -578,11 +608,19 @@ function ReadModal({node, onClose, editable}) {
   const [serverText, setServerText] = useState(null); // 409 时的 NAS 版本，diff 用
   const [conflictMtime, setConflictMtime] = useState(null); // 409 时 NAS 那版的锁：只在用户明确选择后使用
   const [diffView, setDiffView] = useState(null); // {a, b} 内部 diff 弹窗
+  // 编辑期间「正文在别处被改动」的提示。绝不能因此重灌输入框：那是把用户正在打的字静默丢掉。
+  const [staleNotice, setStaleNotice] = useState('');
+  const dirtyRef = React.useRef(false); // 用户已经动过编辑框
 
   // 部署模式下拉服务器上的原文（带 mtime 做乐观锁）；本地模式直接用图谱里的 body。
+  // 依赖里刻意不含 node.body：main.jsx 每 5s 轮询一次 refreshData，node.body 会随之变化，
+  // 一旦它进依赖，effect 每次刷新都重跑 → setText(服务器正文) + setMtime(最新 mtime)，
+  // 结果是「用户正在打字的正文被静默替换」且「mtime 被刷成最新，之后保存连 409 都不会报」。
+  // 现在只在进入编辑态 / 换另一篇时拉一次；外部改动靠保存时的乐观锁 409 与冲突 diff 兜底。
   useEffect(() => {
     if (!editing || !isNote) return;
     let on = true;
+    const baseBody = node.body;
     fetch(persist.apiUrl('/api/note?id=' + encodeURIComponent(node.id))).then(async r => {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
@@ -590,10 +628,17 @@ function ReadModal({node, onClose, editable}) {
     }).then(j => {
       // GET 返回的是整篇原文（含 --- frontmatter）。编辑框只装正文：服务端 setBody() 会保留
       // 原 frontmatter 再拼新正文，把 frontmatter 一起提交会每保存一次就复制一份。
-      if (on) { setText(persist.stripFrontmatter(j.text ?? node.body ?? '')); setMtime(j.mtime); }
-    }).catch(() => { if (on) { setText(persist.stripFrontmatter(node.body || '')); setErr('读不到原文，编辑的是看板缓存'); } });
+      // 已经动过字时一律不覆盖，只提示。
+      if (!on) return;
+      if (dirtyRef.current) { setStaleNotice('正文在别处被改动，已保留你的输入 · Changed elsewhere — your text kept'); return; }
+      setText(persist.stripFrontmatter(j.text ?? baseBody ?? '')); setMtime(j.mtime);
+    }).catch(() => {
+      if (!on) return;
+      if (dirtyRef.current) { setStaleNotice('读不到原文，仍保留你的输入 · Could not read source'); return; }
+      setText(persist.stripFrontmatter(node.body || '')); setErr('读不到原文，编辑的是看板缓存');
+    });
     return () => { on = false; };
-  }, [editing, isNote, node.id, node.body]);
+  }, [editing, isNote, node.id]);
 
   async function save() {
     setBusy(true); setErr('');
@@ -635,14 +680,14 @@ function ReadModal({node, onClose, editable}) {
             ? <div className="reader-news">{renderNewsBody(node.body)}</div>
             : <pre>{node.body}</pre>}
           {isNote && editable && <div className="form-actions">
-            <button className="pill primary" onClick={() => setEditing(true)}><Icon name="draft" size={14}/>编辑正文 <em>Edit</em></button>
+            <button className="pill primary" onClick={() => { dirtyRef.current = false; setStaleNotice(''); setEditing(true); }}><Icon name="draft" size={14}/>编辑正文 <em>Edit</em></button>
             <span className="quiet">改动会写回 NAS 笔记库文件 <em>Writes back to the vault on NAS</em></span>
           </div>}
         </div>
       : <div className="reader">
           <p className="quiet">{node.path} · 保存前会比对修改时间，不会静默覆盖别人的改动 <em>Conflict-safe</em></p>
           <div className="reader-edit-row">
-            <textarea ref={editArea} className="reader-edit" value={text} onChange={e => setText(e.target.value)} rows={16} aria-label="编辑笔记正文 Edit note body" autoFocus/>
+            <textarea ref={editArea} className="reader-edit" value={text} onChange={e => { dirtyRef.current = true; setText(e.target.value); }} rows={16} aria-label="编辑笔记正文 Edit note body" autoFocus/>
             {editable && <label className="img-insert" title="上传图片并插入 ![[ ]]">
               <input type="file" accept="image/*" className="visually-hidden" onChange={async e => {
                 const f = e.target.files?.[0]; e.target.value = '';
@@ -653,6 +698,7 @@ function ReadModal({node, onClose, editable}) {
               <button type="button" className="icon-btn" onClick={e => { e.preventDefault(); e.currentTarget.closest('label')?.querySelector('input')?.click(); }} aria-label="插入图片 Insert image"><Icon name="save" size={14}/></button>
             </label>}
           </div>
+          {staleNotice && <p className="quiet" role="status">{staleNotice}</p>}
           {err && <p className="quiet" role="alert">{err}
               {serverText != null && <> · <button className="text-btn" onClick={() => setDiffView({a: serverText, b: text, mtime: conflictMtime})}>对比差异 <em>Diff</em></button></>}
             </p>}

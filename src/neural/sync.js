@@ -27,10 +27,11 @@ export async function aiModels() {
   } catch { return []; }
 }
 
-export async function aiAnalyze(paths, dryRun = false) {
+// extra 用来带 force（忽略 hash 缓存强制重跑）/ overwriteSummary（允许覆盖人工摘要）。
+export async function aiAnalyze(paths, dryRun = false, extra = {}) {
   const res = await fetch(API + '/api/ai/analyze', {
     method: 'POST', headers: {'content-type': 'application/json'},
-    body: JSON.stringify({paths, dryRun, model: pickedModel()})
+    body: JSON.stringify({paths, dryRun, model: pickedModel(), ...extra})
   });
   if (!res.ok) throw await fail(res, 'AI analyze');
   // 注意：这里只拿到 202 任务号，写 frontmatter 发生在服务端后台任务里，

@@ -52,6 +52,7 @@ export function NewNoteModal({onClose, onDone}) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const fileRef = useRef(null);
+  const bodyRef = useRef(null); // 插图按光标插入（原来传 {current:null}，永远只能加到末尾）
 
   const save = async () => {
     if (!title.trim() || busy) return;
@@ -79,13 +80,13 @@ export function NewNoteModal({onClose, onDone}) {
             <input type="file" accept="image/*" ref={fileRef} className="visually-hidden" onChange={async e => {
               const f = e.target.files?.[0]; e.target.value = '';
               if (!f) return;
-              const err2 = await insertImageAtCursor({current: null}, f, v => setBody(b => (b ? b + '\n' : '') + v));
+              const err2 = await insertImageAtCursor(bodyRef, f, v => setBody(v));
               if (err2) setErr(err2);
             }}/>
             <button type="button" className="pill ghost" onClick={() => fileRef.current?.click()}><Icon name="save" size={13}/>上传</button>
           </label>
         </div>
-        <label>正文 <em>Body</em><textarea rows={8} value={body} onChange={e => setBody(e.target.value)}/></label>
+        <label>正文 <em>Body</em><textarea ref={bodyRef} rows={8} value={body} onChange={e => setBody(e.target.value)}/></label>
         {err && <p className="quiet" role="alert">{err}</p>}
         <div className="form-actions">
           <button className="pill ghost" onClick={onClose}>取消 <em>Cancel</em></button>
