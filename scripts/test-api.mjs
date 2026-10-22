@@ -484,6 +484,13 @@ try {
   const upSvg = await fetch(base + '/api/attachment', {method: 'POST',
     headers: {'x-filename': encodeURIComponent('evil.exe'), 'content-type': 'application/octet-stream'}, body: png});
   assert.equal(upSvg.status, 400);
+  // 上传白名单比读取白名单少 .svg：SVG 能内联 <script>，直接导航到附件 URL 就会执行
+  // （前端 accept="image/*" 只是浏览器约束，curl 一句话就能绕过）。
+  for (const badExt of ['x.svg', 'x.html', 'x.js', 'noext']) {
+    const r = await fetch(base + '/api/attachment', {method: 'POST',
+      headers: {'x-filename': encodeURIComponent(badExt), 'content-type': 'application/octet-stream'}, body: png});
+    assert.equal(r.status, 400, `附件上传必须拒收「${badExt}」，实际 ${r.status}`);
+  }
   const upTraversal = await json('/api/attachment?path=' + encodeURIComponent('05-方法库 methods/流程/观察记录方法.md'));
   assert.equal(upTraversal.status, 400);
   // 路径穿越不能只测「把 .md 塞进附件目录」这一种最弱形状：真正会伤人的是跳出库、
@@ -530,6 +537,29 @@ try {
   const upNamedBody = await upNamed.json();
   assert.equal(upNamedBody.name, upNamedBody.path.split('/').pop(), '附件 name 必须与落盘文件名一致');
   ok('附件 name 与落盘文件名一致（回归）');
+
+  // 写接口的类型护栏：作品正文归发布流程管（/api/publish 建文件、指标回填只改 fm），
+  // 原来 /api/note PUT 不分类型，curl 一句就能把作品正文整篇清空，护栏只在前端按钮上。
+  mkdirSync(join(vault, '02-作品库'), {recursive: true});
+  mkdirSync(join(vault, '03-创作台'), {recursive: true});
+  writeFileSync(join(vault, '02-作品库/护栏作品.md'),
+    '---\ndate: 2026-01-02 10:00\n---\n# 护栏作品\n\n原文正文\n', 'utf8');
+  const workPut = await json('/api/note', {method: 'PUT', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({path: '02-作品库/护栏作品.md', body: '被清空'})});
+  assert.equal(workPut.status, 400, '作品正文不能被 /api/note 整篇覆盖：' + JSON.stringify(workPut.body));
+  assert.match(readFileSync(join(vault, '02-作品库/护栏作品.md'), 'utf8'), /原文正文/, '作品文件不能被改');
+  ok('/api/note 不接管作品正文（只有笔记类可整篇覆盖）');
+
+  // 发布时 frontmatter 必须跟着内容迁移：草稿文件发布后会被 rm，tags/summary 不带走就永久丢失。
+  writeFileSync(join(vault, '03-创作台/带话题草稿.md'),
+    '---\ntags: [话题甲, 话题乙]\nsummary: 一句摘要\n---\n# 带话题草稿\n\n草稿正文\n', 'utf8');
+  const pubTag = await json('/api/publish', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({path: '03-创作台/带话题草稿.md'})});
+  assert.ok([200, 201].includes(pubTag.status), '发布应成功：' + JSON.stringify(pubTag.body));
+  const workText = readFileSync(join(vault, pubTag.body.path), 'utf8');
+  assert.match(workText, /话题甲/, '草稿 tags 必须随发布迁移到作品');
+  assert.match(workText, /一句摘要/, '草稿 summary 必须随发布迁移到作品');
+  ok('发布迁移草稿的 tags / summary（回归）');
 
   // 6f. 回归：日报节点的 files key / GET 都必须是 note: 前缀（前端 graph 用的就是这个 id）
   mkdirSync(join(vault, '00-AI热点'), {recursive: true});
@@ -1177,6 +1207,14 @@ try {
   assert.match(aiFile, /MOCK标签/, '中文键名的 tags 也要落到 frontmatter');
   assert.match(aiFile, /MOCK 摘要一句话/, '中文键名的 summary 也要写回');
   ok('POST /api/ai/analyze：散文不致命、中文键名也能落盘（pickKey 兜底）');
+
+  // force：内容没变时默认跳过（缓存键是正文 hash），但「AI 写错了想重跑一次」必须有出路——
+  // 人工改过 tags/summary 不会改变正文 hash，没有 force 就永远拿到「已经分析过」。
+  const aiDry = await apost('/api/ai/analyze', {paths: [aiNote], dryRun: true});
+  assert.equal(aiDry.body.todo, 0, '内容没变时 dryRun 应报 0 条待办：' + JSON.stringify(aiDry.body));
+  const aiForced = await apost('/api/ai/analyze', {paths: [aiNote], dryRun: true, force: true});
+  assert.equal(aiForced.body.todo, 1, 'force 必须无视 hash 缓存重跑：' + JSON.stringify(aiForced.body));
+  ok('analyze 的 force 跳过内容 hash 缓存（强制重跑）');
 
   const aiIdeas = await apost('/api/ai/ideas', {paths: [aiNote]});
   assert.equal(aiIdeas.status, 200);

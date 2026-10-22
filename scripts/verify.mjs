@@ -276,9 +276,13 @@ if (noStrip) fail('写回前必须用 src/neural/mdfront.js 的 stripFrontmatter
 else ok('写回前剥离 frontmatter（src/neural/mdfront.js，测试引同一份实现）');
 // —— 界面契约：这几处都被真实 bug 踩过，改坏了要立刻红 ——
 const noteModalSrc = readFileSync(join(ROOT, 'src/neural/NoteModal.jsx'), 'utf8');
-if (/setBody\(\(b =>/.test(noteModalSrc) || !/setBody\(b => \(b \? b \+ '\\n' : ''\) \+ v\)/.test(noteModalSrc)) {
-  fail('新建笔记插图时把箭头函数拼进了字符串（正文会被替换成函数源码）');
-} else ok('新建笔记插图按函数回调追加正文');
+// 插图必须按光标插入：给 insertImageAtCursor 传真实 textarea ref，回调直接把值塞进正文。
+// 原来传 {current: null} 只能永远追加到末尾；传错（比如把箭头函数当值）会把函数源码写进正文。
+if (!/<textarea ref=\{bodyRef\}/.test(noteModalSrc)
+  || !/await insertImageAtCursor\(bodyRef, f, v => setBody\(v\)\)/.test(noteModalSrc)
+  || /insertImageAtCursor\(\{current: null\}/.test(noteModalSrc)) {
+  fail('新建笔记插图没有按光标插入（要传真实 textarea ref，并把回调值直接写进正文）');
+} else ok('新建笔记插图按光标插入正文');
 
 const starSrc = readFileSync(join(ROOT, 'src/neural/StarCore.jsx'), 'utf8');
 if (/avg > 1 \/ 62/.test(starSrc)) {
@@ -447,7 +451,8 @@ if (!/\? \{enabled: true, model: EMBED_MODEL, protocol: embedProtocol\(\)/.test(
   fail('追问没把选中的模型发给服务端：下拉框选了也不生效');
 } else if (!/if \(!r\.ok\) throw new Error\(j\.error \|\| 'HTTP ' \+ r\.status\)/.test(r9AnalysisSrc)) {
   fail('追问不判 r.ok：401/500 会显示成「（空）」');
-} else if (!/const r = await pollJob\(job\.job\.id, Math\.max\(120,/.test(r9AnalysisSrc)) {
+} else if (!/const jobTries = \(total, perItemMs = \d+\) => Math\.ceil\(\(\(total \|\| 1\) \* perItemMs \+ \d+\) \/ 500\)/.test(r9AnalysisSrc)
+  || !/pollJob\(job\.job\.id, jobTries\(job\.job\.total\)\)/.test(r9AnalysisSrc)) {
   fail('语义关联的轮询上限没按任务总量放大（上百条内容必然前端超时 + 409 卡死）');
 } else ok('AI 动作链路的契约（embed 标记 / analyze 空任务 / 向量清理 / 追问模型与错误 / relate 超时）');
 
