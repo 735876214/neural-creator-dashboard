@@ -25,7 +25,9 @@ services:
   note-api:
     # GitHub Actions 构建并发布的多阶段镜像（含前端产物 + note-api）。
     # 仓库为 public，GHCR 包默认继承可见性，NAS 拉取无需登录。
-    image: ghcr.io/735876214/neural-creator-dashboard:latest
+    # 默认拉 GHCR 上 CI 构建的镜像；本机构建/离线环境用 .env 里的 IMAGE=... 覆盖
+    # （例如 docker build -t neural-creator-dashboard:local . 之后写 IMAGE=neural-creator-dashboard:local）。
+    image: ${IMAGE:-ghcr.io/735876214/neural-creator-dashboard:latest}
     container_name: neural-note-api
     restart: unless-stopped
     # 与宿主目录属主对齐：镜像里以 node（uid/gid 1000）运行，宿主上的 vault 若属于

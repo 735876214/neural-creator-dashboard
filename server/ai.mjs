@@ -571,6 +571,9 @@ export async function embed(texts, {type = 'document'} = {}) {
       });
     } catch (e) {
       if (items.length > 1 && tooMany(e)) {
+        // 这是预期内的自适应（DashScope 上限 10 条），不是故障：日志里给一句人话，
+        // 免得看日志的人以为 embedding 挂了。
+        console.warn(`[ai] embedding 单批 ${items.length} 条超出上游上限，自动二分重试`);
         const mid = Math.ceil(items.length / 2);
         const a = await embedChunk(items.slice(0, mid));
         const b = await embedChunk(items.slice(mid));

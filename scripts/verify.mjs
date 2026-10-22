@@ -206,7 +206,9 @@ else ok('boot.js 取数前检查登录状态');
 // 3d. 一键部署：compose 用 GHCR 镜像（GitHub Actions 构建），镜像名与 workflow 一致
 console.log('一键部署');
 const composeSrc = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8');
-const imageMatch = composeSrc.match(/image:\s*ghcr\.io\/([^\s:]+)/);
+// 允许 ${IMAGE:-ghcr.io/...} 形式：本机/离线自建镜像时用 .env 的 IMAGE 覆盖，
+// 默认仍然是 CI 构建的 GHCR 镜像。
+const imageMatch = composeSrc.match(/image:\s*(?:\$\{IMAGE:-\s*)?ghcr\.io\/([^\s:}]+)/);
 if (!imageMatch) {
   fail('compose 未使用 ghcr.io 镜像（部署模式为 GitHub Actions 构建后拉取）');
 } else {
