@@ -111,7 +111,9 @@ async function fetchWxMetrics({platformId, url}, {fetchImpl = fetch} = {}) {
   let matched = null;
   for (let i = 1; i <= 3 && !matched; i++) {
     const day = localNow(Date.now() - i * 86400_000);
-    const begin = ymd(day), end = ymd(new Date(day.getTime() + 86400_000));
+    // end_date 只能到「昨日」：原来写成 day+1 天等于查今天，官方对未出数据的日期直接回空，
+    // 于是每一天都白查一次、匹配永远落空。
+    const begin = ymd(day), end = begin;
     const res = await fetchImpl(`https://api.weixin.qq.com/datacube/getarticletotal?access_token=${encodeURIComponent(token)}`, {
       method: 'POST', headers: {'content-type': 'application/json'},
       body: JSON.stringify({begin_date: begin, end_date: end}),
@@ -137,8 +139,16 @@ async function fetchWxMetrics({platformId, url}, {fetchImpl = fetch} = {}) {
     for (const item of j.list) {
       const details = item.details || [];
       const stat = details[details.length - 1] || item;
-      if (platformId && String(item.url || '').includes(platformId)) { matched = stat; break; }
-      if (!platformId && item.url && url && String(item.url).includes(String(url).replace(/^https?:\/\//, '').split('?')[0].slice(0, 40))) { matched = stat; break; }
+      // getarticletotal 的条目只有 ref_date / msgid / title / details，**没有 url 字段**：
+      // 原来按 `item.url.includes(platformId)` 匹配，matched 恒为 null，公众号同步整条链路不工作。
+      // 作品的 platformId 回填的就是 msgid，按它精确匹配；没有 platformId 时退化成「窗口内最新一篇」。
+      const msgid = String(item.msgid || '').trim();
+      if (platformId) {
+        if (msgid && msgid === String(platformId).trim()) { matched = stat; break; }
+      } else {
+        matched = stat;
+        break;
+      }
     }
   }
   return matched;
@@ -218,12 +228,14 @@ export function startPlatformsCron(runOnce, {intervalMs = 30 * 60_000} = {}) {
     if (lastRunYmd === today) return;
     running = true;
     try {
-      // runOnce 返回 {ok, failed} 统计：全部失败时**不能**置 lastRunYmd —— 否则当天剩余
-      // 20 多次 tick 全被跳过，一整天不再同步，日志里只剩一行「同步失败」。
+      // runOnce 返回 {ok, failed, aborted}：全部失败或凭据类中止时**不能**置 lastRunYmd ——
+      // 否则当天剩余 20 多次 tick 全被跳过，一整天不再同步，日志里只剩一行「同步失败」。
       const stats = await runOnce();
       const ok = Number(stats?.ok) || 0;
       const failed = Number(stats?.failed) || 0;
-      if (ok > 0 || failed === 0) {
+      if (stats?.aborted) {
+        console.error(`[platforms] 同步被凭据类错误中止（${ok} 篇更新 / ${failed} 篇失败），等下一次重试`);
+      } else if (ok > 0 || failed === 0) {
         lastRunYmd = today;
         console.error(`[platforms] 平台指标同步完成：${ok} 篇更新，${failed} 篇失败`);
       } else {

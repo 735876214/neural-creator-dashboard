@@ -67,6 +67,11 @@ const modelCache = {at: 0, list: []};
 // 模型返回的摘要/要点可能带换行：frontmatter 是逐行 YAML，多行值会把笔记属性写坏，
 // 所以在落库前就折叠成单行（yamlString 也会转义，但单行更可读）。
 const oneLine = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+// 模型「回的是合法 JSON、但字段形状不对」比非 JSON 更常见（tags 给了字符串、ideas 给了对象）。
+// 直接 (out.tags || []).map 会在字符串/对象上抛 TypeError，整批任务当场 error、后面一条都不再处理；
+// 统一先用这两个助手归一化，错形状降级成空数组/空串，最坏也只是这一篇没有标签。
+const asArray = v => (Array.isArray(v) ? v : []);
+const asText = v => (typeof v === 'string' ? v : '');
 modelCacheRef = modelCache;
 export async function listModels() {
   if (Date.now() - modelCache.at < 10 * 60_000) return modelCache.list;
@@ -267,8 +272,8 @@ export async function analyzeNote(title, body, {model} = {}) {
     {role: 'system', content: SYS + ' 输出 JSON：{"tags":["…"],"summary":"一句话摘要"}'},
     {role: 'user', content: `标题：${title}\n\n正文：\n${text}\n\n给这篇笔记 3-6 个话题标签（优先用正文里的词）和一句 30 字以内的中文摘要。`}
   ], {json: true, model});
-  const tags = [...new Set((out.tags || []).map(t => String(t).replace(/^#/, '').trim()).filter(Boolean))].slice(0, 6);
-  return {tags, summary: oneLine(out.summary).slice(0, 120)};
+  const tags = [...new Set(asArray(out.tags).map(t => String(t).replace(/^#/, '').trim()).filter(Boolean))].slice(0, 6);
+  return {tags, summary: oneLine(asText(out.summary)).slice(0, 120)};
 }
 
 // ③ 选题候选
@@ -278,12 +283,13 @@ export async function generateIdeas(notes, {model} = {}) {
     {role: 'system', content: SYS + ' 输出 JSON：{"ideas":[{"title":"…","platform":"小红书","priority":"中","note":"选题理由与切入角度","sourceTitles":["…"]}]}'},
     {role: 'user', content: `从这些笔记里挖 3 个值得写的选题（贴近笔记内容、能落地）：\n\n${digest.slice(0, 6000)}`}
   ], {json: true, model});
-  return (out.ideas || []).slice(0, 5).map(i => ({
+  // 形状归一：ideas 给了对象 / null、单条不是对象（模型常见漂移）时不能让 .map 抛 TypeError
+  return asArray(out.ideas).filter(i => i && typeof i === 'object').slice(0, 5).map(i => ({
     title: String(i.title || '').slice(0, 80),
     platform: ['小红书', 'B站', '公众号', '抖音'].includes(i.platform) ? i.platform : '小红书',
     priority: ['高', '中', '低'].includes(i.priority) ? i.priority : '中',
     note: String(i.note || '').slice(0, 300),
-    sourceTitles: (i.sourceTitles || []).map(String).slice(0, 3)
+    sourceTitles: asArray(i.sourceTitles).map(String).slice(0, 3)
   })).filter(i => i.title);
 }
 
@@ -294,9 +300,9 @@ export async function analyzeWebPage({url, title, text}, {model} = {}) {
     {role: 'system', content: SYS + ' 输出 JSON：{"summary":"一句话摘要","keyPoints":["…"],"tags":["…"],"title":"30字以内标题"}'},
     {role: 'user', content: `URL：${url || '（无）'}\n标题：${title || '（无）'}\n\n正文：\n${body}\n\n分析这个网页：给一句 40 字以内的中文摘要、3-6 条要点（保留原文关键信息与数据）、3-6 个话题标签（优先用正文里的词）${title ? '' : '，再从正文提炼一个 30 字以内、能当文件名的标题（title 字段）'}。`}
   ], {json: true, model});
-  const tags = [...new Set((out.tags || []).map(t => String(t).replace(/^#/, '').trim()).filter(Boolean))].slice(0, 6);
-  const keyPoints = (out.keyPoints || []).map(oneLine).filter(Boolean).slice(0, 6);
-  return {summary: oneLine(out.summary).slice(0, 160), keyPoints, tags, title: oneLine(out.title).slice(0, 60) || null};
+  const tags = [...new Set(asArray(out.tags).map(t => String(t).replace(/^#/, '').trim()).filter(Boolean))].slice(0, 6);
+  const keyPoints = asArray(out.keyPoints).map(oneLine).filter(Boolean).slice(0, 6);
+  return {summary: oneLine(asText(out.summary)).slice(0, 160), keyPoints, tags, title: oneLine(asText(out.title)).slice(0, 60) || null};
 }
 
 // ④ 问答（返回文本；上下文由调用方拼好，这里不检索）

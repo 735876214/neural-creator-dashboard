@@ -327,7 +327,10 @@ class Index {
         const stale = !r.updated_at || r.updated_at < cutoff;
         if (!stale) {
           if (r.host && r.host !== me) continue;          // 另一台机器 / 容器上的实例，无从判断
-          if (alive(r.pid) && r.pid !== process.pid) continue; // 同机另一个活着的实例在跑
+          // 同机仍活着的进程（含本进程自己）在跑：不碰。原来的 `r.pid !== process.pid` 把
+          // 本进程自己的长任务排除在「活着」之外，10 分钟一次的收口会把还在跑的 analyze/relate
+          // 打成 error（前端判失败、用户重试还会重复烧 token）。pid 复用由上面的 stale 兜住。
+          if (alive(r.pid)) continue;
         }
         n += stmt.run(reason, reason, now(), r.id).changes;
       }

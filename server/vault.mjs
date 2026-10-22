@@ -110,7 +110,9 @@ export function dateOf(v, file) {
 export function tagsOf(fm, body) {
   const raw = pick(fm, ['tags', 'tag', '标签', '话题']);
   const list = Array.isArray(raw) ? raw : raw ? String(raw).split(/[,，\s]+/) : [];
-  for (const m of body.matchAll(/(?:^|\s)#([^\s#，。,.!?！？、；;:：()（）[\]]+)/g)) list.push(m[1]);
+  // `#` 前的字符不限于空白：中文写作里「这条讲的是#选题方法论」很常见，只认行首/空格会整类丢掉话题。
+  // 正则与前端 src/neural/graph.js 的 HASHTAG_RE 保持一致。
+  for (const m of body.matchAll(/(?:^|[\s，。,.!?！？、；;:：()（）[\]{}【「《>])#([^\s#，。,.!?！？、；;:：()（）[\]]+)/g)) list.push(m[1]);
   return [...new Set(list.map(t => t.replace(/^#/, '').trim()).filter(t => t && !/^\d+$/.test(t)))].slice(0, 12);
 }
 export const clean = body => body.replace(/\r/g, '').trim().slice(0, 6000);
@@ -215,6 +217,8 @@ export function readVault(opts = {}) {
   // news（AI 热点日报）与 methods 同一条通道进图谱，但保留自己的 kind；
   // personal（个人知识库：灵感 / 制度 / 推文剪藏）同样保留自己的 kind。
   const bucket = {works: [], methods: [], ideas: [], drafts: [], news: [], personal: []};
+  // 读不出正文的篇数：reindex 靠它决定这一轮能不能 prune（少读到一篇 ≠ 它被删了）
+  let unreadable = 0;
   for (const file of walk(vault)) {
     const rel = relative(vault, file);
     // 附件目录（99-附件/）里的任何文件都不进图谱
@@ -224,7 +228,7 @@ export function readVault(opts = {}) {
     // 单篇读失败（SMB 抖动、被独占、权限）只跳过它：原来一个 EACCES 会让整份
     // /api/data 抛 500，看板直接白屏，用户还以为是数据坏了。
     let parsed;
-    try { parsed = parse(readFileSync(file, 'utf8')); } catch { continue; }
+    try { parsed = parse(readFileSync(file, 'utf8')); } catch { unreadable++; continue; }
     const {fm, body} = parsed;
     const title = String(pick(fm, ['title', '标题', 'name']) || basename(file).replace(/\.md$/i, '')).trim();
     // 附件引用在这里算一次（全文，未截断）：loadData 原来为拿 figures 把每个文件再读一遍，
@@ -383,6 +387,9 @@ export function readVault(opts = {}) {
 
   return {
     works, notes, ideas: ideasOut, drafts: draftsOut, concepts, snapshot,
+    // unreadable：本次有几个文件没读出来（权限 / 被独占 / 半截文件）。reindex 用它拦住 prune，
+    // 否则一次 SMB 抖动就会把那一篇的向量、AI 摘要与语义边永久删掉。
+    unreadable,
     counts: {works: works.length, worksTotal: bucket.works.length, notes: notes.length, notesTotal: bucket.methods.length,
       ideas: ideasOut.length, ideasTotal: bucket.ideas.length, drafts: draftsOut.length, draftsTotal: bucket.drafts.length,
       // personal 与实际返回的条数一致：原来报的是全量，个人库超过 120 条时

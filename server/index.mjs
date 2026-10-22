@@ -17,7 +17,7 @@
 //   API_TOKEN   可选：设了之后所有 /api 请求都要带 Authorization: Bearer <token>
 //   VAULT_GIT   '1' 开启写入后自动 git commit（默认开启，vault 不是仓库时自动跳过）
 import {createServer} from 'node:http';
-import {readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, renameSync, readdirSync, copyFileSync, chmodSync, accessSync, createReadStream, constants as fsConstants} from 'node:fs';
+import {readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, renameSync, readdirSync, copyFileSync, chmodSync, accessSync, createReadStream, openSync, fsyncSync, closeSync, linkSync, realpathSync, constants as fsConstants} from 'node:fs';
 import {join, resolve, sep, dirname, extname, basename, posix} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {gzipSync} from 'node:zlib';
@@ -32,8 +32,51 @@ import {refreshNews, forceRefresh, startNewsCron, listNews, ideasFromNews} from 
 import {platformInfo, pullAll, pullOne, startPlatformsCron, bindSettingsReader} from './platforms.mjs';
 import {randomBytes, createHmac, timingSafeEqual, randomUUID} from 'node:crypto';
 
+// fsync 一个路径（文件或目录）。strict=true 时把错误抛出去（数据没落盘不能假装成功）；
+// 目录 fsync 在 Windows 上会抛 EISDIR/EPERM，走 strict=false。
+function fsyncPath(p, strict) {
+  let fd;
+  try { fd = openSync(p, 'r'); fsyncSync(fd); }
+  catch (e) { if (strict) throw e; }
+  finally { try { closeSync(fd); } catch {} }
+}
+
+// 同目录临时文件 + rename + fsync：rename 只保证「目录项切换是原子的、不会出现半截文件」，
+// 它不保证新 inode 的数据块先落盘 —— 掉电 / 硬重启后目录项可能已指向新 inode 而数据还在
+// 页缓存里，恢复后就是 0 字节或半截。所以：写 tmp → fsync 文件 → rename → fsync 目录。
+function writeAtomicSync(abs, data, opts) {
+  const tmp = join(dirname(abs), `.${basename(abs)}.${process.pid}-${Date.now()}.tmp`);
+  try {
+    writeFileSync(tmp, data, opts);
+    fsyncPath(tmp, true);
+    renameSync(tmp, abs);
+    fsyncPath(dirname(abs), false);
+  } catch (e) {
+    try { rmSync(tmp, {force: true}); } catch {}
+    throw e;
+  }
+}
+
 const VAULT = resolve(process.env.VAULT_DIR || '');
 const DATA_DIR = resolve(process.env.DATA_DIR || '.note-api');
+// 笔记库的真实路径：字符串前缀校验挡不住符号链接（vault/inner -> /etc 时
+// vault/inner/x.md 前缀合法、实际落在库外）。所有路径校验都要对着它再核一次真实位置。
+const VAULT_REAL = (() => { try { return realpathSync(VAULT); } catch { return VAULT; } })();
+// 取离 p 最近的已存在祖先目录的真实路径（新建的多级目录还没创建时，只能核到已有的那层）。
+function realAncestor(p) {
+  let d = dirname(p);
+  for (let i = 0; i < 40; i++) {
+    try { return realpathSync(d); } catch {}
+    const up = dirname(d);
+    if (up === d) return null;
+    d = up;
+  }
+  return null;
+}
+const insideRealVault = p => {
+  const d = realAncestor(p);
+  return !d || d === VAULT_REAL || d.startsWith(VAULT_REAL + sep);
+};
 // 看板设置（月目标、AI 模型选择）是用户数据，放 vault 内隐藏目录：
 // 随 vault 的 Syncthing/git 备份，且以点开头，readVault 的 walk() 会跳过，不会进图谱。
 const SETTINGS_DIR = join(VAULT, '.dashboard');
@@ -80,7 +123,23 @@ if (!existsSync(VAULT) || !statSync(VAULT).isDirectory()) {
   process.exit(1);
 }
 
-const index = openIndex(join(DATA_DIR, 'index.sqlite'));
+// 建索引失败几乎只有一种原因：/data 目录属主不是当前进程 uid（PUID 与数据卷不一致，
+// 或从 root 版镜像升级过来卷还是 root 属主）。顶层抛 EACCES 只会在日志里留一段堆栈，
+// 配合 restart: unless-stopped 就变成无限重启、用户完全看不出该改什么，所以这里给出可执行的提示。
+let index;
+try {
+  index = openIndex(join(DATA_DIR, 'index.sqlite'));
+} catch (e) {
+  if (e && (e.code === 'EACCES' || e.code === 'EPERM' || e.code === 'EROFS' || /readonly/i.test(e.message || ''))) {
+    console.error(`无法在 ${DATA_DIR} 建立 SQLite 索引：${e.message}`);
+    console.error(`当前进程 uid=${process.getuid?.() ?? '?'} gid=${process.getgid?.() ?? '?'}，`
+      + `请把 ${DATA_DIR} 的属主改成同一个 uid/gid（PUID/PGID 只换进程身份，不会改数据卷属主）：`);
+    console.error(`  chown -R ${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000} <宿主机上的 note-api-data 目录>`);
+  } else {
+    console.error(`无法在 ${DATA_DIR} 建立 SQLite 索引：`, e);
+  }
+  process.exit(1);
+}
 
 // —— 通用小工具 ——
 class HttpError extends Error {
@@ -118,13 +177,16 @@ function json(res, code, obj) {
 async function readBody(req) {
   const chunks = [];
   let size = 0;
+  let limited = false;
   for await (const c of req) {
     size += c.length;
-    // 抛之前先 destroy：请求体不 drain 也不断开的话，keep-alive 连接上会残留半截大 body，
-    // 客户端继续往里灌，直到它自己超时（服务端已经回过 413 了）。
-    if (size > MAX_BODY) { req.destroy(); fail(413, '请求体过大'); }
+    // 超限后继续 drain（丢弃多余字节）而不是 destroy：destroy 会把 socket 立刻掐掉，
+    // 下面这个 413 根本发不出去，客户端只拿到连接重置（fetch 里就是「网络错误」），
+    // 而 /api/ai/info 已经把 maxUpload 公布成契约了。drain 同时保证 keep-alive 上不留半截 body。
+    if (size > MAX_BODY) { limited = true; chunks.length = 0; continue; }
     chunks.push(c);
   }
+  if (limited) fail(413, '请求体过大');
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString('utf8');
   let parsed;
@@ -148,12 +210,29 @@ async function readBodyOrEmpty(req) {
 async function readRaw(req) {
   const chunks = [];
   let size = 0;
+  let limited = false;
   for await (const c of req) {
     size += c.length;
-    if (size > MAX_BODY) { req.destroy(); fail(413, '文件过大（上限 ' + Math.round(MAX_BODY / 1024 / 1024) + ' MB）'); }
+    // 同 readBody：drain 而不是 destroy，否则 413 发不出去，前端看不到「文件过大」的原因
+    if (size > MAX_BODY) { limited = true; chunks.length = 0; continue; }
     chunks.push(c);
   }
+  if (limited) fail(413, '文件过大（上限 ' + Math.round(MAX_BODY / 1024 / 1024) + ' MB）');
   return Buffer.concat(chunks);
+}
+
+// 附件流式下载必须自己兜住读流错误：pipe 不转发 'error'，一旦 open/read 失败（文件被
+// Syncthing 改名的窗口期 ENOENT、同名目录 EISDIR）就会冒到顶层 uncaughtException，
+// process.exit(1) —— 一次 GET 就能打掉整个 note-api。
+function pipeAttachment(abs, start, end, res, rel) {
+  const s = end == null ? createReadStream(abs) : createReadStream(abs, {start, end});
+  s.on('error', (err) => {
+    if (!res.headersSent) return json(res, 404, {error: '附件读取失败', path: rel});
+    console.error('[note-api] 附件读取失败', rel, err.code);
+    res.destroy(); // 头已发出，只能断连，别让客户端把截断的 200 当成功
+  });
+  res.on('close', () => s.destroy()); // 客户端提前断开时释放 fd
+  return s.pipe(res);
 }
 
 // —— 登录与会话 ——
@@ -169,7 +248,14 @@ const loginFailures = new Map();
 // 读并校验登录配置。auth.json 存在却读不懂时必须抛错，绝不能退化成「没有鉴权」：
 // authed() 把 null 当成免登录，一次截断写入 / 卷挂载中断就会让整个笔记库对 0.0.0.0 裸奔。
 function loadAuthConfig() {
-  if (DASHBOARD_PASSWORD) return {user: DASHBOARD_USER, password: DASHBOARD_PASSWORD};
+  if (DASHBOARD_PASSWORD) {
+    // 整个笔记库只靠这一个口令守着，又是公网可达的端口。太短的口令拦不住在线爆破
+    // （限流是 8 次/5 分钟/IP，分布式来源等于没有），但历史上有人就是这么配的，所以只告警不改行为。
+    if (String(DASHBOARD_PASSWORD).trim().length < 12) {
+      console.error('[note-api] 警告：DASHBOARD_PASSWORD 少于 12 个字符，容易被在线爆破。建议改成 16 位以上的随机串。');
+    }
+    return {user: DASHBOARD_USER, password: DASHBOARD_PASSWORD};
+  }
   if (!AUTH_FILE) return null;
   if (!existsSync(AUTH_FILE)) {
     // bootstrapAuth() 已经在前面跑过（设置了 AUTH_FILE 就一定会生成文件）：
@@ -232,7 +318,10 @@ function sessionKey() {
     mkdirSync(DATA_DIR, {recursive: true});
     writeFileSync(SESSION_KEY_FILE, key + '\n', {mode: 0o600});
     try { chmodSync(SESSION_KEY_FILE, 0o600); } catch {}
-  } catch {} // 数据目录只读时退回进程内密钥：重启后重新登录，但功能不受影响
+  } catch (e) {
+    // 退回进程内密钥：重启就要重新登录，多副本之间也互相不认。功能还在，但必须留下痕迹。
+    console.error('[note-api] 会话密钥无法写入 DATA_DIR（本次退回进程内密钥，重启后需重新登录）：' + e.message);
+  }
   return key;
 }
 const SESSION_KEY = sessionKey();
@@ -253,6 +342,23 @@ function readCookie(req, name) {
   return '';
 }
 
+// 登出必须能让服务端签名失效：签名 Cookie 在 TTL 内是自证的，只清浏览器里的那份，
+// 任何曾经拿到过它的人（另一台设备、浏览器同步、代理日志）都能继续用到过期为止。
+// 单用户部署，吊销表放内存即可：重启丢表等价于「重新登录」，与 TTL 语义一致。
+const revokedSessions = new Map(); // jti -> exp（毫秒）
+function revokeSession(raw) {
+  const i = String(raw || '').lastIndexOf('.');
+  if (i <= 0) return;
+  try {
+    const data = JSON.parse(Buffer.from(raw.slice(0, i), 'base64url').toString('utf8'));
+    if (data?.jti) {
+      const now = Date.now();
+      if (revokedSessions.size > 256) for (const [k, exp] of revokedSessions) if (!(exp > now)) revokedSessions.delete(k);
+      revokedSessions.set(data.jti, Number(data.exp) || now);
+    }
+  } catch { /* 解不开的 Cookie 本来就用不了 */ }
+}
+
 function signSession(payload, auth) {
   return createHmac('sha256', SESSION_KEY + '\n' + auth.password).update(payload).digest('base64url');
 }
@@ -260,7 +366,8 @@ function signSession(payload, auth) {
 function makeSession(auth) {
   const payload = Buffer.from(JSON.stringify({
     u: auth.user,
-    exp: Date.now() + SESSION_TTL * 1000
+    exp: Date.now() + SESSION_TTL * 1000,
+    jti: randomBytes(9).toString('base64url') // 登出吊销用；老 Cookie 没有它，照旧有效
   })).toString('base64url');
   return payload + '.' + signSession(payload, auth);
 }
@@ -277,6 +384,7 @@ function verifySession(req, auth) {
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (data.u !== auth.user || !(Number(data.exp) > Date.now())) return null;
+    if (data.jti && revokedSessions.has(data.jti)) return null;
     return data;
   } catch { return null; }
 }
@@ -284,21 +392,27 @@ function verifySession(req, auth) {
 function cookieHeader(value, req) {
   // 转发头只有在显式信任代理时才认：客户端自带 `X-Forwarded-Proto: https` 就能让 Cookie 带上
   // Secure，纯 HTTP 部署下会把自己锁进「登录成功但仍未登录」的循环。
-  const proto = TRUST_PROXY ? String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() : '';
+  // 多级反代是「客户端值 + 逐跳追加」，只有最右一段由最近一跳代理亲自写入。
+  const protoList = TRUST_PROXY ? String(req.headers['x-forwarded-proto'] || '').split(',') : [];
+  const proto = (protoList[protoList.length - 1] || '').trim();
   const secure = proto === 'https' || !!req.socket.encrypted;
   const age = value ? `Max-Age=${SESSION_TTL}` : 'Max-Age=0';
   return `${SESSION_COOKIE}=${encodeURIComponent(value || '')}; Path=/; HttpOnly; SameSite=Lax; ${age}${secure ? '; Secure' : ''}`;
 }
 
 // 只有在显式信任代理（TRUST_PROXY=1，反向代理/nginx 部署）时才读转发头：
-// 部署版 note-api 直接发布端口，客户端自带 x-real-ip 就能让每个请求都是新 IP、
+// 部署版 note-api 直接发布端口，客户端自带 x-forwarded-for 就能让每个请求都是新 IP、
 // 把登录失败计数拆散到无限多个 key 上（限流形同虚设）。
 const TRUST_PROXY = /^(1|true|yes)$/i.test(String(process.env.TRUST_PROXY || ''));
 function clientIp(req) {
   if (TRUST_PROXY) {
-    const forwarded = String(req.headers['x-real-ip'] || req.headers['x-forwarded-for'] || '')
-      .split(',')[0].trim();
-    if (forwarded) return forwarded;
+    // 只认最右一段（最近一跳代理追加的那一跳）：最左段完全由客户端决定，
+    // 拿它当身份就能给每个请求换一个 IP，把失败计数拆散到无限多个 key 上。
+    // 也不读 x-real-ip：Caddy / Traefik 默认不设置它，客户端自带的值会原样穿透。
+    const hops = String(req.headers['x-forwarded-for'] || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const last = hops[hops.length - 1];
+    if (last) return last;
   }
   return req.socket.remoteAddress || 'unknown';
 }
@@ -313,6 +427,8 @@ function inside(rel) {
   if (!raw.toLowerCase().endsWith('.md')) fail(400, '只允许读写 .md 文件');
   const p = resolve(VAULT, raw);
   if (p !== VAULT && !p.startsWith(VAULT + sep)) fail(400, '路径越界');
+  // 真实位置校验：符号链接目录会让上面的字符串前缀检查形同虚设（写/删都会落到库外）。
+  if (!insideRealVault(p)) fail(400, '路径越界');
   const norm = p.slice(VAULT.length + 1).split(sep).join('/');
   // 黑名单必须逐段归一化再比：Windows / APFS 上 `.trash./x.md`、`.TRASH/x.md`、`.trash /x.md`
   // 都会解析到真实 .trash 目录，而字符串 startsWith 判不出来（本机实测 Test-Path '.trash.' 为真）。
@@ -330,6 +446,7 @@ function insideHtml(rel) {
   const p = resolve(VAULT, raw);
   const expected = join(VAULT, SNAPSHOTS_DIR + sep);
   if (!p.startsWith(expected)) fail(400, '快照必须位于 ' + SNAPSHOTS_DIR + '/ 下');
+  if (!insideRealVault(p)) fail(400, '路径越界');
   return {abs: p, rel: p.slice(VAULT.length + 1).split(sep).join('/')};
 }
 
@@ -395,9 +512,28 @@ function backup(rel, text) {
   }
   mkdirSync(dirname(dest), {recursive: true});
   // 备份自身也要原子：写一半崩溃会留下残缺备份，正好在最需要回滚时不可用
-  const tmp = join(dirname(dest), `.${basename(dest)}.${process.pid}-${Date.now()}.tmp`);
-  writeFileSync(tmp, text, 'utf8');
-  renameSync(tmp, dest);
+  try { writeAtomicSync(dest, text, 'utf8'); }
+  catch (e) { throw new Error(`写备份 ${rel} 失败：${e.message}`); }
+  pruneTrash();
+}
+
+// .trash 只增不删：每改一次正文就留一份全文，笔记库天天改，一年下来能把 NAS 塞满，
+// 而「误写可回滚」只需要最近若干版。每小时最多裁一次，删掉超过 TRASH_KEEP_DAYS 天的旧备份。
+const TRASH_KEEP_DAYS = Number(process.env.TRASH_KEEP_DAYS || 30);
+let trashPrunedAt = 0;
+function pruneTrash() {
+  const now = Date.now();
+  if (!(TRASH_KEEP_DAYS > 0) || now - trashPrunedAt < 3600_000) return;
+  trashPrunedAt = now;
+  const root = join(VAULT, '.trash');
+  let entries;
+  try { entries = readdirSync(root, {recursive: true, withFileTypes: true}); } catch { return; }
+  const cutoff = now - TRASH_KEEP_DAYS * 86400_000;
+  for (const ent of entries) {
+    if (!ent.isFile()) continue;
+    const abs = join(ent.parentPath || root, ent.name);
+    try { if (statSync(abs).mtimeMs < cutoff) rmSync(abs, {force: true}); } catch {}
+  }
 }
 
 // git 自动提交：失败绝不能静默。文档承诺「笔记库是 git 仓库，误写可回滚」，用户按此理解
@@ -446,12 +582,9 @@ function loadPlatformSecrets() {
 }
 function savePlatformSecrets(map) {
   mkdirSync(DATA_DIR, {recursive: true});
-  const tmp = join(DATA_DIR, `.platform-secrets-${process.pid}-${Date.now()}.tmp`);
   try {
-    writeFileSync(tmp, JSON.stringify(map, null, 2) + '\n', {mode: 0o600});
-    renameSync(tmp, PLATFORM_SECRETS_FILE);
+    writeAtomicSync(PLATFORM_SECRETS_FILE, JSON.stringify(map, null, 2) + '\n', {encoding: 'utf8', mode: 0o600});
   } catch (e) {
-    try { rmSync(tmp, {force: true}); } catch {}
     throw new Error(`写入平台凭据失败：${e.message}`);
   }
 }
@@ -462,12 +595,9 @@ function loadAiSecret() {
 }
 function saveAiSecret(key) {
   mkdirSync(DATA_DIR, {recursive: true});
-  const tmp = join(DATA_DIR, `.ai-secrets-${process.pid}-${Date.now()}.tmp`);
   try {
-    writeFileSync(tmp, JSON.stringify({aiApiKey: key}, null, 2) + '\n', {mode: 0o600});
-    renameSync(tmp, AI_SECRETS_FILE);
+    writeAtomicSync(AI_SECRETS_FILE, JSON.stringify({aiApiKey: key}, null, 2) + '\n', {encoding: 'utf8', mode: 0o600});
   } catch (e) {
-    try { rmSync(tmp, {force: true}); } catch {}
     throw new Error(`写入 AI key 失败：${e.message}`);
   }
 }
@@ -580,12 +710,9 @@ function writeSettings(patch) {
   // readSettings 会把 DATA_DIR 的 secret 合进来供 platforms.mjs 使用；写回文件前必须剥掉
   next.platforms = Object.fromEntries(Object.entries(next.platforms || {}).map(([k, v]) => [k, {appid: v.appid}]));
   mkdirSync(SETTINGS_DIR, {recursive: true});
-  const tmp = join(SETTINGS_DIR, `.settings-${process.pid}-${Date.now()}.tmp`);
   try {
-    writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
-    renameSync(tmp, SETTINGS_FILE);
+    writeAtomicSync(SETTINGS_FILE, JSON.stringify(next, null, 2) + '\n', 'utf8');
   } catch (e) {
-    try { rmSync(tmp, {force: true}); } catch {}
     throw new Error(`写入设置失败：${e.message}`);
   }
   gitCommit('.dashboard/settings.json', '更新看板设置');
@@ -616,9 +743,7 @@ function migratePlatformSecrets() {
     if (!moved) return;
     savePlatformSecrets(secrets);
     raw.platforms = keep;
-    const tmp = join(SETTINGS_DIR, `.settings-${process.pid}-${Date.now()}.tmp`);
-    writeFileSync(tmp, JSON.stringify(raw, null, 2) + '\n', 'utf8');
-    renameSync(tmp, SETTINGS_FILE);
+    writeAtomicSync(SETTINGS_FILE, JSON.stringify(raw, null, 2) + '\n', 'utf8');
     gitCommit('.dashboard/settings.json', '平台 Secret 移出 vault（改存 DATA_DIR）');
     console.error('[note-api] 平台 Secret 已移到 DATA_DIR；vault 的 git 历史里仍有旧值，建议在平台后台重置一次');
   } catch (e) {
@@ -691,7 +816,7 @@ function alignKeys(fm, text) {
 }
 
 // 写一个已存在的笔记：乐观锁 → 备份 → 最小侵入改写 → 落盘 → 提交
-function writeExisting(rel, {body, fm, mtime}) {
+function writeExisting(rel, {body, fm, mtime, requireMtime}) {
   const {abs} = inside(rel);
   if (!existsSync(abs)) fail(404, `文件不存在：${rel}`);
   const before = readFileSync(abs, 'utf8');
@@ -703,18 +828,21 @@ function writeExisting(rel, {body, fm, mtime}) {
     if (Math.abs(want - current) > 1) {
       fail(409, '文件已被其他地方改动', {path: rel, mtime: current, content: before});
     }
+  } else if (requireMtime && body !== undefined) {
+    // 写正文却一个 mtime 都不带 = 整把锁被跳过（实测直接 200 覆盖）。只有 /api/note（笔记正文编辑器）
+    // 打开这条硬约束：它读完整全文再写回，前端一定带着 mtime；选题 / 草稿的新建式 PUT 与
+    // frontmatter-only 的回写（发布、AI 打标）走的是别的契约，保持原样。
+    fail(409, '缺少 mtime：写回正文必须带上读到的 mtime', {path: rel, mtime: current, content: before});
   }
   const after = writeDoc(before, {fm: alignKeys(fm, before), body});
   if (after === before) return {path: rel, mtime: current, changed: false, text: after};
   backup(rel, before);
-  // 同目录临时文件 + rename：写盘中途被杀/断电时只会留下完整旧版或完整新版，
+  // 同目录临时文件 + rename + fsync：写盘中途被杀/断电时只会留下完整旧版或完整新版，
   // 不会把 .md 截成半截（原地覆盖写坏的文件，乐观锁也分不清「写坏」和「被改」）。
-  const tmp = join(dirname(abs), `.${basename(abs)}.${process.pid}-${Date.now()}.tmp`);
+  // fsync 不能省：rename 只保证目录项原子，掉电后新 inode 的数据块可能还在页缓存里。
   try {
-    writeFileSync(tmp, after, 'utf8');
-    renameSync(tmp, abs);
+    writeAtomicSync(abs, after, 'utf8');
   } catch (e) {
-    try { rmSync(tmp, {force: true}); } catch {}
     throw new Error(`写入 ${rel} 失败：${e.message}`);
   }
   gitCommit(rel, `更新 ${rel}`);
@@ -753,16 +881,26 @@ function createNote(kind, {title, body = '', fm = {}, requestId}) {
   const name = safeName(title);
   const text = writeDoc('', {fm, body});
   mkdirSync(join(VAULT, dir), {recursive: true});
-  // 用 'wx'（O_EXCL）占位：existsSync + writeFileSync 之间若被并发创建同名笔记（cron + HTTP、
-  // 两个标签页）会互相静默覆盖，而且 writeFileSync 非原子，进程被杀会留下半截 .md。
+  // 独占创建 + 原子落盘的组合：先把整篇写进 .tmp（TEMP_FILE_RE 认得出并会清理），
+  // 再用 link 把 tmp 挂到最终文件名上 —— 目标已存在就抛 EEXIST（等价于原来的 'wx'），
+  // 而内容永远不会以半截形式出现在真实文件名上（原来的 'wx' 只防覆盖、不防写一半崩溃）。
   let rel = '';
   for (let i = 1; i < 1000 && !rel; i++) {
     const cand = posix.join(dir, (i === 1 ? name : `${name} ${i}`) + '.md');
+    const tmpAbs = join(VAULT, posix.join(dir, `.${posix.basename(cand)}.${process.pid}-${Date.now()}.tmp`));
     try {
-      writeFileSync(join(VAULT, cand), text, {encoding: 'utf8', flag: 'wx'});
+      writeFileSync(tmpAbs, text, 'utf8');
+      fsyncPath(tmpAbs, true);
+      linkSync(tmpAbs, join(VAULT, cand));
       rel = cand;
     } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
+      // 个别 SMB/CIFS 挂载不支持硬链接（EPERM/ENOSYS/EXDEV）：退回独占复制，语义相同
+      if (e.code === 'EPERM' || e.code === 'ENOSYS' || e.code === 'EXDEV') {
+        try { copyFileSync(tmpAbs, join(VAULT, cand), fsConstants.COPYFILE_EXCL); rel = cand; }
+        catch (e2) { if (e2.code !== 'EEXIST') throw e2; }
+      } else if (e.code !== 'EEXIST') throw e;
+    } finally {
+      try { rmSync(tmpAbs, {force: true}); } catch {}
     }
   }
   if (!rel) fail(409, `同名文件过多：${name}`);
@@ -774,8 +912,16 @@ function createNote(kind, {title, body = '', fm = {}, requestId}) {
 }
 
 // Obsidian 禁止出现在文件名里的字符，另外把双链里有歧义的 # ^ [ ] | 也换掉
-const safeName = t => String(t || '').replace(/[\\/:*?"<>|#^[\]]/g, ' ')
-  .replace(/\s+/g, ' ').replace(/^\.+/, '').trim().slice(0, 80) || '未命名';
+const safeName = t => {
+  const name = String(t || '').replace(/[\\/:*?"<>|#^[\]]/g, ' ')
+    .replace(/\s+/g, ' ').replace(/^\.+/, '').trim().slice(0, 80)
+    // 结尾的点与空格在 Windows / SMB 上会被系统吞掉：落盘名与 rel 不一致，
+    // 之后按 rel 找不到文件（每次保存都像新建）。统一去掉。
+    .replace(/[. ]+$/, '');
+  if (!name) return '未命名';
+  // Windows 保留设备名（CON / NUL / COM1…）在 SMB 目标上会 EINVAL，前加下划线躲开。
+  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name) ? '_' + name : name;
+};
 // 新建时给重名笔记加的后缀：「标题 N」
 const dedupName = name => new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' \\d+$');
 
@@ -848,7 +994,7 @@ function reindex(data = loadData()) {
   for (const n of data.notes) push(noteNodeId(n), n.rel, n.title, n.kind, n.body);
   for (const i of data.ideas) push('idea:' + i.id, i.rel, i.title, 'idea', i.note || '');
   for (const d of data.drafts) push('draft:' + d.id, d.rel, d.title, 'draft', d.body);
-  return index.syncNotes(rows, {prune: missing === 0});
+  return index.syncNotes(rows, {prune: missing === 0 && !data.unreadable});
 }
 
 // 索引只覆盖 /api/data 的展示窗口（作品 30、方法笔记 40、日报 60、个人库 120、选题草稿 300）：
@@ -908,7 +1054,8 @@ function serveStatic(req, res, pathname) {
   const type = MIME[extname(abs).toLowerCase()] || 'application/octet-stream';
   // Vite 产物带内容 hash，可以永久缓存；入口 HTML 必须每次协商（否则改了 index.html 拉不到新版）。
   // 原来统一 no-cache 且没有 ETag：每次刷新都全量重传 JS/CSS，而 no-cache 的协商缓存又完全失效。
-  const isAsset = rel.startsWith('assets/');
+  // 回退出来的 index.html 不是构建产物：必须每次协商，否则入口 HTML 被 immutable 钉一年
+  const isAsset = !missing && rel.startsWith('assets/');
   const cacheControl = isAsset ? 'public, max-age=31536000, immutable' : 'no-cache';
   const etag = 'W/"' + st.size.toString(16) + '-' + Math.floor(st.mtimeMs).toString(16) + '"';
   const head = {'content-type': type, 'cache-control': cacheControl, etag, 'vary': 'accept-encoding', ...SECURITY_HEADERS};
@@ -1003,7 +1150,8 @@ async function route(req, res, url) {
       return next;
     };
     // 只按 IP 计数会被两种情况打穿：反代后未设 TRUST_PROXY 时所有客户端共用一个 key
-    // （一个人失败 8 次就能把主人锁在门外 5 分钟）；设了又可用 x-real-ip 无限拆分。
+    // （一个人失败 8 次就能把主人锁在门外 5 分钟）；设了 TRUST_PROXY 时只有最右一跳可信，
+    // 伪装最左段 x-forwarded-for 不再能拆 key。
     // 所以 IP 维度只做宽松上限（3×），精确计数落在「IP + 用户名」上。
     const ipKey = 'ip:' + ip;
     const ipRec = loginFailures.get(ipKey);
@@ -1022,6 +1170,8 @@ async function route(req, res, url) {
     if (!ok) {
       bump(ipKey, now);
       const next = bump(key, now);
+      // 失败必须有痕迹：这是唯一能发现「有人在爆破」的地方（密码本身绝不入日志）。
+      console.error(`[note-api] 登录失败 ip=${ip} user=${String(username ?? '').slice(0, 64)} n=${next.n}/${LOGIN_MAX}`);
       return json(res, 401, {error: '用户名或密码不正确', attemptsLeft: Math.max(0, LOGIN_MAX - next.n)});
     }
     loginFailures.delete(key);
@@ -1031,6 +1181,7 @@ async function route(req, res, url) {
   }
 
   if (p === '/api/logout' && req.method === 'POST') {
+    revokeSession(readCookie(req, SESSION_COOKIE));
     res.setHeader('set-cookie', cookieHeader('', req));
     return json(res, 200, {ok: true});
   }
@@ -1162,22 +1313,25 @@ async function route(req, res, url) {
         if (k in fm && typeof fm[k] !== 'string') fail(400, `${k} 必须是字符串`);
       }
     }
-    const r = writeExisting(target({path, id}), {body, fm, mtime});
+    const r = writeExisting(target({path, id}), {body, fm, mtime, requireMtime: true});
     return json(res, 200, {path: r.path, mtime: r.mtime, changed: r.changed, hash: hashOf(r.text)});
   }
 
   if (p === '/api/note' && req.method === 'DELETE') {
     const rel = target({path: url.searchParams.get('path'), id: url.searchParams.get('id')});
-    // 个人知识库的剪藏：顺带删掉快照文件（尽力而为，失败不阻塞删除）
-    let snapRel = null;
+    // 个人知识库的剪藏：顺带删掉快照文件。顺序必须是「先删正文、再删快照」——
+    // 反过来时 removeNote 一旦失败（权限、git 冲突），快照已经永久消失，
+    // 而从 .trash 恢复回来的 .md 会指向一个不存在的网页存档。
+    let snapAbs = null, snapRel = null;
     try {
       const n = loadData().notes.find(x => x.kind === 'personal' && x.rel === rel);
       if (n?.snapshot) {
         const {abs} = insideHtml(n.snapshot);
-        if (existsSync(abs)) { rmSync(abs); snapRel = n.snapshot; }
+        if (existsSync(abs)) { snapAbs = abs; snapRel = n.snapshot; }
       }
     } catch {}
     const r = removeNote(rel);
+    if (snapAbs) { try { rmSync(snapAbs); } catch (e) { console.error('[note-api] 删除网页快照失败（正文已删除）：', e.message); } }
     if (snapRel) gitCommitMulti([rel, snapRel], `删除 ${rel}（已备份到 .trash/）`);
     return json(res, 200, r);
   }
@@ -1309,7 +1463,14 @@ async function route(req, res, url) {
     try {
       writeExisting(from, {fm, mtime: draftMtime});
       metricsWritten = hasMetrics;
-    } catch (e) { console.error('[note-api] 发布写 frontmatter 失败：', e.message); }
+    } catch (e) {
+      // 409 = 草稿在读取之后又被别处改过：绝不能继续「复制 + 删源」，否则冲突被吞掉、
+      // 草稿已消失无法重发，作品永久缺 date / sourceIdeaId，而前端还看到「发布成功」。
+      if (e && e.code === 409) throw e;
+      console.error('[note-api] 发布写 frontmatter 失败：', e.message);
+      // 其他写盘失败（磁盘满 / 只读挂载）同样不能往下走：草稿还在，重试即可
+      fail(507, '草稿写回失败，未发布（磁盘满或只读）');
+    }
 
     // 移动：目标目录先建好。用「独占创建 + 再删源」而不是 rename ——
     // rename 到已存在路径在 POSIX/Windows 上都是静默覆盖，会吃掉同名作品的整份内容。
@@ -1344,6 +1505,7 @@ async function route(req, res, url) {
     const p = resolve(VAULT, raw);
     const expected = join(VAULT, ATTACHMENTS_DIR + sep);
     if (!p.startsWith(expected)) fail(400, '附件必须位于 ' + ATTACHMENTS_DIR + '/ 下');
+    if (!insideRealVault(p)) fail(400, '路径越界');
     return {abs: p, rel: p.slice(VAULT.length + 1).split(sep).join('/')};
   }
 
@@ -1362,7 +1524,8 @@ async function route(req, res, url) {
     const rel = posix.join(ATTACHMENTS_DIR, `${stem}-${Date.now()}-${randomBytes(3).toString('hex')}${ext}`);
     insideAttachment(rel); // 白名单兜底校验（正常必过）
     mkdirSync(join(VAULT, ATTACHMENTS_DIR), {recursive: true});
-    writeFileSync(join(VAULT, rel), buf, {flag: 'wx'});
+    // 原子落盘：半截 jpeg/mp4 会被正文的 ![[...]] 永久引用，而名字带时间戳+随机后缀无法重传同路径
+    writeAtomicSync(join(VAULT, rel), buf);
     gitCommit(rel, `上传附件 ${rel}`);
     invalidate();
     // name 必须就是真正落盘的文件名：前端拿它拼 ![[...]]。再调一次 Date.now() 会跨毫秒对不上。
@@ -1393,10 +1556,10 @@ async function route(req, res, url) {
         return res.end();
       }
       res.writeHead(206, {...head, 'content-length': end - start + 1, 'content-range': `bytes ${start}-${end}/${st.size}`});
-      return createReadStream(abs, {start, end}).pipe(res);
+      return pipeAttachment(abs, start, end, res, rel);
     }
     res.writeHead(200, {...head, 'content-length': st.size});
-    return createReadStream(abs).pipe(res);
+    return pipeAttachment(abs, null, null, res, rel);
   }
 
   // limit 同样要 clamp：limit=abc → NaN 会让 node:sqlite 抛 datatype mismatch
@@ -1471,7 +1634,11 @@ async function route(req, res, url) {
           const existing = [...new Set(curFm.tags || [])];
           const ai = [...new Set(r.tags)].filter(t => !existing.includes(t));
           const merged = [...existing.slice(0, Math.max(0, cap - ai.length)), ...ai].slice(0, cap);
-          writeExisting(n.rel, {fm: {tags: merged, summary: r.summary}, mtime: mtimeOf(join(VAULT, n.rel))});
+          // summary 空串在 frontmatter.render() 里表示「删除这个键」：模型没给摘要时不能把
+          // 用户已有的 summary 抹掉（写回成功还会把这一篇标记成「已分析」，从此不再重跑）。
+          const fmPatch = {tags: merged};
+          if (r.summary) fmPatch.summary = r.summary;
+          writeExisting(n.rel, {fm: fmPatch, mtime: mtimeOf(join(VAULT, n.rel))});
         } catch (e) { writeErr = e.message; }
         // 缓存必须在写回成功之后才记：先记后写时，一旦写回 409 / ENOENT，下一轮 dryRun 就
         // 算成「已分析」，面板说「写回失败·可重试」，但重试永远返回「这篇已经分析过了」。
@@ -1591,8 +1758,31 @@ async function route(req, res, url) {
         }
       }
     }
-    for (const [id, w] of [...scored].sort((a, b) => b[1] - a[1]).slice(0, 8))
-      hits.set(id, {id, title: index.note(id)?.title || '', body: index.note(id)?.body || '', kw: true});
+    // 全库兜底：索引只覆盖 /api/data 的展示窗口（作品 30 / 方法笔记 40 / 日报 60 / 个人库 120 /
+    // 选题草稿 300），窗口外的笔记不在 FTS 里。上面两轮都零命中时像 searchAll 一样读一次全量，
+    // 否则第 31 篇及更早的作品一问就「笔记库里没有找到相关内容」。
+    const fallback = new Map();
+    if (!scored.size) {
+      try {
+        const full = readVault({vault: VAULT, full: true});
+        const pool = [
+          ...full.works.map(w => ({id: 'post:' + w.post.id, title: w.post.title, body: w.content?.body || ''})),
+          ...full.notes.map(n => ({id: noteNodeId(n), title: n.title, body: n.body})),
+          ...full.ideas.map(i => ({id: 'idea:' + i.id, title: i.title, body: i.note || ''})),
+          ...full.drafts.map(x => ({id: 'draft:' + x.id, title: x.title, body: x.body || ''}))
+        ];
+        const needles = (phrases.length ? phrases : [askQ]).map(s => String(s).toLowerCase()).filter(Boolean);
+        for (const x of pool) {
+          const hay = (x.title + '\n' + x.body).toLowerCase();
+          const n = needles.reduce((acc, ph) => acc + (hay.includes(ph) ? 1 : 0), 0);
+          if (n) { scored.set(x.id, n); fallback.set(x.id, x); }
+        }
+      } catch (e) { console.error('[note-api] 问答全量召回失败：', e.message); }
+    }
+    for (const [id, w] of [...scored].sort((a, b) => b[1] - a[1]).slice(0, 8)) {
+      const fb = fallback.get(id);
+      hits.set(id, {id, title: index.note(id)?.title || fb?.title || '', body: index.note(id)?.body || fb?.body || '', kw: true});
+    }
     // 向量召回（可用时）
     if (embedEnabled()) {
       try {
@@ -1709,7 +1899,8 @@ async function route(req, res, url) {
       // 加随机后缀：同一篇网页在同一毫秒剪两次会撞同一个文件名，后一次静默覆盖前一次的快照
       snapshotRel = posix.join(SNAPSHOTS_DIR, `${slug}-${Date.now()}-${randomBytes(3).toString('hex')}.html`);
       mkdirSync(join(VAULT, SNAPSHOTS_DIR), {recursive: true});
-      writeFileSync(join(VAULT, snapshotRel), page.html, 'utf8');
+      // 快照是「我读过原文」的唯一凭据：写一半崩溃会留下截断的 HTML，所以走原子落盘
+      writeAtomicSync(join(VAULT, snapshotRel), page.html, 'utf8');
     }
 
     const fm = cleanPersonalFm({
@@ -1766,7 +1957,8 @@ async function route(req, res, url) {
     const curMtime = mtimeOf(join(VAULT, rel));
     const oldTags = parseFrontmatter(cur);
     writeExisting(rel, {
-      fm: {summary: analysis.summary, ...(analysis.keyPoints.length ? {keyPoints: analysis.keyPoints} : {}),
+      // summary 只在非空时才写：空串在 render() 里表示删键，会把剪藏原有的摘要抹掉
+      fm: {...(analysis.summary ? {summary: analysis.summary} : {}), ...(analysis.keyPoints.length ? {keyPoints: analysis.keyPoints} : {}),
         tags: [...new Set([...(oldTags.tags || []), ...analysis.tags])].slice(0, 12)},
       mtime: curMtime
     });
@@ -1992,9 +2184,25 @@ function renameTo(title, rel) {
   if (stem === name) return rel;
   // 文件名是「标题 N」（新建时的重名序号）且同一标题的基名已被别的文件占用 → 标题没变，不能改名。
   // 只凭「空格+数字」判断会把「报告 2026.md 改成标题 报告」这种真实改名误判成未变。
+  // 大小写不敏感的文件系统（macOS / Windows / 多数 SMB）上「只改标题大小写」时，
+  // baseAbs 与 abs 是同一个文件，字符串比较却判成不同 → 被当成重名，文件名变成「X 2.md」。
   const baseAbs = join(dir, name + '.md');
-  if (baseAbs !== abs && existsSync(baseAbs) && dedupName(name).test(stem)) return rel;
+  const sameFile = baseAbs.toLowerCase() === abs.toLowerCase();
+  if (!sameFile && existsSync(baseAbs) && dedupName(name).test(stem)) return rel;
   let next = join(dir, name + '.md');
+  if (sameFile) {
+    // 只差大小写：直接改名（renameSync 在不敏感盘上是安全的覆盖式重命名）。
+    try {
+      renameSync(abs, next);
+      const nextRel = posix.join(posix.dirname(rel), next.slice(dir.length + 1));
+      gitCommit(nextRel, `重命名 ${rel} → ${nextRel}`);
+      invalidate();
+      return nextRel;
+    } catch (e) {
+      console.error('[note-api] 重命名失败：', e.message);
+      return rel;
+    }
+  }
   for (let i = 2; i < 1000 && existsSync(next); i++) next = join(dir, `${name} ${i}.md`);
   // 序号用尽时绝不能继续 rename：那时 next 是个已有文件，renameSync 会静默覆盖它
   if (existsSync(next)) fail(409, `同名文件过多，未改名：${rel}`);
@@ -2044,7 +2252,12 @@ const server = createServer(async (req, res) => {
         if (wantsHtml) {
           // 带上原路径：login.html 的 safeNext() 会在登录后跳回去。
           // 丢掉它意味着从深链进入、或会话过期后被踢，登录完一律回首页，上下文全没了。
-          const next = '/login.html?next=' + encodeURIComponent(url.pathname + url.search);
+          // 含控制字符的路径不往 next 里塞：浏览器解析 URL 前会删掉 \t \r \n，
+          // "/%09/evil.example" 这类构造会变成站外跳转，直接回首页最稳。
+          const back = url.pathname + url.search;
+          const next = '/login.html?next=' + encodeURIComponent(
+            /[\u0000-\u001f\u007f]/.test(back) ? '/' : back
+          );
           res.writeHead(302, {location: next, 'cache-control': 'no-store', ...SECURITY_HEADERS});
           return res.end();
         }
@@ -2157,8 +2370,12 @@ if (process.env.PLATFORM_SYNC_CRON !== '0') {
       if (aborted) console.error(`[platforms] 同步已中止：${error}`);
       if (results.some(r => r.updated)) reindex();
       if (results.length) console.error(`[platforms] ${results.length} 篇有平台来源`);
-      // 返回统计给 cron：全部失败时不能置「今天已同步」，否则当天剩余 tick 全被跳过
-      return {ok: results.filter(r => r.updated).length, failed: results.filter(r => r.error && r.pullable).length};
+      // 返回统计给 cron：全部失败 / 凭据类中止时都不能置「今天已同步」，否则当天剩余 tick 全被跳过
+      return {
+        ok: results.filter(r => r.updated).length,
+        failed: results.filter(r => r.error && r.pullable).length,
+        aborted: !!aborted
+      };
     } finally {
       releaseJob(gate);
     }

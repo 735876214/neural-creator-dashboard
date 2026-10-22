@@ -58,6 +58,9 @@ try {
       HOST: '127.0.0.1',
       VAULT_GIT: '0',
       NEWS_CRON: '0',
+      // 不关掉平台定时同步的话，SYNC_HOUR 默认 21 点一过，启动 20s 后 cron 会联网全量拉取并写盘，
+      // 给后面所有 409 / mtime 断言制造 flake（badChild 早就设了，主服务漏了）。
+      PLATFORM_SYNC_CRON: '0',
       AI_API_KEY: '',
       EMBED_API_KEY: '',
       // 基础用例不开启登录，也避免开发机上的环境变量干扰；网页抓取允许私网（测试用本地 HTTP 服务）
@@ -98,11 +101,16 @@ try {
   assert.ok(rel, '找不到可写的笔记');
   const before = await json('/api/note?path=' + encodeURIComponent(rel));
   assert.equal(before.status, 200);
-  const appended = before.body.text + '\n\nE2E 测试追加';
+  // 必须先把 frontmatter 剥掉：原来直接把「含 frontmatter 的全文」当 body 回写，
+  // 落盘变成两份 frontmatter（实测 4 个 ---）而断言只 match 尾标记，照样全绿 ——
+  // 「写回破坏 frontmatter」这类破坏性 bug 一律假绿，且后面 300 行断言都跑在这份坏文件上。
+  const appended = stripFrontmatter(before.body.text) + '\n\nE2E 测试追加';
   const wrote = await put('/api/note', {path: rel, body: appended, mtime: before.body.mtime});
   assert.equal(wrote.status, 200);
   const after = await json('/api/note?path=' + encodeURIComponent(rel));
-  assert.match(after.body.text, /E2E 测试追加/);
+  assert.equal(stripFrontmatter(after.body.text).trim(), appended.trim(), '正文应原样改写成新内容');
+  assert.equal((readFileSync(join(vault, rel), 'utf8').match(/^---$/gm) || []).length, 2,
+    '写回后文件必须仍然只有一对 frontmatter 分隔线');
   ok('PUT /api/note 正常写入');
 
   // 3. 旧 mtime 必须 409，且文件不被覆盖
@@ -111,6 +119,16 @@ try {
   const unchanged = await json('/api/note?path=' + encodeURIComponent(rel));
   assert.equal(unchanged.body.text, after.body.text);
   ok('mtime 不一致返回 409 且不覆盖');
+
+  // 3b. 乐观锁的失效路径（都出过真实事故）：mtime:"abc" 曾让比较恒为 false 而静默覆盖；
+  // 完全不传 mtime 的正文写回曾跳过整把锁 —— 现在必须是 400 / 409，不能有任何一条能写进去。
+  const badMtime = await put('/api/note', {path: rel, body: '不应写入', mtime: 'abc'});
+  assert.equal(badMtime.status, 400, 'mtime 非数字必须 400：' + JSON.stringify(badMtime.body));
+  const noMtime = await put('/api/note', {path: rel, body: '不应写入'});
+  assert.equal(noMtime.status, 409, '正文写回不带 mtime 必须 409，不能无锁覆盖');
+  assert.equal((await json('/api/note?path=' + encodeURIComponent(rel))).body.text, after.body.text,
+    '被拒绝的写入不能改动文件');
+  ok('mtime 非法 / 缺失都被拒绝（乐观锁失效路径）');
 
   // 4. 设置持久化
   const saved = await put('/api/settings', {goal: 17});
@@ -151,9 +169,14 @@ try {
   const badKey = await put('/api/note', {path: pub.body.path, fm: {任意键: 'x'}});
   assert.equal(badKey.status, 400);
   // /api/platforms/pull：未配凭据时应逐篇 pullable:false，不报错
+  // 先放一篇带 platform + url 的作品进库：库里没有这种作品时 results 结构性必然为空，
+  // 「未配凭据 pullable:false」就成了永远成立的空断言（接口把 pullable 丢掉也照样绿）。
+  const pullRel = '02-作品库/回归-抖音作品.md';
+  writeFileSync(join(vault, pullRel), '---\nplatform: 抖音\nurl: https://www.douyin.com/video/1\n---\n# 回归-抖音作品\n\n正文\n');
   const pull = await json('/api/platforms/pull', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
-  assert.equal(pull.status, 200);
-  assert.ok(Array.isArray(pull.body.results));
+  assert.equal(pull.status, 200, 'pull 应 200：' + JSON.stringify(pull.body));
+  assert.ok(Array.isArray(pull.body.results) && pull.body.results.length, '应至少返回一条可同步作品');
+  assert.equal(pull.body.results[0].pullable, false, '抖音个人号必须 pullable:false');
   ok('发布来源字段与 /api/platforms/pull（未配凭据 pullable:false）');
 
   // 6b. 个人知识库：本地 HTTP 服务当网页源 → 剪藏 → 快照 → /api/data → 删除备份
@@ -164,43 +187,48 @@ try {
     });
     s.listen(0, '127.0.0.1', () => { const {port} = s.address(); ok2({port, close: () => s.close()}); });
   });
-  const posted = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'},
-    body: JSON.stringify({url: `http://127.0.0.1:${clipPage.port}/page`, category: '推文'})});
-  assert.equal(posted.status, 201, '剪藏应返回 201：' + JSON.stringify(posted.body));
-  assert.match(posted.body.path, /^06-个人知识库\//, '剪藏 md 应落在 06-个人知识库/');
-  assert.ok(existsSync(join(vault, posted.body.path)), '剪藏 md 未创建');
-  assert.match(readFileSync(join(vault, posted.body.path), 'utf8'), /url:/, 'frontmatter 应带 url');
-  assert.ok(posted.body.snapshot && existsSync(join(vault, posted.body.snapshot)), 'HTML 快照未落盘');
-  const data2 = await json('/api/data?fresh');
-  const clipped = data2.body.notes.find(n => n.kind === 'personal');
-  assert.ok(clipped && clipped.url, '/api/data 应包含 kind:personal 且带 url');
-  assert.equal(data2.body.files['personal:' + clipped.id], clipped.path ?? undefined, 'files 应有 personal: 前缀映射');
-  // AI 未启用：重新分析返回 501
-  const an501 = await json('/api/knowledge/analyze', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({path: posted.body.path})});
-  assert.equal(an501.status, 501);
-  // 快照读取：200 + CSP；目录外路径 400
-  const snap = await fetch(base + '/api/knowledge/snapshot?path=' + encodeURIComponent(posted.body.snapshot));
-  assert.equal(snap.status, 200);
-  assert.match(snap.headers.get('content-security-policy') || '', /default-src 'none'/, '快照响应必须带 CSP');
-  const snapBad = await json('/api/knowledge/snapshot?path=' + encodeURIComponent('05-方法库 methods/流程/观察记录方法.md'));
-  assert.equal(snapBad.status, 400);
-  // 快照目录同样跑一遍穿越矩阵：快照是 HTML，能读到别的 .html 就是同源脚本执行
-  for (const bad of ['06-个人知识库/.snapshots/../../02-作品库/x.html', '.snapshots/x.html',
-    '06-个人知识库/.snapshots/../../../etc/passwd', 'C:\\Windows\\win.ini', '../snap.html']) {
-    const r = await json('/api/knowledge/snapshot?path=' + encodeURIComponent(bad));
-    assert.ok(r.status === 400 || r.status === 404, `快照读取必须挡掉「${bad}」，实际 ${r.status}`);
+  // 本地剪藏源服务必须无条件关掉：原来 close() 在成功路径末尾，169~202 之间任一断言抛出，
+  // 监听 handle 就把事件循环拖住 —— 报完错 npm run test:api 仍然挂着不退出。
+  try {
+    const posted = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'},
+      body: JSON.stringify({url: `http://127.0.0.1:${clipPage.port}/page`, category: '推文'})});
+    assert.equal(posted.status, 201, '剪藏应返回 201：' + JSON.stringify(posted.body));
+    assert.match(posted.body.path, /^06-个人知识库\//, '剪藏 md 应落在 06-个人知识库/');
+    assert.ok(existsSync(join(vault, posted.body.path)), '剪藏 md 未创建');
+    assert.match(readFileSync(join(vault, posted.body.path), 'utf8'), /url:/, 'frontmatter 应带 url');
+    assert.ok(posted.body.snapshot && existsSync(join(vault, posted.body.snapshot)), 'HTML 快照未落盘');
+    const data2 = await json('/api/data?fresh');
+    const clipped = data2.body.notes.find(n => n.kind === 'personal');
+    assert.ok(clipped && clipped.url, '/api/data 应包含 kind:personal 且带 url');
+    assert.equal(data2.body.files['personal:' + clipped.id], clipped.path ?? undefined, 'files 应有 personal: 前缀映射');
+    // AI 未启用：重新分析返回 501
+    const an501 = await json('/api/knowledge/analyze', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({path: posted.body.path})});
+    assert.equal(an501.status, 501);
+    // 快照读取：200 + CSP；目录外路径 400
+    const snap = await fetch(base + '/api/knowledge/snapshot?path=' + encodeURIComponent(posted.body.snapshot));
+    assert.equal(snap.status, 200);
+    assert.match(snap.headers.get('content-security-policy') || '', /default-src 'none'/, '快照响应必须带 CSP');
+    const snapBad = await json('/api/knowledge/snapshot?path=' + encodeURIComponent('05-方法库 methods/流程/观察记录方法.md'));
+    assert.equal(snapBad.status, 400);
+    // 快照目录同样跑一遍穿越矩阵：快照是 HTML，能读到别的 .html 就是同源脚本执行
+    for (const bad of ['06-个人知识库/.snapshots/../../02-作品库/x.html', '.snapshots/x.html',
+      '06-个人知识库/.snapshots/../../../etc/passwd', 'C:\\Windows\\win.ini', '../snap.html']) {
+      const r = await json('/api/knowledge/snapshot?path=' + encodeURIComponent(bad));
+      assert.ok(r.status === 400 || r.status === 404, `快照读取必须挡掉「${bad}」，实际 ${r.status}`);
+    }
+    // 非法 category
+    const badCat = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({title: 'x', category: '乱写'})});
+    assert.equal(badCat.status, 400);
+    // 缺 title 且缺 url
+    const badEmpty = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({note: 'x'})});
+    assert.equal(badEmpty.status, 400);
+    // 删除剪藏 → .trash 备份
+    const rmClip = await json('/api/note?path=' + encodeURIComponent(posted.body.path), {method: 'DELETE'});
+    assert.equal(rmClip.status, 200);
+    assert.ok(existsSync(join(vault, '.trash', posted.body.path)), '剪藏删除后应备份到 .trash');
+  } finally {
+    clipPage.close();
   }
-  // 非法 category
-  const badCat = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({title: 'x', category: '乱写'})});
-  assert.equal(badCat.status, 400);
-  // 缺 title 且缺 url
-  const badEmpty = await json('/api/knowledge', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({note: 'x'})});
-  assert.equal(badEmpty.status, 400);
-  // 删除剪藏 → .trash 备份
-  const rmClip = await json('/api/note?path=' + encodeURIComponent(posted.body.path), {method: 'DELETE'});
-  assert.equal(rmClip.status, 200);
-  assert.ok(existsSync(join(vault, '.trash', posted.body.path)), '剪藏删除后应备份到 .trash');
-  clipPage.close();
   ok('个人知识库：剪藏 / 快照 / 501 / 路径白名单 / 删除备份');
 
   // 6c. 上传文件入库：md 直读 / docx zip 解析 / 非法类型 400
@@ -686,8 +714,11 @@ try {
   assert.ok(longEntry, '超长草稿应出现在 /api/data');
   assert.equal(longEntry.body.length, 6000, '/api/data 的正文被截到 6000 字');
   assert.equal(longEntry.truncated, true, '被截断的草稿必须标 truncated，否则前端会把截断正文写回');
-  const shortEntry = (longData.body.seedDrafts || []).find(d => d.title === 'e2e 草稿');
-  assert.ok(!shortEntry || !shortEntry.truncated, '没被截断的草稿不应带 truncated');
+  // 原来 find 的标题（'e2e 草稿'）全文件从未创建过，断言恒真：
+  // 服务端把所有草稿都标 truncated:true 也是绿的。
+  const shortEntry = (longData.body.seedDrafts || []).find(d => d.title === 'e2e 稳定ID草稿');
+  assert.ok(shortEntry, '短草稿应出现在 /api/data');
+  assert.ok(!shortEntry.truncated, '没被截断的草稿不应带 truncated');
   ok('超长草稿在 /api/data 里标出 truncated（回归）');
 
   // 6n-5. 回归：写盘走「同目录临时文件 + rename」，写完目录里不能留下 .tmp 残骸
@@ -825,6 +856,62 @@ try {
   assert.match(badLog, /auth\.json/, '日志应说明 auth.json 有问题');
   ok('auth.json 损坏时拒绝启动，不降级成无鉴权（回归）');
 
+  // 6p. 请求体上限 / 类型 / 静态托管：三条都出过真实事故，却一条回归用例都没有。
+  // MAX_BODY 的两处 413 注释各记录过一次「客户端只拿到连接重置」；
+  // 静态托管里的 login.html 必须公开、未登录要 302 回登录页、serveStatic 的穿越修复（实测可利用）也没人守。
+  const edgePort = await freePort();
+  const edgeBase = `http://127.0.0.1:${edgePort}`;
+  const staticDir = join(tmp, 'static');
+  mkdirSync(staticDir, {recursive: true});
+  writeFileSync(join(staticDir, 'login.html'), '<!doctype html><title>login</title>');
+  writeFileSync(join(staticDir, 'index.html'), '<!doctype html><title>app</title>');
+  const edgeChild = spawn(process.execPath, [join(ROOT, 'server/index.mjs')], {
+    env: {
+      ...process.env, VAULT_DIR: vault, DATA_DIR: join(tmp, 'data-edge'), PORT: String(edgePort),
+      HOST: '127.0.0.1', VAULT_GIT: '0', NEWS_CRON: '0', PLATFORM_SYNC_CRON: '0',
+      MAX_BODY: '1024', STATIC_DIR: staticDir,
+      // 这里要同时覆盖「有鉴权时的静态托管」和「过了鉴权之后的 413/415」：密码开登录，token 走脚本通道
+      DASHBOARD_PASSWORD: 'e2e-edge-pass', AUTH_FILE: '', API_TOKEN: 'edge-token'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let edgeLog = '';
+  edgeChild.stdout.on('data', d => { edgeLog += d; });
+  edgeChild.stderr.on('data', d => { edgeLog += d; });
+  try {
+    await waitReady(edgeBase);
+    const authH = {authorization: 'Bearer edge-token'};
+    // 413：超限必须回一个 413（不是连接重置），且连接被 drain 干净
+    const huge = await fetch(edgeBase + '/api/settings', {method: 'PUT',
+      headers: {...authH, 'content-type': 'application/json'}, body: JSON.stringify({goal: 1, pad: 'x'.repeat(4000)})});
+    assert.equal(huge.status, 413, '超过 MAX_BODY 应回 413，实际 ' + huge.status);
+    // 415：JSON 接口收到别的 content-type
+    const wrongType = await fetch(edgeBase + '/api/settings', {method: 'PUT',
+      headers: {...authH, 'content-type': 'text/plain'}, body: 'goal=1'});
+    assert.equal(wrongType.status, 415, '非 JSON content-type 应 415，实际 ' + wrongType.status);
+    // 静态托管：login.html / avatar 之外的资源都要登录
+    const loginPage = await fetch(edgeBase + '/login.html');
+    assert.equal(loginPage.status, 200, 'login.html 必须公开，实际 ' + loginPage.status);
+    // 直接打开页面（Accept 含 text/html）→ 302 到 login.html 并带上 next=原路径；静态资源仍 401
+    const rootPage = await fetch(edgeBase + '/', {headers: {accept: 'text/html'}, redirect: 'manual'});
+    assert.equal(rootPage.status, 302, '未登录访问首页应 302 到登录页，实际 ' + rootPage.status);
+    assert.match(rootPage.headers.get('location') || '', /^\/login\.html\?next=/, '302 目标应是 login.html?next=');
+    const assetPage = await fetch(edgeBase + '/assets/x.js', {headers: {accept: 'text/html'}, redirect: 'manual'});
+    assert.equal(assetPage.status, 401, '静态资源未登录应 401，不能回 HTML，实际 ' + assetPage.status);
+    // 穿越：`..\dist2\x.js` 曾被当成相对路径解析到 STATIC_DIR 外面
+    for (const bad of ['/..%5Cdist2/x.js', '/assets/../../secret.js']) {
+      const r = await fetch(edgeBase + bad, {headers: authH});
+      assert.ok(r.status === 404 || r.status === 302, `静态穿越必须挡掉「${bad}」，实际 ${r.status}`);
+    }
+    // %2e%2e 会被 WHATWG URL 解析器先折叠掉（落到 /etc/passwd，没有扩展名 → SPA 回退给 index.html），
+    // 关键是绝不能真的读到 STATIC_DIR 之外的内容。
+    const dotdot = await fetch(edgeBase + '/%2e%2e/%2e%2e/etc/passwd', {headers: authH});
+    assert.ok(!/^root:/m.test(await dotdot.text()), '不能读到站点目录外的文件内容');
+    ok('请求体过大 413 / content-type 415 / 静态托管公开与穿越（回归）');
+  } finally {
+    edgeChild.kill();
+  }
+
   // 7. 登录：未登录 401 → /api/login 换 Cookie → 带 Cookie 可读 → auth-check 204
   const authPort = await freePort();
   const authBase = `http://127.0.0.1:${authPort}`;
@@ -842,7 +929,8 @@ try {
       DASHBOARD_USER: 'tester',
       DASHBOARD_PASSWORD: 'e2e-pass',
       AUTH_FILE: '',
-      API_TOKEN: ''
+      // 与登录会话并存：curl / 脚本用它，浏览器用 Cookie（compose 里由 API_TOKEN 转发）
+      API_TOKEN: 't0k'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -889,6 +977,13 @@ try {
   assert.equal(logout.status, 200);
   assert.match(logout.headers.get('set-cookie') || '', /Max-Age=0/, '登出应让浏览器清掉 Cookie');
   ok('POST /api/logout 清掉会话 Cookie');
+
+  // API_TOKEN：非浏览器客户端（curl / 脚本）用 Bearer 直连。compose 曾经漏转发这个变量，
+  // 用户在 .env 里设了也永远 401——没有用例的话这条路径会再次静默坏掉。
+  assert.equal((await ajson('/api/data', {headers: {authorization: 'Bearer t0k'}})).status, 200, 'API_TOKEN 应放行 /api/data');
+  assert.equal((await ajson('/api/data', {headers: {authorization: 'Bearer nope'}})).status, 401, '错误 token 必须 401');
+  assert.equal((await ajson('/api/data')).status, 401, '既没有 token 也没有 Cookie 时仍要 401');
+  ok('API_TOKEN 放行 Bearer 请求，且不削弱 Cookie 鉴权');
 
   console.log(`\n全部通过（${passed} 项）。`);
 } catch (e) {

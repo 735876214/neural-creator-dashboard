@@ -8,7 +8,7 @@
 //
 // 定时：startNewsCron 每小时检查一次，当天还没有日报且已过 NEWS_HOUR（默认 8 点）就生成。
 // 环境变量：NEWS_SOURCE（RSS 地址）、NEWS_HOUR（生成时刻）、NEWS_TZ_OFFSET（默认 8）、NEWS_CRON=0 关闭。
-import {writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, rmSync, copyFileSync} from 'node:fs';
+import {writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, rmSync, copyFileSync, openSync, fsyncSync, closeSync} from 'node:fs';
 import {dirname, basename, join} from 'node:path';
 import {writeDoc} from './frontmatter.mjs';
 import {chat, TASK_MODELS, aiEnabled} from './ai.mjs';
@@ -49,6 +49,9 @@ function writeMdAtomic(path, text) {
   const tmp = join(dirname(path), `.${basename(path)}.${process.pid}-${Date.now()}.tmp`);
   try {
     writeFileSync(tmp, text, 'utf8');
+    // rename 只保证「不出现半截文件」，不保证数据块先于目录项落盘：掉电后可能变成 0 字节
+    const fd = openSync(tmp, 'r');
+    try { fsyncSync(fd); } finally { try { closeSync(fd); } catch {} }
     renameSync(tmp, path);
   } catch (e) {
     try { rmSync(tmp, {force: true}); } catch {}
@@ -148,15 +151,25 @@ export async function refreshNews(index, vaultDir, io = {}) {
   // vault 里文件还在且完整（没被手动删 / 没被写坏）才复用缓存
   const mdPath = join(vaultDir, NEWS_DIR, `${date}.md`);
   if (cached && validMd(mdPath)) return null;
-  // 同一天连续失败（磁盘满 / 目录只读 / RSS 长期 5xx）时别每 30 分钟再烧一次完整 AI 汇总
+  // 同一天连续失败（磁盘满 / 目录只读 / RSS 长期 5xx / AI 回不出 JSON）时别每 30 分钟再烧一次
+  // 完整 AI 汇总。达到上限要走错误码而不是 return null —— null 会被 /api/news/refresh 当成
+  // 「今天已生成过」回 200，用户看不到其实当天已经放弃生成。
   if ((attempts.get(date) || 0) >= 3) {
     console.error('[news] 今天的日报已经连续生成失败 3 次，等明天再试');
-    return null;
+    throw newsError(503, '今天的日报已连续生成失败 3 次，稍后手动刷新或明天自动重试');
   }
 
-  const items = await fetchAiNews();
-  if (!items.length) throw newsError(502, 'RSS 里没有可用条目');
-  const r = await digestNews(items, {model: io.model});
+  // 抓 RSS + 调模型这两步才是真正烧钱的部分，失败同样要计数：
+  // 只在写盘失败时计数的话，RSS 5xx / AI 非 JSON 会让 cron 每 30 分钟重跑一次完整汇总（一天几十次）。
+  let items, r;
+  try {
+    items = await fetchAiNews();
+    if (!items.length) throw newsError(502, 'RSS 里没有可用条目');
+    r = await digestNews(items, {model: io.model});
+  } catch (e) {
+    bumpAttempt(date);
+    throw e;
+  }
   const payload = {...r, items: items.map(i => ({title: i.title, link: i.link, date: i.date?.toISOString?.() || null})), model: TASK_MODELS.news};
 
   // 先落 .md，再写 SQLite：反过来的话，写盘失败（ENOSPC / EROFS）会留下「/api/news 有今天这份、
