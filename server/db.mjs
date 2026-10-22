@@ -281,8 +281,12 @@ class Index {
   updateJob(id, patch) {
     const j = this.job(id);
     if (!j) return;
+    // 晚到的进度回调不能把已经结束的任务改回 running：原来 running 直接覆盖 done/error，
+    // 前端轮询看到「又在跑」于是一直等不到终态（取消后尤其明显）。
+    const settled = j.status === 'done' || j.status === 'error';
+    const status = settled && patch.status === 'running' ? j.status : (patch.status ?? j.status);
     this.db.prepare('UPDATE jobs SET status=?, done=?, message=?, error=?, result=?, updated_at=? WHERE id=?')
-      .run(patch.status ?? j.status, patch.done ?? j.done, patch.message ?? j.message, patch.error ?? j.error,
+      .run(status, patch.done ?? j.done, patch.message ?? j.message, patch.error ?? j.error,
         patch.result !== undefined ? (patch.result == null ? null : JSON.stringify(patch.result)) : j.result, now(), id);
   }
   // 任务结果只在轮询那几秒有用：一直留着会无限占 /data（relate 一次几百条边、analyze 是全量逐篇结果）
@@ -348,6 +352,15 @@ class Index {
 
 // 余弦相似度。向量都已归一化时等同于点积，这里仍然按定义算，免得依赖调用方。
 export function cosine(a, b) {
+  // 维度不同的两个向量没有可比性：按较短的那个循环只会得到「前 N 维的点积 / 各自模长」，
+  // 于是一个 4 维向量能和 16 维向量算出 0.97 的假相似度（实测）。宁可当 0 处理。
+  //
+  // 注意：embeddings() 取出来的 vec 是 Float32Array（BLOB 直接映射，省一次拷贝），
+  // 而 Array.isArray(Float32Array) 是 false —— 只认 Array 会让**每一对**都算成 0：
+  // 语义关联任务「跑完了」但一条边都没有，问答的向量召回也永远静默降级成纯关键词。
+  // 所以这里必须接受 ArrayBuffer 视图（Float32Array 等）。
+  const isVec = v => Array.isArray(v) || (ArrayBuffer.isView(v) && !(v instanceof DataView));
+  if (!isVec(a) || !isVec(b) || a.length !== b.length || !a.length) return 0;
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
   return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);

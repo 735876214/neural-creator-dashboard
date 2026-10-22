@@ -31,6 +31,8 @@ const freePort = () => new Promise((ok, fail) => {
 
 let child;
 let authChild;
+let aiChild;
+let gemChild;
 let logs = '';
 let passed = 0;
 const ok = msg => { passed++; console.log('  ✓ ' + msg); };
@@ -985,6 +987,271 @@ try {
   assert.equal((await ajson('/api/data')).status, 401, '既没有 token 也没有 Cookie 时仍要 401');
   ok('API_TOKEN 放行 Bearer 请求，且不削弱 Cookie 鉴权');
 
+
+  // ───────────────────────── AI 链路（本地假网关，不联网） ─────────────────────────
+  // 线上踩过的问题都不是「模型答得不好」，而是形状/异常处理：回复是散文 → 全局 500；
+  // 键名被翻成中文 → 接口 200 但结果为空；embedding 不存在 → 用户看不懂报错；
+  // 日报综述写成空段落。这些只有用假网关把「坏回复」固定住才能回归。
+  const mockPort = await freePort();
+  const seen = {ideasFirst: 0, models: 0, gemini: null};
+  const mockReply = body => {
+    const msgs = body.messages || [];
+    const last = String(msgs[msgs.length - 1]?.content || '');
+    const all = msgs.map(m => String(m.content || '')).join('\n');
+    // 1) 综述（纯文本请求）：故意带 Markdown 标题行，检验 cleanDigest
+    if (last.includes('写成一段综述')) return '## 本期 AI 动态综述\n\n**MOCK 综述**：智能体产品密集发布。';
+    // 2) 主题分组（Markdown 请求）
+    if (last.includes('## 主题名')) return '## 智能体产品\n- 假条目一\n## 模型发布\n- 假条目二';
+    // 3) 选题：第一次故意回散文（触发 JSON 修复），修复时回英文键 JSON
+    if (all.includes('挖 3 个值得写的选题') || all.includes('从热点里挑 3 个')) {
+      const repairing = msgs.some(m => m.role === 'assistant');
+      if (!repairing) return '好的，我给你三个选题：一、卡片系统；二、复盘；三、标签。';
+      return JSON.stringify({ideas: [
+        {title: 'MOCK 选题一', platform: '小红书', priority: '高', note: '理由一', sourceTitles: ['假条目一']},
+        {title: 'MOCK 选题二', platform: 'B站', priority: '中', note: '理由二', sourceTitles: []},
+        {title: 'MOCK 选题三', platform: '公众号', priority: '低', note: '理由三', sourceTitles: []}
+      ]});
+    }
+    // 4) 笔记打标签：故意用中文键名，检验 pickKey 兜底
+    if (all.includes('话题标签')) return JSON.stringify({标签: ['MOCK标签', '#假话题'], 摘要: 'MOCK 摘要一句话。'});
+    // 5) 网页分析
+    if (all.includes('分析这个网页')) return JSON.stringify({summary: 'MOCK 网页摘要', keyPoints: ['要点一'], tags: ['MOCK网页'], title: 'MOCK 标题'});
+    // 6) 问答
+    return 'MOCK 回答：先清空收件箱，再写复盘。';
+  };
+  const mock = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const raw = Buffer.concat(chunks).toString('utf8');
+    if (req.url === '/feed.xml') {
+      res.writeHead(200, {'content-type': 'application/rss+xml'});
+      return res.end(`<?xml version="1.0"?><rss version="2.0"><channel><title>mock</title>`
+        + `<item><title>假条目一</title><link>https://example.com/a</link><guid>a</guid><description>d1</description></item>`
+        + `<item><title>假条目二</title><link>https://example.com/b</link><guid>b</guid><description>d2</description></item>`
+        + `</channel></rss>`);
+    }
+    if (req.url === '/v1/models') {
+      seen.models++;
+      res.writeHead(200, {'content-type': 'application/json'});
+      return res.end(JSON.stringify({data: [{id: 'mock-chat'}, {id: 'mock-slow'}, {id: 'cn:其它模型'}]}));
+    }
+    // Gemini 的 embedding 接口（batchEmbedContents）：形状与 OpenAI 完全不同，
+    // 这里把收到的请求记下来，用例才能断言「客户端真的按 Gemini 格式发的」。
+    if (String(req.url).includes(':batchEmbedContents')) {
+      let body = {};
+      try { body = JSON.parse(raw); } catch {}
+      const first = body.requests?.[0] || {};
+      seen.gemini = {
+        key: req.headers['x-goog-api-key'] || '',
+        n: (body.requests || []).length,
+        model: first.model || '',
+        taskType: first.taskType || '',
+        parts: first.content?.parts?.[0]?.text || ''
+      };
+      const vec = new Array(8).fill(0.3536); // 8 维单位向量：任意两条都相似，保证 relate 有边
+      res.writeHead(200, {'content-type': 'application/json'});
+      return res.end(JSON.stringify({embeddings: (body.requests || []).map(() => ({values: vec}))}));
+    }
+    if (req.url === '/v1/embeddings') {  // 这个网关没有 embedding，和现场一致
+      res.writeHead(404, {'content-type': 'text/plain'});
+      return res.end('404 page not found');
+    }
+    if (req.url === '/v1/chat/completions') {
+      let body = {};
+      try { body = JSON.parse(raw); } catch {}
+      // 慢模型：取消用例要证明「abort 掉的是正在等的这次调用」，所以必须真有一个卡 3 秒的回复
+      if (body.model === 'mock-slow') await new Promise(r => setTimeout(r, 3000));
+      if (res.writableEnded || res.destroyed) return; // 客户端已经 abort
+      res.writeHead(200, {'content-type': 'application/json'});
+      return res.end(JSON.stringify({choices: [{message: {content: mockReply(body)}}]}));
+    }
+    res.writeHead(404, {'content-type': 'text/plain'});
+    res.end('404 page not found');
+  });
+  await new Promise(r => mock.listen(mockPort, '127.0.0.1', r));
+  const aiBase = `http://127.0.0.1:${await freePort()}`;
+  // 服务启动即建索引，vault 必须在 spawn 之前就存在（假网关用自己的副本，不污染上面的用例）
+  const aiVault = join(tmp, 'ai-vault');
+  cpSync(vault, aiVault, {recursive: true, force: true});
+  aiChild = spawn(process.execPath, [join(ROOT, 'server/index.mjs')], {
+    env: {
+      ...process.env,
+      VAULT_DIR: join(tmp, 'ai-vault'),
+      DATA_DIR: join(tmp, 'ai-data'),
+      PORT: String(new URL(aiBase).port),
+      HOST: '127.0.0.1',
+      VAULT_GIT: '0',
+      NEWS_CRON: '0',
+      PLATFORM_SYNC_CRON: '0',
+      DASHBOARD_PASSWORD: '',
+      AUTH_FILE: '',
+      API_TOKEN: '',
+      AI_BASE_URL: `http://127.0.0.1:${mockPort}/v1`,
+      AI_API_KEY: 'mock-key',
+      AI_MODEL: 'mock-chat',
+      EMBED_BASE_URL: `http://127.0.0.1:${mockPort}/v1`,
+      EMBED_MODEL: 'mock-embed',
+      NEWS_SOURCE: `http://127.0.0.1:${mockPort}/feed.xml`,
+      NEWS_HOUR: '0'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  aiChild.stdout.on('data', d => { logs += d; });
+  aiChild.stderr.on('data', d => { logs += d; });
+  await waitReady(aiBase);
+  // Gemini 协议的第四个实例：同一套 chat 假网关，embedding 换成 Gemini 格式（默认端口另开）。
+  const gemBase = `http://127.0.0.1:${await freePort()}`;
+  const gemVault = join(tmp, 'gem-vault');
+  cpSync(vault, gemVault, {recursive: true, force: true});
+  gemChild = spawn(process.execPath, [join(ROOT, 'server/index.mjs')], {
+    env: {
+      ...process.env,
+      VAULT_DIR: gemVault,
+      DATA_DIR: join(tmp, 'gem-data'),
+      PORT: String(new URL(gemBase).port),
+      HOST: '127.0.0.1',
+      VAULT_GIT: '0',
+      NEWS_CRON: '0',
+      PLATFORM_SYNC_CRON: '0',
+      DASHBOARD_PASSWORD: '',
+      AUTH_FILE: '',
+      API_TOKEN: '',
+      AI_BASE_URL: `http://127.0.0.1:${mockPort}/v1`,
+      AI_API_KEY: 'mock-key',
+      AI_MODEL: 'mock-chat',
+      // 只给 Gemini 的凭据：embedEnabled 必须认 EMBED_API_KEY，不能悄悄借 chat 的 key
+      EMBED_PROTOCOL: 'gemini',
+      EMBED_BASE_URL: `http://127.0.0.1:${mockPort}/v1beta`,
+      EMBED_API_KEY: 'mock-gem-key',
+      EMBED_MODEL: 'gemini-embedding-001'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  gemChild.stdout.on('data', d => { logs += d; });
+  gemChild.stderr.on('data', d => { logs += d; });
+  await waitReady(gemBase);
+  const gjson = async (path, init) => {
+    const res = await fetch(gemBase + path, init);
+    return {status: res.status, body: await res.json().catch(() => null)};
+  };
+  const gpost = (path, data) => gjson(path, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(data || {})});
+  const gwaitJob = async id => {
+    for (let i = 0; i < 100; i++) {
+      const r = await gjson('/api/ai/jobs/' + id);
+      if (r.body?.status && r.body.status !== 'running') return r.body;
+      await new Promise(r2 => setTimeout(r2, 100));
+    }
+    return {status: 'timeout'};
+  };
+
+  const ajson2 = async (path, init) => {
+    const res = await fetch(aiBase + path, init);
+    const body = await res.json().catch(() => null);
+    return {status: res.status, body};
+  };
+  const apost = (path, data) => ajson2(path, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(data || {})});
+  const waitJob = async id => {
+    for (let i = 0; i < 100; i++) {
+      const r = await ajson2('/api/ai/jobs/' + id);
+      if (r.body?.status && r.body.status !== 'running') return r.body;
+      await new Promise(r2 => setTimeout(r2, 100));
+    }
+    return {status: 'timeout'};
+  };
+
+  const aiInfo = await ajson2('/api/ai/info');
+  assert.equal(aiInfo.status, 200);
+  assert.equal(aiInfo.body.enabled, true, '配置了 AI_API_KEY 就应视为可用');
+  const aiModels = await ajson2('/api/ai/models');
+  assert.equal(aiModels.status, 200);
+  assert.ok(aiModels.body.models.some(m => m.id === 'mock-chat'), '模型列表应来自网关 /models');
+  ok('GET /api/ai/info|models 反映网关配置');
+
+  const aiNote = '05-方法库/01-流程/每周整理流程.md';
+  const aiRange = await apost('/api/ai/analyze', {paths: [aiNote]});
+  assert.equal(aiRange.status, 202);
+  const aiJob = await waitJob(aiRange.body.job.id);
+  assert.equal(aiJob.status, 'done', '分析任务应完成：' + JSON.stringify(aiJob.error || ''));
+  assert.equal(aiJob.result[0].written, true, '应写回笔记：' + JSON.stringify(aiJob.result[0].error || ''));
+  const aiFile = readFileSync(join(aiVault, aiNote), 'utf8');
+  assert.match(aiFile, /MOCK标签/, '中文键名的 tags 也要落到 frontmatter');
+  assert.match(aiFile, /MOCK 摘要一句话/, '中文键名的 summary 也要写回');
+  ok('POST /api/ai/analyze：散文不致命、中文键名也能落盘（pickKey 兜底）');
+
+  const aiIdeas = await apost('/api/ai/ideas', {paths: [aiNote]});
+  assert.equal(aiIdeas.status, 200);
+  assert.equal(aiIdeas.body.candidates.length, 3, '散文回复后应经 JSON 修复拿到 3 条候选');
+  assert.equal(aiIdeas.body.candidates[0].title, 'MOCK 选题一');
+  ok('POST /api/ai/ideas：散文 → JSON 修复链路可用，不再 500');
+
+  const aiAsk = await apost('/api/ai/ask', {question: '每周整理流程做了什么？'});
+  assert.equal(aiAsk.status, 200);
+  assert.match(aiAsk.body.answer, /MOCK 回答/);
+  ok('POST /api/ai/ask 返回回答');
+
+  // 取消：慢网关上一个任务能耗几分钟，而且期间所有 AI / 日报 / 平台同步都是 409。
+  // 没有取消入口时用户只能等超时或重启容器，所以这条路径必须有回归。
+  const slowT0 = Date.now();
+  const slowJob = await apost('/api/ai/analyze', {paths: ['05-方法库/02-模板/卡片模板.md'], model: 'mock-slow'});
+  assert.equal(slowJob.status, 202, '用 mock-slow 开任务：' + JSON.stringify(slowJob.body || {}));
+  await new Promise(r => setTimeout(r, 300)); // 让第一张卡片真的发出去
+  const cancelRes = await apost('/api/ai/jobs/' + slowJob.body.job.id + '/cancel');
+  assert.equal(cancelRes.status, 200, '取消接口应可用：' + JSON.stringify(cancelRes.body || {}));
+  assert.equal(cancelRes.body.ok, true);
+  const cancelled = await waitJob(slowJob.body.job.id);
+  assert.equal(cancelled.status, 'error', '取消后任务应收成 error：' + JSON.stringify(cancelled));
+  assert.match(String(cancelled.error), /任务已取消/);
+  assert.ok(Date.now() - slowT0 < 2500, '取消应立刻中断模型请求，不该等满假网关的 3s');
+  assert.equal((await apost('/api/ai/jobs/' + slowJob.body.job.id + '/cancel')).body.ok, false, '已结束的任务取消应返回 ok:false');
+  assert.equal((await apost('/api/ai/jobs/nope/cancel')).status, 404, '未知任务应 404');
+  ok('POST /api/ai/jobs/:id/cancel 能打断正在等的模型调用');
+
+  // threshold 只认真数字：Number(null) / Number('') / Number(false) 都是 0，
+  // 阈值 0 时每一对节点都满足 sim >= 0，400 条垃圾边会覆盖掉正确的边。
+  for (const bad of [null, '', false, 0]) {
+    const r = await apost('/api/ai/relate', {threshold: bad});
+    assert.equal(r.status, 400, `threshold=${JSON.stringify(bad)} 应拒绝`);
+  }
+  ok('relate 的 threshold 拒收 null / 空串 / false / 0（Number 强转陷阱）');
+
+  const aiRelate = await apost('/api/ai/relate', {});
+  assert.equal(aiRelate.status, 202, 'relate 是后台任务');
+  const relateJob = await waitJob(aiRelate.body.job.id);
+  assert.equal(relateJob.status, 'error');
+  assert.match(relateJob.error, /\/embeddings/, '缺少 embedding 时要给出可操作的报错');
+  ok('embedding 不存在时 relate 的报错指向 /embeddings');
+
+  const aiNews = await apost('/api/news/refresh', {force: true});
+  assert.equal(aiNews.status, 200, '日报应生成：' + JSON.stringify(aiNews.body));
+  assert.ok(String(aiNews.body.digest).length > 5, '综述不能是空的');
+  assert.ok(aiNews.body.topics >= 1, 'Markdown 主题分组应被解析出来');
+  const newsFile = readFileSync(join(aiVault, '00-AI热点', aiNews.body.date + '.md'), 'utf8');
+  assert.match(newsFile, /MOCK 综述/);
+  assert.doesNotMatch(newsFile, /^#{1,6}\s*本期/m, '综述里的 Markdown 标题应被清掉');
+  ok('POST /api/news/refresh：综述非空、主题分组落到日报，Markdown 包装被清理');
+
+  // ── Gemini embedding 协议 ──
+  // 客户端的形状错不会报错，只会「静默拿到 0 条向量」，所以这里断请求本身。
+  const gemInfo = await gjson('/api/ai/info');
+  assert.equal(gemInfo.body.embed.enabled, true, 'Gemini 有 EMBED_API_KEY + EMBED_MODEL 就该可用');
+  assert.equal(gemInfo.body.embed.protocol, 'gemini');
+  const gemRelate = await gpost('/api/ai/relate', {threshold: 0.9});
+  assert.equal(gemRelate.status, 202, 'Gemini 协议下 relate 应能开任务：' + JSON.stringify(gemRelate.body || {}));
+  const gemJob = await gwaitJob(gemRelate.body.job.id);
+  assert.equal(gemJob.status, 'done', 'Gemini relate 应完成：' + JSON.stringify(gemJob.error || ''));
+  assert.ok((gemJob.result?.edges?.length || 0) > 0, '固定向量应产出语义边（cosine 必须认 Float32Array）：' + JSON.stringify(gemJob.result || {}).slice(0, 200));
+  assert.equal(seen.gemini.key, 'mock-gem-key', 'Gemini 的 key 走 x-goog-api-key 头');
+  assert.equal(seen.gemini.model, 'models/gemini-embedding-001', 'model 要用 models/ 前缀的全名');
+  assert.equal(seen.gemini.taskType, 'RETRIEVAL_DOCUMENT', '文档入库用 RETRIEVAL_DOCUMENT');
+  assert.ok(seen.gemini.n > 0 && String(seen.gemini.parts).length > 0, '每条请求要带 content.parts[0].text');
+  // 问答的查询向量必须换 taskType：Gemini 的文档/查询是两个向量空间，混用会明显掉召回
+  const gemAsk = await gpost('/api/ai/ask', {question: '每周整理流程做了什么？'});
+  assert.equal(gemAsk.status, 200, 'Gemini 配置下问答应可用：' + JSON.stringify(gemAsk.body || {}));
+  assert.equal(seen.gemini.taskType, 'RETRIEVAL_QUERY', '检索查询用 RETRIEVAL_QUERY');
+  ok('Gemini embedding：batchEmbedContents 形状、taskType 与 key 头都对，relate/ask 打通');
+
+  mock.close();
+
   console.log(`\n全部通过（${passed} 项）。`);
 } catch (e) {
   console.error('\n未通过：', e.message);
@@ -993,8 +1260,11 @@ try {
 } finally {
   child?.kill();
   authChild?.kill();
+  aiChild?.kill();
+  gemChild?.kill();
+  try { mock?.close(); } catch { /* 已关闭 */ }
   // Windows 上 index.sqlite 可能还被服务进程占着：等它退出再清理。
-  await Promise.all([child, authChild].filter(Boolean).map(c => new Promise(res => {
+  await Promise.all([child, authChild, aiChild, gemChild].filter(Boolean).map(c => new Promise(res => {
     if (c.exitCode != null) return res();
     c.once('exit', res);
     setTimeout(res, 3000);

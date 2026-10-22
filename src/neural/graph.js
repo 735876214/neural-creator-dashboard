@@ -328,6 +328,9 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
     const A = idx.get(l.a), B = idx.get(l.b);
     if (l.kind === 'contain') continue;
     A.deg++; B.deg++;
+    // 语义边是无向的（link() 只按 a<b 单向传一次），l.s/l.t 是拼装时按 ab 猜出来的方向：
+    // 拿它去累加「出链 / 反链」等于给无向关系编方向，节点统计和筛选都会错。
+    if (l.kind === 'semantic') continue;
     if (l.both) { A.mutual++; B.mutual++; A.out++; B.out++; A.in++; B.in++; }
     else { idx.get(l.s).out++; idx.get(l.t).in++; }
   }
@@ -343,7 +346,11 @@ export function buildGraph({ideas = [], drafts = []} = {}) {
 // 同一对内容之间可能同时有多种连接（如互相双链 + 双向共振），每个对象只保留一条：双向优先，其次权重高的。
 export function neighbors(graph, id) {
   const best = new Map();
-  const rank = x => (x.dir === 'mutual' ? 100 : 0) + x.link.w;
+  // 各 kind 的 w 量纲不同：双链/来源/话题是 1，共振是共享概念数，语义边是 sim*10（1–10）。
+  // 直接用 w 横向比较，每条语义边都会压过真正的双链，分析栏把「语义相关」排在「双向链接」前面，
+  // 用户点开一篇作品先看到的是一堆弱相似，而不是它真正的上下游。先按 kind 分层，再比 w。
+  const KIND_RANK = {wiki: 5, source: 5, tag: 4, publish: 4, news: 3, bridge: 3, mention: 3, resonance: 2, semantic: 1};
+  const rank = x => (x.dir === 'mutual' ? 10000 : 0) + (KIND_RANK[x.link.kind] || 0) * 100 + Math.min(99, x.link.w || 0);
   for (const l of graph.links) {
     if ((l.a !== id && l.b !== id) || l.kind === 'contain') continue;
     const other = l.a === id ? l.b : l.a;

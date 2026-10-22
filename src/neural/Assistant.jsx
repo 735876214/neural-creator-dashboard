@@ -51,12 +51,19 @@ export function Assistant({graph, readOnly, showToast, defaultCategory = '制度
         try {
           // 带上用户在分析栏里选的模型：不传则服务端回落到 AI_MODEL / 设置里的全局模型，
           // 同一屏两个 AI 入口会用不同模型回答（分析栏选了模型而助手里没生效）。
-          const res = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question, model: pickedModel() || undefined})});
-          const j = await res.json();
+          // 服务端 60s 超时 + 2 次重试：前端上限要比它宽，否则前端先断、用户以为 AI 挂了。
+          const res = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question, model: pickedModel() || undefined}),
+            signal: AbortSignal.timeout(210000)});
+          const j = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
           setThread(t => [...t, {role: 'a', text: j.answer || '（空）', refs: j.refs || []}]);
         } catch (err) {
-          setThread(t => [...t, {role: 'a', text: 'AI 暂时不可用，下面是本地检索结果。', local: safeAsk(question)}]);
+          // 把服务端翻好的原因（key 失效 / 429 / 模型不存在 / 超时）带进界面，
+          // 否则「AI 暂时不可用」会让人去重配 key，而真正原因可能是网关超时。
+          const t = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+          setThread(t => [...t, {role: 'a',
+            text: t ? 'AI 响应超时（超过 3 分钟），下面是本地检索结果。' : `AI 暂时不可用（${err?.message || '未知原因'}），下面是本地检索结果。`,
+            local: safeAsk(question)}]);
         }
       } else {
         setThread(t => [...t, {role: 'a', text: '未连接 AI（需要部署模式并配置 AI_API_KEY），这是本地规则检索结果。', local: safeAsk(question)}]);

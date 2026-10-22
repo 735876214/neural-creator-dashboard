@@ -173,7 +173,7 @@ docker compose logs note-api
 |---|---|---|
 | `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL` | 打标签 + 摘要、选题生成、问答、热点日报 | 默认 DeepSeek；通义 / Kimi / 硅基流动 / 自建 OpenAI 兼容网关都行 |
 | `AI_MODEL_ASK` / `AI_MODEL_ANALYZE` / `AI_MODEL_IDEAS` / `AI_MODEL_NEWS` | 各任务的默认模型 | 缺省回落 `AI_MODEL`；前端对话框里也可随时手动切换（选择写在 NAS 的 `vault/.dashboard/settings.json`） |
-| `EMBED_*` | 语义关联、向量检索 | 两种方案见 `.env.example`：Cloudflare Workers AI（每天免费 10,000 Neurons）或 OpenAI 兼容接口 |
+| `EMBED_*` | 语义关联、向量检索 | 三种方案见 `.env.example`：Cloudflare Workers AI（每天免费 10,000 Neurons）、OpenAI 兼容接口、Google Gemini（`EMBED_PROTOCOL=gemini`，注意地区限制） |
 
 配置后重启 `note-api`，每篇方法笔记的分析栏会出现「AI 分析」区块：
 
@@ -220,4 +220,5 @@ docker compose logs note-api
 | 作品库是空的 | 还没有作品笔记——正常现象；或目录名不含「作品 / works」，用导入脚本时 `--works` 指定 |
 | AI 区块不出现 | 服务端没配 `AI_API_KEY`，或配完没重启 note-api |
 | 语义关联按钮报「embedding 未启用」 | 只配了 DeepSeek（它没有 embedding 接口），补配 `EMBED_*` 三项 |
+| Gemini 报 `User location is not supported` / `project denied access` | key 有效但出口 IP 所在地区不被 Google 支持（NAS 直连通常超时，机房代理常被拒）：换到受支持地区的节点，或改用硅基流动等 OpenAI 兼容方案 |
 | 星座 / 星核不动了 | 浏览器开了「减少动态效果」；这是无障碍特性，不是故障 |

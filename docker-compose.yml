@@ -69,6 +69,12 @@ services:
       AI_MODEL_ANALYZE: ${AI_MODEL_ANALYZE:-}
       AI_MODEL_IDEAS: ${AI_MODEL_IDEAS:-}
       AI_MODEL_NEWS: ${AI_MODEL_NEWS:-}
+      # 网页剪藏分析单独用模型（读长文，和打标签的性价比取向不同）
+      AI_MODEL_WEB: ${AI_MODEL_WEB:-}
+      # 一次「分析全部」最多几篇（默认 20）：几百篇的库点一次就是几百次模型调用
+      AI_MAX_ITEMS: ${AI_MAX_ITEMS:-20}
+      # 仅 AI_PROTOCOL=anthropic 时用：Anthropic 兼容网关要求的版本头
+      ANTHROPIC_VERSION: ${ANTHROPIC_VERSION:-2023-06-01}
       # —— 网页剪藏（个人知识库）——
       WEB_FETCH_TIMEOUT: ${WEB_FETCH_TIMEOUT:-20000}
       WEB_FETCH_MAX_BYTES: ${WEB_FETCH_MAX_BYTES:-2097152}
@@ -99,6 +105,13 @@ services:
       EMBED_BASE_URL: ${EMBED_BASE_URL:-}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
       EMBED_MODEL: ${EMBED_MODEL:-}
+      EMBED_DIM: ${EMBED_DIM:-}
+      # —— 出网代理（可选）——
+      # Gemini 等境外 embedding 服务在部分网络下必须走代理。注意 Node 24 之外不会自动读代理变量，
+      # 所以同时给了 NODE_USE_ENV_PROXY=1；不配代理时这三项留空即可（行为不变）。
+      NODE_USE_ENV_PROXY: ${NODE_USE_ENV_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
       CF_ACCOUNT_ID: ${CF_ACCOUNT_ID:-}
     volumes:
       # VAULT_DIR：笔记库目录。默认 = compose 目录下的 notes-vault/；

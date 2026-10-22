@@ -11,7 +11,7 @@
 import {writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, rmSync, copyFileSync, openSync, fsyncSync, closeSync} from 'node:fs';
 import {dirname, basename, join} from 'node:path';
 import {writeDoc} from './frontmatter.mjs';
-import {chat, TASK_MODELS, aiEnabled} from './ai.mjs';
+import {chat, TASK_MODELS, aiEnabled, pickKey, pickList, longestStr, firstStrList, topicEntries} from './ai.mjs';
 const NEWS_SOURCE = process.env.NEWS_SOURCE || 'https://aihot.news/feed/all.xml';
 // NEWS_HOUR='08:00' / 'abc' 时 Number() 得到 NaN，`hours < NaN` 恒假 ⇒ 启动即生成日报（与「等到 8 点」相反）。
 const parsedHour = Number(process.env.NEWS_HOUR);
@@ -106,28 +106,107 @@ export async function fetchAiNews(source = NEWS_SOURCE) {
 }
 
 // —— AI 汇总：一段日报 + 主题分组。每条带原文链接（按标题匹配回 RSS 条目）。 ——
+// 只把字符串数组当列表用：模型有时把 titles 给成单个字符串或对象
+const asStrList = v => (Array.isArray(v) ? v.map(String) : typeof v === 'string' && v.trim() ? [v] : []);
+
 export async function digestNews(items, {model} = {}) {
   if (!aiEnabled()) throw newsError(501, 'AI 未启用：热点日报需要 AI 汇总');
   const list = items.map((it, i) => `${i + 1}. ${it.title}${it.summary ? '｜' + it.summary.slice(0, 80) : ''}`).join('\n');
-  const out = await chat([
-    {role: 'system', content: '你是 AI 行业动态的编辑。只输出被要求的内容。输出 JSON：{"digest":"200字以内的当日 AI 动态综述","topics":[{"name":"主题名","titles":["属于该主题的条目原文标题"]}]}'},
-    {role: 'user', content: `把这些 AI 动态整理成日报：写一段综述（突出最重要的一两件事），再把条目归到 3-6 个主题里（每条只归一个主题，标题用原文）：\n\n${list.slice(0, 7000)}`}
-  ], {json: true, model: model || TASK_MODELS.news, temperature: 0.2, maxTokens: 6000});
-  // 标题 → 原条目的链接；AI 抄标题可能抄得不完全一致，用「包含」匹配兜底
-  const byTitle = items.map(it => ({t: it.title, link: it.link}));
+  const useModel = model || TASK_MODELS.news;
+
+  // 综述单独一次「纯文本」请求：JSON + 多字段的提示词下，模型经常把键名换成中文或
+  // 干脆只给主题分组（实测 glm-5.3-flash 同一提示词三种输出），结果日报写成空综述。
+  // 纯文本没有键名可漂移，服从度最高；主题分组再单独要 JSON，失败也只损失分组。
+  const rawDigest = await chat([
+    {role: 'system', content: '你是 AI 行业动态的编辑。只输出一段中文综述正文，150-220 字，不要标题、不要列表、不要 JSON、不要任何前缀说明。'},
+    {role: 'user', content: `把这些 AI 动态写成一段综述，突出最重要的一两件事：\n\n${list.slice(0, 7000)}`}
+  ], {model: useModel, temperature: 0.2, maxTokens: 1200});
+  const digest = cleanDigest(rawDigest);
+  if (!digest) throw newsError(502, 'AI 返回的综述是空的，稍后重试或换模型');
+
+  // 主题分组：模型天然爱输出 Markdown（实测让它给 JSON 也照样回「## 主题一：…」），
+  // 那就顺着它的强项要 Markdown，再用行首符号解析——不经过 JSON，就没有键名漂移和修复调用。
+  let topics = [];
+  try {
+    const gtext = await chat([
+      {role: 'system', content: '你是 AI 行业动态的编辑。只输出被要求的内容，不要解释、不要前言。'},
+      {role: 'user', content: `把这些 AI 动态归到 3-6 个主题里，严格按下面格式输出 Markdown，每条只归一个主题，标题逐字照抄：\n\n## 主题名\n- 条目原文标题\n\n动态：\n${list.slice(0, 7000)}`}
+    ], {model: useModel, temperature: 0.2, maxTokens: 2000});
+    topics = withLinks(parseTopicsMd(gtext), items);
+    if (!topics.length) {
+      // 万一它还是回了 JSON，再兜一次
+      try { topics = withLinks(collectTopics(JSON.parse(gtext), items), items); } catch {}
+    }
+  } catch (e) {
+    console.error('[news] 主题分组生成失败（综述已生成，日报照写）：', e.message);
+  }
+  return {digest: digest.slice(0, 400), topics};
+}
+
+// 模型会在正文前后加「## 本期 AI 动态综述」「好的，以下是…」这类包装：去掉标题行与加粗，
+// 拼成一段，再在句末收尾（截断到半句会让综述看起来像坏数据）。
+function cleanDigest(text) {
+  const lines = String(text || '').replace(/```[a-z]*/gi, '').split(/\r?\n/).map(l => l.trim())
+    .filter(l => l && !/^#{1,6}\s/.test(l))
+    .map(l => l.replace(/^综述[:：]\s*/u, '').replace(/^[-*•]\s*/, '').replace(/\*\*(.+?)\*\*/g, '$1'));
+  let s2 = lines.join(' ').replace(/^(?:好的|当然|以下是)[^。]{0,24}[，,。]?\s*/u, '').trim();
+  if (s2.length > 400) {
+    const cut = s2.slice(0, 400);
+    const stop = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'));
+    s2 = stop > 120 ? cut.slice(0, stop + 1) : cut + '…';
+  }
+  return s2;
+}
+
+// 解析「## 主题名 / - 标题」这种 Markdown 分组（也容忍「1. 标题」「* 标题」与编号前缀）
+function parseTopicsMd(text) {
+  const out = [];
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    const head = line.match(/^#{1,6}\s*(.+)$/);
+    if (head) { out.push({name: head[1].replace(/^主题[一二三四五六七八九十\d]*[:：]?\s*/, '').trim(), titles: []}); continue; }
+    const item = line.match(/^(?:[-*•]|\d+[.)、])\s*(.+)$/);
+    if (item && out.length) out[out.length - 1].titles.push(item[1].replace(/^\[(.*?)\]\(.*\)$/, '$1').trim());
+  }
+  return out.filter(t => t.name && t.titles.length);
+}
+
+// 给主题里的标题配上原文链接
+function withLinks(list, items) {
+  const byTitle = (items || []).map(it => ({t: it.title, link: it.link || ''}));
   const linkOf = title => {
-    // AI 会漏抄标题：空串时 `title.includes(x.t)` 恒真，会把第一条的链接错配给所有空标题。
     if (!title) return '';
     const hit = byTitle.find(x => x.t === title) || byTitle.find(x => x.t.includes(title) || title.includes(x.t));
     return hit?.link || '';
   };
-  return {
-    digest: String(out.digest || '').slice(0, 400),
-    topics: (out.topics || []).slice(0, 8).map(t => ({
-      name: String(t.name || '').slice(0, 40),
-      titles: (t.titles || []).map(String).slice(0, 12)
-    })).filter(t => t.name && t.titles.length).map(t => ({...t, links: t.titles.map(linkOf)}))
+  return list.map(t => ({...t, links: t.titles.map(linkOf)}));
+}
+
+// 主题分组解析：键名（topics / 主题 / 主题分组 / 分类）、值形态（数组 / {主题名:[标题]} 对象映射）
+// 都可能变，逐个试，再全局扫一遍；标题只保留能在原始条目里对上的（对上才能配链接）。
+function collectTopics(out, items) {
+  const byTitle = items.map(it => ({t: it.title, link: it.link || ''}));
+  const linkOf = title => {
+    if (!title) return '';
+    const hit = byTitle.find(x => x.t === title) || byTitle.find(x => x.t.includes(title) || title.includes(x.t));
+    return hit?.link || '';
   };
+  const groups = () => {
+    for (const k of ['topics', '主题', '主题分组', '分类', 'categories', '分组']) {
+      const v = pickKey(out, k);
+      if (v) { const t = topicEntries(v); if (t.length) return t; }
+    }
+    for (const v of Object.values(out || {})) { const t = topicEntries(v); if (t.length) return t; }
+    return [];
+  };
+  return groups().slice(0, 8).map(t => {
+    const titles = asArray(pickKey(t, 'titles', '标题', '条目', 'items', 'list')).map(String).map(x => x.trim());
+    const list = (titles.length ? titles : firstStrList(t)).filter(Boolean);
+    return {
+      name: String(pickKey(t, 'name', '主题名', '主题', 'title', '标题', 'group', 'category') || '').slice(0, 40),
+      titles: list.slice(0, 12)
+    };
+  }).filter(t => t.name && t.titles.length).map(t => ({...t, links: t.titles.map(linkOf)}));
 }
 
 // 日报的 .md 形态。每条带原文链接（有链接的用 markdown 链接，没有的退回纯文本）。
@@ -246,16 +325,27 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
     {role: 'system', content: '你是创作者的选题策划。只输出被要求的内容。输出 JSON：{"ideas":[{"title":"…","platform":"小红书","priority":"高|中|低","note":"选题理由：为什么现在写、和创作者已有内容的关联、切入角度（80字内）","newsTitles":["依据的热点标题"]}]}'},
     {role: 'user', content: `这是创作者已有的内容方向：\n${myWorks.slice(0, 20).join('\n').slice(0, 5000)}\n\n这是今天的 AI 热点：\n${items.slice(0, 6000)}\n\n从热点里挑 3 个最适合这个创作者写的选题：必须能和 ta 已有内容方向接上，不要纯蹭热点；每个选题注明依据了哪几条热点。`}
   ], {json: true, model: model || TASK_MODELS.news, temperature: 0.3, maxTokens: 6000});
-  const {linkOf} = digestNewsLinks(news.items);
-  const candidates = (out.ideas || []).slice(0, 5).map(i => ({
-    title: String(i.title || '').slice(0, 80),
-    platform: ['小红书', 'B站', '公众号', '抖音'].includes(i.platform) ? i.platform : '小红书',
-    priority: ['高', '中', '低'].includes(i.priority) ? i.priority : '中',
-    note: String(i.note || '').slice(0, 300),
-    sourceNews: news.date,
-    newsTitles: (i.newsTitles || []).map(String).slice(0, 3),
-    newsLinks: (i.newsTitles || []).map(linkOf).filter(Boolean)
-  })).filter(i => i.title);
+  // 标题 → 原文链接（AI 抄标题可能不完全一致，用「包含」兜底）
+  const byTitle = (news.items || []).map(it => ({t: it.title, link: it.link || ''}));
+  const linkOf = title => {
+    if (!title) return '';
+    const hit = byTitle.find(x => x.t === title) || byTitle.find(x => x.t.includes(title) || title.includes(x.t));
+    return hit?.link || '';
+  };
+  // 键名兜底同上：模型会回 {"选题":…} / {"topics":[{title,description}]}，只认 out.ideas 时
+  // 接口 200 但一条候选都没有（前端表现为「点了没反应」）。
+  const candidates = pickList(out, ['ideas', '选题', 'candidates', 'topics']).filter(i => i && typeof i === 'object').slice(0, 5).map(i => {
+    const newsTitles = asStrList(pickKey(i, 'newsTitles', '依据的热点', '热点标题', 'news', 'sources')).slice(0, 3);
+    return {
+      title: String(pickKey(i, 'title', '标题') || '').slice(0, 80),
+      platform: ['小红书', 'B站', '公众号', '抖音'].includes(pickKey(i, 'platform', '平台')) ? pickKey(i, 'platform', '平台') : '小红书',
+      priority: ['高', '中', '低'].includes(pickKey(i, 'priority', '优先级')) ? pickKey(i, 'priority', '优先级') : '中',
+      note: String(pickKey(i, 'note', '理由', '选题理由', 'description', 'angle', '切入点') || longestStr(i, ['title', '标题'])).slice(0, 300),
+      sourceNews: news.date,
+      newsTitles: newsTitles.length ? newsTitles : firstStrList(i).slice(0, 3),
+      newsLinks: newsTitles.map(linkOf).filter(Boolean)
+    };
+  }).filter(i => i.title);
   if (!auto || !candidates.length) return {candidates, written: []};
   // auto：直接落盘进 04-选题池（复用 createNote 的固定模板，文件名即标题）。
   // 幂等标记必须在落盘**之前**抢好：原来的顺序是全部写盘成功后才记 ideasAt，一旦中途失败
@@ -280,16 +370,6 @@ export async function ideasFromNews(index, vaultDir, {model, auto = false, io = 
 }
 
 // 从缓存条目里建「标题 → 链接」映射（与 digestNews 同一套包含匹配）
-function digestNewsLinks(items) {
-  const byTitle = (items || []).map(it => ({t: it.title, link: it.link || ''}));
-  const linkOf = title => {
-    if (!title) return ''; // 同上：空标题会匹配到第一条
-    const hit = byTitle.find(x => x.t === title) || byTitle.find(x => x.t.includes(title) || title.includes(x.t));
-    return hit?.link || '';
-  };
-  return {linkOf};
-}
-
 // 每小时整点附近检查一次；当天还没有日报且已过 NEWS_HOUR 就生成。
 export function startNewsCron(runOnce) {
   let running = false;

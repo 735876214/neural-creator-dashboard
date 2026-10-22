@@ -435,7 +435,7 @@ if (!/setFormTitle\(''\); setFormBody\(''\)/.test(r8PagesSrc)) {
 const r9AiSrc = readFileSync(join(ROOT, 'server/ai.mjs'), 'utf8');
 const r9AnalysisSrc = readFileSync(join(ROOT, 'src/neural/Analysis.jsx'), 'utf8');
 const r9DbSrc = readFileSync(join(ROOT, 'server/db.mjs'), 'utf8');
-if (!/\? \{enabled: true, model: EMBED_MODEL/.test(r9AiSrc)) {
+if (!/\? \{enabled: true, model: EMBED_MODEL, protocol: embedProtocol\(\)/.test(r9AiSrc)) {
   fail('aiInfo().embed 启用时没带 enabled:true：前端永远认为 embedding 没开，语义关联按钮不出现');
 } else if (!/if \(!job\?\.job\?\.id\) return \{msg:/.test(r9AnalysisSrc)) {
   fail('/api/ai/analyze 返回 200 无 job 时前端会 TypeError');

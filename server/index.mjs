@@ -25,7 +25,7 @@ import {readVault, vaultStamp, vaultStampCached, bumpVaultStamp, parse, ATTACHME
 import {writeDoc, hasKey, attachmentsOf} from './frontmatter.mjs';
 import {openIndex, hashOf, cosine} from './db.mjs';
 import {aiEnabled, embedEnabled, aiInfo, analyzeNote, analyzeWebPage, generateIdeas, answer, embed, listModels, validModel, taskModel, taskModelsSnapshot} from './ai.mjs';
-import {setAiRuntime} from './ai.mjs';
+import {setAiRuntime, beginJobCancel, endJobCancel, cancelJob, assertNotAborted} from './ai.mjs';
 import {fetchPage, htmlToText, htmlTitle, FetchError} from './webclip.mjs';
 import {parseUpload, ParseError} from './docparse.mjs';
 import {refreshNews, forceRefresh, startNewsCron, listNews, ideasFromNews} from './news.mjs';
@@ -147,8 +147,35 @@ class HttpError extends Error {
 }
 const fail = (code, message, extra) => { throw new HttpError(code, message, extra); };
 
+// AI 上游失败不要一律塌成 500「服务器内部错误」：ai.mjs 的 upstreamError() 早就把上游状态码
+// 翻成了用户能照着改的话（改 key / 换模型 / 稍后再试），但同步端点抛的是普通 Error，
+// 走到全局兜底就只剩一句「服务器内部错误」，用户不知道该动哪儿（实测：模型回散文导致
+// JSON 解析失败时，前端看到的正是这句 500）。
+function aiStatusFor(e) {
+  const m = String(e?.message || '');
+  if (/（401）|（403）|（404）|（400）|（422）/.test(m)) return 502; // 上游拒绝/不存在：不是本服务的错
+  if (/（429）/.test(m)) return 429;
+  if (/超时/.test(m)) return 504;
+  if (/没有返回合法 JSON|未启用|只返回了思考过程|条数不对|返回了空回复/.test(m)) return 502;
+  return 0;
+}
+const aiFail = e => {
+  const s = aiStatusFor(e);
+  if (s) throw new HttpError(s, String(e?.message || e));
+  throw e;
+};
+
 // 部署模式下静态资源与 /api 都由 note-api 直出（镜像里没有 nginx），所以压缩必须在这里做：
 // /api/data 在真实库上常是 1–3 MB 中文 JSON（压缩比 6–10×），手机上不压缩就是几秒白屏。
+// 标签合并的唯一口径：已有标签 + AI 标签（去重），但先给 AI 留位置再截断。
+// 「已有 ∪ AI 再截断」在标签多的条目上会把 AI 结果整批截掉：接口回 written:true，
+// 文件一个字没变，前端把这次算出来的标签当「已写入」显示。两条 AI 链路共用这一份。
+function mergedTags(existing, aiTags, cap = 20) {
+  const old = [...new Set((existing || []).map(t => String(t).trim()).filter(Boolean))];
+  const ai = [...new Set((aiTags || []).map(t => String(t).trim()).filter(Boolean))].filter(t => !old.includes(t));
+  return [...old.slice(0, Math.max(0, cap - ai.length)), ...ai].slice(0, cap);
+}
+
 function acceptsGzip(req) {
   return /\bgzip\b/.test(String(req?.headers?.['accept-encoding'] || ''));
 }
@@ -1615,25 +1642,36 @@ async function route(req, res, url) {
     ].filter(x => !paths?.length || paths.includes(x.rel));
     const cached = index.aiCache();
     const need = targets.filter(x => cached.get(x.id)?.hash !== hashOf(x.body));
-    if (dryRun) return json(res, 200, {total: targets.length, todo: need.length, skip: targets.length - need.length, dryRun: true, model: useModel});
+    // 单次上限：几百篇的库点一次「分析全部」就是几百次模型调用（几分钟、一大笔 token），
+    // 中途也没有地方停。默认 20 篇一批，剩下的下次再跑（hash 增量，已完成的会跳过）。
+    const maxItems = Math.max(1, Number(process.env.AI_MAX_ITEMS) || 20);
+    const batch = need.slice(0, maxItems);
+    if (dryRun) return json(res, 200, {total: targets.length, todo: need.length, skip: targets.length - need.length, batch: batch.length, dryRun: true, model: useModel});
     if (!targets.length) return json(res, 200, {total: 0, done: 0, message: '没有匹配到可分析的内容（方法笔记 / AI 热点 / 个人知识库 / 作品）'});
     if (!need.length) return json(res, 200, {total: targets.length, done: 0, message: '全部内容都分析过了'});
-    const job = runJob('analyze', need.length, async progress => {
+    const job = runJob('analyze', batch.length, async progress => {
       const results = [];
-      for (const n of need) {
-        const r = await analyzeNote(n.title, n.body, {model: useModel});
+      for (const n of batch) {
+        assertNotAborted(); // 用户点了取消就别再对下一篇发模型请求
+        // 单篇失败不能掀掉整批：这里没有 try 时，一次 429 / 超时 / 模型回散文（JSON 解析失败）
+        // 会直接抛出循环，被 runJob 收成 status:error，前面已写回的结果整个丢掉，
+        // 前端只能看到「失败」，不知道哪些成功了。fatal（key 失效 / 模型不存在）才立刻收手。
+        let r;
+        try {
+          r = await analyzeNote(n.title, n.body, {model: useModel});
+        } catch (e) {
+          if (e.fatal) throw e;
+          results.push({id: n.id, path: n.rel, title: n.title, tags: [], summary: '', written: false, error: String(e.message || e)});
+          progress();
+          continue;
+        }
         // 写回内容文件（笔记或作品）的 frontmatter：tags = 已有 ∪ AI 生成（去重，AI 的排后面），
         // summary = AI 生成。写前读原文拿 mtime 做乐观锁；冲突时跳过并在结果里标注。
         let writeErr = null;
         try {
           const cur = readFileSync(join(VAULT, n.rel), 'utf8');
           const curFm = parseFrontmatter(cur);
-          // 顺序有讲究：老代码是「已有 ∪ AI 再截断 12 个」，标签多的笔记（≥12 个已有）
-          // 会把 AI 结果整批截掉，接口回 written:true 但文件一个字没变。改成先给 AI 留位置。
-          const cap = 20;
-          const existing = [...new Set(curFm.tags || [])];
-          const ai = [...new Set(r.tags)].filter(t => !existing.includes(t));
-          const merged = [...existing.slice(0, Math.max(0, cap - ai.length)), ...ai].slice(0, cap);
+          const merged = mergedTags(curFm.tags, r.tags);
           // summary 空串在 frontmatter.render() 里表示「删除这个键」：模型没给摘要时不能把
           // 用户已有的 summary 抹掉（写回成功还会把这一篇标记成「已分析」，从此不再重跑）。
           const fmPatch = {tags: merged};
@@ -1658,8 +1696,11 @@ async function route(req, res, url) {
     const {threshold: rawThreshold = 0.82} = await readBody(req);
     // 阈值必须校验：传 "abc" / null / 字符串数字时 `sim >= threshold` 恒为 false（全 NaN 比较），
     // 任务照常跑完却一条边都不产出，前端只能看到「完成」，看不出是参数被吞了。
-    const threshold = Number(rawThreshold);
-    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) fail(400, 'threshold 必须是 0–1 之间的数字');
+    // 反向的坑更致命：Number(null) / Number('') / Number(false) / Number([]) 全是 0，
+    // 阈值 0 会让每一对节点都满足 sim >= 0，400 条垃圾边写进索引并把正确的边挤掉。
+    // 所以只认真正的数字，0 也不收（阈值 0 没有语义）。
+    const threshold = typeof rawThreshold === 'number' ? rawThreshold : Number.NaN;
+    if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) fail(400, 'threshold 必须是 0–1 之间的数字');
     const d = loadData(0);
     // 语义边覆盖全部内容（obsidian-independence P1）：方法笔记 / 日报 / 个人知识库 /
     // 作品 / 选题 / 草稿，id 前缀与前端图谱一致——跨星团的「灵感↔作品」「制度↔通报」都能连上。
@@ -1677,7 +1718,8 @@ async function route(req, res, url) {
       let batch = [];
       const flush = async () => {
         if (!batch.length) return;
-        const vecs = await embed(batch.map(b => b.text));
+        assertNotAborted();
+        const vecs = await embed(batch.map(b => b.text), {type: 'document'});
         batch.forEach((b, i) => { if (vecs[i]) index.putEmbedding(b.id, model, vecs[i], b.hash); progress(); });
         batch = [];
       };
@@ -1697,7 +1739,7 @@ async function route(req, res, url) {
         }
         // 两两余弦是纯 CPU 的同步循环：几百篇 = 几十万次点积全压在同一个 tick 里，
         // 期间所有 HTTP（含 /api/version 轮询与登录）都排队，前端看起来像卡死。
-        if (i % 100 === 99) await new Promise(r => setImmediate(r));
+        if (i % 100 === 99) { assertNotAborted(); await new Promise(r => setImmediate(r)); }
       }
       edges.sort((x, y) => y.sim - x.sim);
       return {edges: edges.slice(0, 400), threshold};
@@ -1714,7 +1756,10 @@ async function route(req, res, url) {
     const d = loadData(0);
     const notes = d.notes.filter(n => paths.includes(n.rel));
     if (!notes.length) fail(404, '选中的笔记不存在：/api/ai/ideas 只接受方法笔记 / AI 热点 / 个人知识库（作品请用「打标签 + 摘要」）');
-    const candidates = await generateIdeas(notes, {model: useModel});
+    // 上游失败（key 失效 / 模型回散文 / 限流）要回 502+人话，不能变成通用 500
+    let candidates;
+    try { candidates = await generateIdeas(notes, {model: useModel}); }
+    catch (e) { aiFail(e); }
     return json(res, 200, {candidates, model: useModel});
   }
 
@@ -1783,26 +1828,46 @@ async function route(req, res, url) {
       const fb = fallback.get(id);
       hits.set(id, {id, title: index.note(id)?.title || fb?.title || '', body: index.note(id)?.body || fb?.body || '', kw: true});
     }
-    // 向量召回（可用时）
+    // 向量召回（可用时）。两个坑：
+    // ① 先 slice(0, 6) 再过滤阈值：前 6 名混进低分/NaN 时，真正 ≥0.5 的命中被挤掉；
+    // ② 裸 catch 把 401 / 网关没有 /embeddings / 超时全吞掉，服务端零日志——看起来
+    //    「语义问答」正常，其实是静默降级成了纯关键词问答。
     if (embedEnabled()) {
       try {
         const model = process.env.EMBED_MODEL;
-        const [qv] = await embed([askQ]);
+        // 查询向量必须用 RETRIEVAL_QUERY（Gemini 的文档/查询是两个空间，混用会明显掉召回）
+        const [qv] = await embed([askQ], {type: 'query'});
         const scored = index.embeddings(model)
           .map(e => ({id: e.id, sim: cosine(qv, e.vec)}))
-          .sort((a, b) => b.sim - a.sim).slice(0, 6).filter(x => x.sim >= 0.5);
+          .filter(x => Number.isFinite(x.sim) && x.sim >= 0.5)
+          .sort((a, b) => b.sim - a.sim)
+          .slice(0, 6);
         for (const s of scored) {
           const n = index.note(s.id);
-          if (n) hits.set(s.id, {id: s.id, title: n.title, body: n.body, vec: true, sim: Math.round(s.sim * 100) / 100});
+          const sim = Math.round(s.sim * 100) / 100;
+          const had = hits.get(s.id);
+          if (!n) continue;
+          // 关键词也命中的话保留关键词给的正文（同一篇），只补一个相似度
+          if (had) had.sim = sim;
+          else hits.set(s.id, {id: s.id, title: n.title, body: n.body, vec: true, sim});
         }
-      } catch { /* 向量召回失败时靠关键词兜底 */ }
+      } catch (e) {
+        console.error('[note-api] 向量召回失败（本次只用关键词）：', e.message);
+      }
     }
-    const contexts = [...hits.values()].slice(0, 8);
+    // 关键词命中先写进 Map、最多 8 条；Map 对已存在的键 set 不改插入顺序，所以新进来的
+    // 语义命中永远排在第 9 位之后被 slice 掉 —— 显式把语义命中排前面。
+    const allHits = [...hits.values()];
+    const contexts = [...allHits.filter(c => c.vec), ...allHits.filter(c => !c.vec)].slice(0, 8);
     if (!contexts.length) return json(res, 200, {answer: '笔记库里没有找到相关内容。', refs: [], model: useModel});
-    const text = await answer(askQ, contexts, {model: useModel});
+    let out;
+    try { out = await answer(askQ, contexts, {model: useModel}); }
+    catch (e) { aiFail(e); }
     const byId = new Map([...d.works.map(w => ['post:' + w.post.id, w.rel]), ...d.notes.map(n => [noteNodeId(n), n.rel]), ...d.ideas.map(i => ['idea:' + i.id, i.rel]), ...d.drafts.map(x => ['draft:' + x.id, x.rel])]);
-    const refs = contexts.map(c => ({id: c.id, title: c.title, path: byId.get(c.id) || null}));
-    return json(res, 200, {answer: text, refs, model: useModel});
+    // refs 只列真正进了上下文的篇目：按 8000 字预算被切掉的那些，模型压根没看过，
+    // 列出来点开只能是「笔记里没有」——前端还会给不存在的节点画引用 chip。
+    const refs = (out.used || contexts).map(c => ({id: c.id, title: c.title, path: byId.get(c.id) || null}));
+    return json(res, 200, {answer: out.text, refs, model: useModel});
   }
 
   // —— 个人知识库（第七星座）：灵感 / 制度 / 推文剪藏 ——
@@ -1864,6 +1929,12 @@ async function route(req, res, url) {
     }
     let finalTitle = (page && htmlTitle(page.html)) || String(title || '').trim() || null;
     const text = page ? htmlToText(page.html) : String(note || '');
+    // 空壳页（纯 JS 渲染 / 反爬占位页）htmlToText 给的是空串：原来照样写一条只有来源行的
+    // 空笔记并回 201「已入库」，还会把空正文喂给 AI 让它凭空编摘要。上传链路有
+    // parseUpload 的「没解析出文本」拦截，剪藏这条漏了。
+    if (page && text.trim().length < 40) {
+      fail(400, `没能从网页提取到正文（${text.trim().length} 字）：可能需要 JS 渲染或触发了站点反爬，已取消入库`);
+    }
 
     // 标题三级来源：og/title 标签 → AI 从正文提炼 →（仍无则报错）。
     // 提炼这次调用本身就是一次完整分析，成功时直接复用：原来 probe 成功后还会为同一份
@@ -1941,9 +2012,13 @@ async function route(req, res, url) {
     // 静默写进别人家。这里用 rel 反查到的真实 id 复核一次，不一致就要求刷新。
     if (id && noteNodeId(n) !== String(id)) fail(409, `条目已变动（${id} 现在指向另一篇），请刷新后重试`, {path: rel});
     if (!aiEnabled()) return json(res, 501, {error: 'AI 未启用：服务端未配置 AI_API_KEY'});
+    if (clipAnalyzing.has(rel)) fail(409, '这篇正在分析中（可能是另一个标签页或上一次还没结束），稍等再试');
+    clipAnalyzing.add(rel);
+    try {
     let page;
     try { page = await clipTextOf(n); }
     catch (e) { fail(e instanceof FetchError ? 400 : 502, e.message); }
+    if (!String(page.text || '').trim()) fail(400, '这篇没有可读正文（快照为空或抓取没取到内容），先重新剪藏一次再分析');
     let analysis;
     try { analysis = await analyzeWebPage({url: n.url, title: n.title, text: page.text}); }
     catch (e) {
@@ -1958,11 +2033,16 @@ async function route(req, res, url) {
     const oldTags = parseFrontmatter(cur);
     writeExisting(rel, {
       // summary 只在非空时才写：空串在 render() 里表示删键，会把剪藏原有的摘要抹掉
+      // 标签合并口径必须和 /api/ai/analyze 一致：先给 AI 的标签留位置再截断。
+      // 原来是「已有 ∪ AI 再截 12 个」——剪藏每次重分析都并进最多 6 个 AI 标签，
+      // 第 2 次之后就满 12 个，此后 AI 结果整批被截掉，文件一个字不变却照样回 200，
+      // 前端把这次算出来的标签当「已写入」渲染，关掉面板就消失。
       fm: {...(analysis.summary ? {summary: analysis.summary} : {}), ...(analysis.keyPoints.length ? {keyPoints: analysis.keyPoints} : {}),
-        tags: [...new Set([...(oldTags.tags || []), ...analysis.tags])].slice(0, 12)},
+        tags: mergedTags(oldTags.tags, analysis.tags)},
       mtime: curMtime
     });
     return json(res, 200, {path: rel, analysis});
+    } finally { clipAnalyzing.delete(rel); }
   }
 
   // 快照原文：剪藏 HTML 不可信，CSP 封死脚本
@@ -2050,6 +2130,9 @@ async function route(req, res, url) {
       // news 模块抛的是带 status 的错误（501 未配 AI / 502 RSS 上游失败 / 409 状态不符）。
       // 一律塌成 500「服务器内部错误」会让用户分不清是配置错了还是服务坏了。
       if (e && Number.isInteger(e.status)) return json(res, e.status, {error: e.message});
+      // AI 侧失败（模型回散文导致 JSON 解析失败最常见）同样要带出可操作的原因
+      const s = aiStatusFor(e);
+      if (s) return json(res, s, {error: String(e.message || e)});
       throw e;
     } finally { releaseJob(gate); }
   }
@@ -2066,6 +2149,8 @@ async function route(req, res, url) {
       return json(res, 200, r);
     } catch (e) {
       if (e && Number.isInteger(e.status)) return json(res, e.status, {error: e.message});
+      const s = aiStatusFor(e);
+      if (s) return json(res, s, {error: String(e.message || e)});
       throw e;
     } finally { releaseJob(gate); }
   }
@@ -2102,6 +2187,19 @@ async function route(req, res, url) {
     return json(res, 200, job);
   }
 
+  // 取消任务：AI 卡在慢网关上一个任务能耗掉几分钟，而且期间所有 AI / 日报 / 平台同步
+  // 都是 409。没有这个入口，用户只能等超时（60s × 3 次）或重启容器。
+  if (/^\/api\/ai\/jobs\/[A-Za-z0-9_-]+\/cancel$/.test(p) && req.method === 'POST') {
+    const id = p.split('/')[4];
+    const job = index.job(id);
+    if (!job) return json(res, 404, {error: '没有这个任务'});
+    if (job.status !== 'running') return json(res, 200, {ok: false, message: '任务已经结束了'});
+    // cancelJob 只对自己进程里那个在跑的句柄生效：容器重启后 SQLite 里残留的 running 行
+    // 没有对应进程，硬说「已取消」会让前端以为停了、其实那行要等启动收口或超时兜底。
+    if (!cancelJob()) return json(res, 409, {error: '这个任务不在当前进程里运行（可能是上个实例留下的），等它超时后会被自动收口'});
+    return json(res, 200, {ok: true, message: '正在取消：当前这次模型调用会被中断，任务记为「任务已取消」'});
+  }
+
   // 已知路径但方法不对：回 405（带 Allow），别让调用方把「方法用错」读成「接口不存在」。
   // 原来所有未匹配的请求都是 404，前端一改方法就只能看到「没有这个接口」，排查方向全错。
   const KNOWN_API = new Set(['/api/data', '/api/version', '/api/health', '/api/session', '/api/login', '/api/logout',
@@ -2122,6 +2220,9 @@ async function route(req, res, url) {
 // readBody / pickModel 的 await，两个并发请求都能穿过检查 → 各自调一次模型、各写一份日报与选题，
 // 而且后完成者把闸置空，第三个请求又能进来。用 token 释放，避免 A 释放掉 B 的占位。
 let runningJob = null;
+// 单篇剪藏分析的进程内闸：这条链路不是 job（没有 runJob 的单飞闸），多标签页或连点两下会
+// 各自重新抓一次网页、各自调一次模型，后写完的把前一次的 summary/tags 覆盖掉。
+const clipAnalyzing = new Set();
 // 闸现在同时管 AI 任务、日报、平台同步和发布：一律回「已有 AI 任务在运行」会让用户在
 // 平台同步期间点 AI 分析时以为是 AI 出了错。按占用者给出具体名称。
 const JOB_LABEL = {
@@ -2154,8 +2255,14 @@ function runJob(kind, total, fn, opts = {}) {
   (async () => {
     let done = 0;
     const progress = () => { done++; index.updateJob(id, {done, message: `${done}/${total}`}); };
+    // 取消句柄：POST /api/ai/jobs/:id/cancel 会 abort 它，ai.mjs 里合成的信号立刻中断
+    // 正在跑的模型请求。没有它，慢网关上的任务只能等超时（每次 60s × 重试）并一直占着单飞闸。
+    const ctrl = beginJobCancel();
     try {
       const result = await fn(progress);
+      // 取消与「刚好做完」可能同时发生：已经取消的任务不能再写成 done，
+      // 否则前端看到「完成」，而结果其实是半截的（relate 的边只算了一半）。
+      assertNotAborted();
       index.updateJob(id, {status: 'done', done: total, message: '完成', result});
       // 语义边写进 SQLite：刷新页面、重启服务后仍然保留，直到下次 relate 覆盖。
       if (opts.cache && Array.isArray(result?.edges)) {
@@ -2165,6 +2272,7 @@ function runJob(kind, total, fn, opts = {}) {
     } catch (e) {
       index.updateJob(id, {status: 'error', error: String(e.message || e)});
     } finally {
+      endJobCancel(ctrl);
       releaseJob(gate);
       index.pruneJobs(); // 顺手清掉过期的任务记录，别让 /data 里的 jobs 表无限长
     }

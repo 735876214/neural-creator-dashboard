@@ -119,17 +119,28 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
       setState(s => ({...s, busy: false, ...r, msg: m}));
       onToast?.(m);
     }
-    catch (e) { setState(s => ({...s, busy: false, msg: '失败：' + e.message})); }
+    catch (e) {
+      // 超时要说人话：AbortSignal.timeout 抛的是 TimeoutError，直接拼 e.message 只会显示
+      // 「The operation was aborted due to timeout」，用户不知道后台可能还在跑。
+      const t = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+      setState(s => ({...s, busy: false, msg: '失败：' + (t
+        ? '请求超时没有响应（服务端可能仍在跑，稍后刷新看看）'
+        : e.message)}));
+    }
   };
   return <section className="an-section ai-panel">
     <h3><Icon name="agent" size={14}/>AI 分析 <em>AI insights</em></h3>
     {isPersonal && <div className="chip-row">
       <button className="pill ghost" disabled={state.busy} onClick={run(async () => {
-        const res = await fetch(apiUrl('/api/knowledge/analyze'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({id: node.id})});
-        const j = await res.json();
+        // 服务端最坏要 ~200 秒（抓取 20s + 模型 3 次 60s 重试 + 退避）：浏览器 fetch 默认
+        // 没有超时，反代/休眠把连接挂住时 busy 永远是 true，这排 AI 按钮就再也点不动了。
+        const res = await fetch(apiUrl('/api/knowledge/analyze'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({id: node.id}),
+          signal: AbortSignal.timeout(210000)});
+        const j = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
         markSelfWrite(); // 服务端已把 summary/tags 写回笔记 frontmatter
-        await refreshData();
+        // 写盘已经成功，刷新失败不该把这次操作报成「失败」（否则界面留着旧摘要/旧标签）。
+        await refreshData().catch(() => {});
         return {summary: j.analysis?.summary, tags: j.analysis?.tags};
       }, '网页分析已写回笔记')}>重新分析网页 <em>Re-analyze</em></button>
     </div>}
@@ -174,7 +185,11 @@ function AiPanel({graph, node, onGo, onToast, aiEnabled, embedEnabled: embedOn})
         return {msg: r.candidates?.length ? '候选选题：' + r.candidates.map(c => c.title).join('；') : '没有生成候选'};
       }, '选题候选已生成')}>生成选题 <em>Seed ideas</em></button>}
     </div>}
-    {state.busy && <p className="quiet">AI 正在处理…</p>}
+    {state.busy && <p className="quiet">AI 正在处理…
+      {/* 取消入口：任务卡在慢网关上时不用等超时，也不至于整块面板一直锁着 */}
+      <button className="pill ghost" style={{marginLeft: 8}} aria-label="取消当前 AI 任务 Cancel task"
+        onClick={async () => { const m = await cancelInflight(); setState(s2 => ({...s2, msg: m})); }}>取消 <em>Cancel</em></button>
+    </p>}
     {state.msg && <p className="quiet">{state.msg}</p>}
     {state.summary && <p className="ai-summary">{state.summary}</p>}
     {state.tags && <div className="chip-row">{state.tags.map(t => <span key={t} className="chip static" style={{'--kc': KINDS.tag.color}}>#{t}</span>)}</div>}
@@ -213,7 +228,10 @@ function AskBox({graph, node, onGo, aiEnabled}) {
       try {
         // 模型选择必须随请求发出去：服务端 pickModel(reqModel, 'ask') 优先用它，
         // 不发就等于下拉框选了个寂寞（回答仍由默认模型生成）。
-        const r = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question: q, model: model || pickedModel()})});
+        // 整库问答同样是长请求（服务端 60s 超时 + 2 次重试）：给一个比服务端更宽的上限，
+        // 不然前端先断，用户只看到「AI 暂时不可用」而服务端其实还在算。
+        const r = await fetch(apiUrl('/api/ai/ask'), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({question: q, model: model || pickedModel()}),
+          signal: AbortSignal.timeout(210000)});
         const j = await r.json();
         // 401 会话过期 / 500 网管报错 / 501 未启用 都返回 {error}：不判 r.ok 会显示成「（空）」
         if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
@@ -222,7 +240,11 @@ function AskBox({graph, node, onGo, aiEnabled}) {
         let local = [];
         try { local = askGraph(graph, q, node.id); }
         catch (e3) { setRes([{title: '检索出错', en: 'Search failed', tone: 'warn', text: String(e3.message || e3)}]); return; }
-        setRes([{title: 'AI 暂时不可用，本地检索结果', en: 'AI offline, local results', tone: 'warn', text: '', items: [], local}]);
+        // 上游原因必须传下去：服务端已经把 401/429/超时翻成人话（ai.mjs:upstreamError），
+        // 这里吞掉等于把「key 失效」「模型名写错」「网关超时」都显示成「AI 挂了」。
+        const t = e2?.name === 'TimeoutError' || e2?.name === 'AbortError';
+        setRes([{title: t ? 'AI 响应超时，本地检索结果' : 'AI 暂时不可用，本地检索结果', en: 'AI offline, local results', tone: 'warn',
+          text: String(t ? '超过 3 分钟没有响应' : (e2?.message || '')), items: [], local}]);
       }
     } else {
       setRes(askGraph(graph, q, node.id).map(c => ({...c, local: true})));
@@ -251,6 +273,19 @@ function AskBox({graph, node, onGo, aiEnabled}) {
   </div>;
 }
 
+// 正在等的任务 id：慢网关上一个人工任务能耗掉几分钟，原先只能干等（或者刷新页面，
+// 而刷新后服务端那个任务仍在占着闸）。有 id 就能在面板上点「取消」。
+let inflightJobId = null;
+async function cancelInflight() {
+  if (!inflightJobId) return '还没有可取消的任务（模型还没开始返回）';
+  try {
+    const res = await fetch(apiUrl('/api/ai/jobs/' + inflightJobId + '/cancel'), {method: 'POST'});
+    const j = await res.json().catch(() => ({}));
+    if (res.ok && j.ok) return '正在取消…';
+    return j.error || j.message || '取消失败';
+  } catch (e) { return '取消失败：' + e.message; }
+}
+
 function pollJob(id, tries = 120) {
   // 状态码要判：401/404/500 时 r.json() 拿到的是 {error}，status 为 undefined，
   // 不判状态码就会一直空转到 60 秒超时，还把「登录过期」报成「任务超时」。
@@ -260,13 +295,16 @@ function pollJob(id, tries = 120) {
     return body || {};
   });
   return (async () => {
-    for (let i = 0; i < tries; i++) {
-      const j = await tick();
-      if (j.status === 'done') return j;
-      if (j.status === 'error') throw new Error(j.error || '任务失败');
-      await new Promise(r => setTimeout(r, 500));
-    }
-    throw new Error('任务超时');
+    inflightJobId = id;
+    try {
+      for (let i = 0; i < tries; i++) {
+        const j = await tick();
+        if (j.status === 'done') return j;
+        if (j.status === 'error') throw new Error(j.error || '任务失败');
+        await new Promise(r => setTimeout(r, 500));
+      }
+      throw new Error('任务超时');
+    } finally { inflightJobId = null; }
   })();
 }
 

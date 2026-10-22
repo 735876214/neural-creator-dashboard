@@ -236,7 +236,7 @@ notes-vault/
 | `AI_PROTOCOL` | `openai` | 或 `anthropic` |
 | `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` | DeepSeek | chat 网关与默认模型 |
 | `AI_MODEL_ASK/ANALYZE/IDEAS/NEWS` | 回落 `AI_MODEL` | 任务级模型覆盖 |
-| `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_MODEL` / `EMBED_PROTOCOL` | 跟随 chat | embedding（DeepSeek 无 embedding，需另配，如硅基流动 bge-m3）；Cloudflare 方案还需 `CF_ACCOUNT_ID` |
+| `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_MODEL` / `EMBED_PROTOCOL` / `EMBED_DIM` | 跟随 chat | embedding（DeepSeek 无 embedding，需另配）：`EMBED_PROTOCOL` 取 `openai`（默认）/ `cloudflare`（还需 `CF_ACCOUNT_ID`）/ `gemini`（Google，`EMBED_DIM` 可截断维度）；留空按地址与模型名自动识别 |
 | `AI_TIMEOUT` / `AI_CONCURRENCY` | 60s / 4 | 单次 AI 调用超时（毫秒）与并发上限 |
 | `NEWS_SOURCE` / `NEWS_HOUR` / `NEWS_CRON` | 见上 | 热点日报 |
 | `NEWS_TZ_OFFSET` / `SYNC_TZ_OFFSET` | `8` | 日报与平台同步按哪个时区算「今天」（容器默认 UTC，必须设成 `8` 才是北京时间） |
@@ -333,7 +333,7 @@ Windows PowerShell 用 `$env:VAULT_DIR='.\examples\vault'; node server/index.mjs
 | 断网时的编辑刷新后消失 | 断网改动只存在当前页面的内存 outbox（不写 localStorage），恢复网络会自动补传；刷新/关页前页面会提示 |
 | 页面白屏、星核与星团消失 | 检查动画循环是否保持「先排帧、再 try 执行本帧」；控制台是否有异常 |
 | AI 区块不出现 | 服务端未配 `AI_API_KEY`，接口返回 501 属预期 |
-| 语义关联不可用 | 未配 `EMBED_MODEL` / `EMBED_API_KEY`（DeepSeek 不提供 embedding） |
+| 语义关联不可用 | 未配 `EMBED_MODEL` / `EMBED_API_KEY`（DeepSeek 不提供 embedding）；Gemini 报 `User location is not supported` 时是出口 IP 所在地区不被支持，换节点或改用其他 embedding 方案 |
 | 热点日报不生成 | 需要 AI key；当天已生成过；未到 `NEWS_HOUR`；`NEWS_CRON=0` |
 | 容器里 SQLite 报 disk I/O error | Docker Desktop 挂载卷的已知问题，compose 已用命名卷规避；见 `db.mjs` 头部注释 |
 | 构建产物里有私人数据 | `.gitignore` 只保护源码。公开部署前 `npm run import -- --reset`，并确认无 `config.local.js` |

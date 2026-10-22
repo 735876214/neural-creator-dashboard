@@ -98,7 +98,13 @@ export async function fetchPage(url) {
     if (res.status < 200 || res.status >= 300) throw new FetchError(`抓取失败：HTTP ${res.status}`);
     const type = String(res.headers['content-type'] || '');
     if (!/text\/html|application\/xhtml/i.test(type)) throw new FetchError(`只支持网页（HTML），实际类型：${type.split(';')[0] || '未知'}`);
-    const charset = (/charset=([\w-]+)/i.exec(type)?.[1] || 'utf-8').toLowerCase();
+    // 大量中文站只在 <meta charset="gbk"> 里声明编码，响应头只写 text/html：
+    // 兜底成 utf-8 会把整篇解成 U+FFFD，乱码写进知识库并喂给 AI。头里没写就看正文前 2KB。
+    let charset = (/charset=([\w-]+)/i.exec(type)?.[1] || '').toLowerCase();
+    if (!charset) {
+      const head = res.buf.subarray(0, 2048).toString('latin1');
+      charset = (/<meta[^>]+charset=["']?([\w-]+)/i.exec(head)?.[1] || 'utf-8').toLowerCase();
+    }
     // 原来把 GB 系页面按 latin1 解，产出的是拉丁乱码；utf-16 当 utf-8 解也是乱码。
     // 宁可不入库，也不要往知识库里写一坨乱码。
     if (/^(gb|gbk|gb2312|gb18030|big5|utf-16|utf-16le|utf-16be)/.test(charset)) {
